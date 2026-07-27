@@ -150,7 +150,6 @@ class InformationBriefingTests(unittest.TestCase):
             if targeted_status == "insufficient_evidence":
                 explorations.append(
                     {
-                        "topic_id": topic["topic_id"],
                         "status": "insufficient_evidence",
                         "reason": "搜索结果只谈相邻主题，不能回答记录中的问题",
                     }
@@ -158,7 +157,6 @@ class InformationBriefingTests(unittest.TestCase):
             else:
                 explorations.append(
                     {
-                        "topic_id": topic["topic_id"],
                         "status": "supported",
                         "finding": "公开资料给出了可核查的明确结果",
                         "details": ["样本为 100", "结果在 2026-07-15 发布"],

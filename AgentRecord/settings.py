@@ -9,6 +9,7 @@ import sys
 import uuid
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import yaml
 
@@ -35,6 +36,7 @@ def _load_config() -> dict:
 
 CONFIG = _load_config()
 CONFIG_DIR = _get_config_path().parent
+CURRENT_CONFIG_VERSION = 2
 
 
 def _configured_path(key: str, default: str) -> Path:
@@ -55,6 +57,16 @@ class ModelConfig:
     def models(cls) -> list[ModelDict]:
         return CONFIG.get("models", [])
 
+    @staticmethod
+    def _effective(model: ModelDict) -> ModelDict:
+        """Apply narrow provider defaults so preserved old configs stay reliable."""
+        effective = dict(model)
+        hostname = urlsplit(str(effective.get("api_url", ""))).hostname or ""
+        if hostname.casefold() == "api.deepseek.com":
+            effective.setdefault("json_mode", True)
+            effective.setdefault("max_tokens", 32768)
+        return effective
+
     @classmethod
     def get_model(cls, name_or_index: str | int | None = None) -> ModelDict:
         models = cls.models()
@@ -63,17 +75,17 @@ class ModelConfig:
         if name_or_index is None:
             name_or_index = CONFIG.get("current_model")
             if not name_or_index:
-                return models[0]
+                return cls._effective(models[0])
         if isinstance(name_or_index, int):
-            return models[name_or_index % len(models)]
+            return cls._effective(models[name_or_index % len(models)])
 
         name_lower = name_or_index.lower()
         for model in models:
             if model["name"].lower() == name_lower:
-                return model
+                return cls._effective(model)
         for model in models:
             if name_lower in model["name"].lower():
-                return model
+                return cls._effective(model)
         raise KeyError(f"未找到匹配模型 '{name_or_index}'")
 
     @classmethod
@@ -87,7 +99,7 @@ class ModelConfig:
     def next_after(cls, name: str) -> ModelDict:
         models = cls.models()
         index = cls.index_of(name)
-        return models[(index + 1) % len(models)]
+        return cls._effective(models[(index + 1) % len(models)])
 
     @classmethod
     def select(cls, name: str) -> ModelDict:
@@ -110,3 +122,37 @@ class ModelConfig:
         temp_path.replace(config_path)
         CONFIG["current_model"] = model["name"]
         return model
+
+
+def configuration_warnings() -> list[str]:
+    """Return actionable compatibility warnings without exposing secrets."""
+    warnings = []
+    version = CONFIG.get("config_version")
+    if version != CURRENT_CONFIG_VERSION:
+        warnings.append(
+            f"config.yaml 版本为 {version or '未声明'}，当前版本为 "
+            f"{CURRENT_CONFIG_VERSION}；已应用兼容默认值，请合并最新配置模板。"
+        )
+    for raw_model in ModelConfig.models():
+        hostname = urlsplit(str(raw_model.get("api_url", ""))).hostname or ""
+        if hostname.casefold() != "api.deepseek.com":
+            continue
+        missing = [
+            key for key in ("json_mode", "max_tokens") if key not in raw_model
+        ]
+        if missing:
+            warnings.append(
+                f"模型 {raw_model.get('name', '未命名')} 缺少 "
+                f"{', '.join(missing)}；本次已使用 DeepSeek 安全默认值，"
+                "请更新实际运行目录的 config.yaml。"
+            )
+    third_search = CONFIG.get("third_search", {})
+    try:
+        count = int(third_search.get("count", 10))
+    except (TypeError, ValueError):
+        count = 10
+    if count > 10:
+        warnings.append(
+            f"third_search.count={count} 超过有效上限 10；运行时会按 10 处理。"
+        )
+    return warnings

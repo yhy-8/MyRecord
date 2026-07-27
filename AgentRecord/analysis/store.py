@@ -1,8 +1,7 @@
-"""SQLite persistence for analysis runs and the long-lived personal profile.
+"""SQLite persistence for disposable analysis runs and Agent audit artifacts.
 
-The database is derived state. Markdown records remain the source of truth.
-The final schema stores the compact profile model together with validated-stage
-cache and request/search telemetry in Agent artifact payloads.
+The durable personal profile lives in ``AnalysisReports/Profile.md``.  SQLite
+keeps only rebuildable runs, sources, validated-stage cache and telemetry.
 """
 
 import datetime
@@ -17,14 +16,6 @@ from typing import Iterator, Sequence
 from .. import settings
 
 
-PROFILE_CATEGORIES = {
-    "viewpoint",
-    "principle",
-    "ideal",
-    "behavior_pattern",
-    "interest",
-}
-PROFILE_STATUSES = {"accepted", "rejected", "superseded"}
 RUN_STATUSES = {"running", "completed", "failed"}
 _SCHEMA_COLUMNS = {
     "analysis_runs": {
@@ -42,6 +33,8 @@ _SCHEMA_COLUMNS = {
         "last_seen_at",
     },
     "run_sources": {"run_id", "source_id"},
+}
+_LEGACY_PROFILE_COLUMNS = {
     "profile_entries": {
         "id", "run_id", "category", "title", "statement", "status",
         "confidence", "source_refs_json", "first_observed", "last_observed",
@@ -51,6 +44,7 @@ _SCHEMA_COLUMNS = {
         "id", "entry_id", "action", "replacement_entry_id", "created_at",
     },
 }
+_LEGACY_SCHEMA_COLUMNS = {**_SCHEMA_COLUMNS, **_LEGACY_PROFILE_COLUMNS}
 
 
 def _now() -> str:
@@ -66,7 +60,7 @@ def _loads(value: str) -> object:
 
 
 class AnalysisStore:
-    """Transactional access to disposable analysis state and durable feedback."""
+    """Transactional access to disposable analysis and audit state."""
 
     def __init__(self, path: Path | None = None):
         self.path = path or settings.ANALYSIS_DIR / ".analysis.sqlite3"
@@ -99,6 +93,7 @@ class AnalysisStore:
         # database is rejected without modification. No schema version or
         # migration state is stored.
         connection = sqlite3.connect(self.path, timeout=10)
+        connection.row_factory = sqlite3.Row
         try:
             tables = {
                 row[0]
@@ -110,10 +105,25 @@ class AnalysisStore:
                 )
             }
             if tables:
-                if tables != set(_SCHEMA_COLUMNS):
+                if tables == set(_LEGACY_SCHEMA_COLUMNS):
+                    for table, expected_columns in _LEGACY_SCHEMA_COLUMNS.items():
+                        actual_columns = {
+                            row[1]
+                            for row in connection.execute(
+                                f"PRAGMA table_info({table})"
+                            )
+                        }
+                        if actual_columns != expected_columns:
+                            raise RuntimeError(
+                                f"分析数据库表 {table} 结构不符合当前程序，"
+                                "无法安全导出旧人物画像。"
+                            )
+                    self._migrate_legacy_profiles(connection)
+                    tables = set(_SCHEMA_COLUMNS)
+                elif tables != set(_SCHEMA_COLUMNS):
                     raise RuntimeError(
                         "分析数据库结构不符合当前程序。"
-                        "本项目不提供数据库迁移或兼容；请确认无需保留后，"
+                        "只支持从上一版人物画像表安全迁移；请确认无需保留后，"
                         f"手动删除 {self.path} 及同名 -wal、-shm 文件再启动。"
                     )
                 for table, expected_columns in _SCHEMA_COLUMNS.items():
@@ -185,41 +195,85 @@ class AnalysisStore:
                     PRIMARY KEY(run_id, source_id)
                 );
 
-                CREATE TABLE profile_entries (
-                    id TEXT PRIMARY KEY,
-                    run_id TEXT NOT NULL REFERENCES analysis_runs(id) ON DELETE CASCADE,
-                    category TEXT NOT NULL,
-                    title TEXT NOT NULL,
-                    statement TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    confidence REAL NOT NULL,
-                    source_refs_json TEXT NOT NULL,
-                    first_observed TEXT NOT NULL,
-                    last_observed TEXT NOT NULL,
-                    created_by TEXT NOT NULL,
-                    supersedes_id TEXT REFERENCES profile_entries(id),
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-
-                CREATE TABLE profile_feedback (
-                    id TEXT PRIMARY KEY,
-                    entry_id TEXT NOT NULL REFERENCES profile_entries(id),
-                    action TEXT NOT NULL,
-                    replacement_entry_id TEXT REFERENCES profile_entries(id),
-                    created_at TEXT NOT NULL
-                );
-
                 CREATE INDEX idx_runs_period
                     ON analysis_runs(kind, period_start, period_end, origin, status);
-                CREATE INDEX idx_profile_active
-                    ON profile_entries(status, last_observed, updated_at DESC);
-                CREATE INDEX idx_profile_run
-                    ON profile_entries(run_id, status, category);
-                CREATE INDEX idx_profile_feedback
-                    ON profile_feedback(entry_id, created_at DESC);
                 """
             )
+
+    def _migrate_legacy_profiles(self, connection: sqlite3.Connection) -> None:
+        """Back up, export active profile history to Markdown, then drop old tables."""
+        backup_path = self.path.with_name(
+            f"{self.path.stem}.pre-profile-markdown.sqlite3"
+        )
+        if not backup_path.exists():
+            backup_connection = sqlite3.connect(backup_path)
+            try:
+                connection.backup(backup_connection)
+            finally:
+                backup_connection.close()
+
+        entry_rows = connection.execute(
+            """
+            SELECT p.*, r.period_start, r.period_end
+            FROM profile_entries AS p
+            JOIN analysis_runs AS r ON r.id = p.run_id
+            WHERE r.status = 'completed'
+              AND (
+                p.status IN ('accepted', 'superseded')
+                OR p.created_by = 'user'
+                OR EXISTS (
+                    SELECT 1 FROM profile_feedback AS f
+                    WHERE f.entry_id = p.id AND f.action = 'reject'
+                )
+              )
+            ORDER BY p.created_at, p.id
+            """
+        ).fetchall()
+        entries = []
+        included_ids = set()
+        for row in entry_rows:
+            item = dict(row)
+            try:
+                refs = json.loads(item.pop("source_refs_json"))
+            except (TypeError, json.JSONDecodeError) as error:
+                raise RuntimeError(
+                    f"旧人物画像条目 {item.get('id', '')} 的来源无法解析"
+                ) from error
+            item["source_refs"] = refs
+            item.pop("status", None)
+            entries.append(item)
+            included_ids.add(str(item["id"]))
+
+        feedback = [
+            dict(row)
+            for row in connection.execute(
+                """
+                SELECT * FROM profile_feedback
+                ORDER BY created_at, id
+                """
+            ).fetchall()
+            if str(row["entry_id"]) in included_ids
+            and (
+                row["replacement_entry_id"] is None
+                or str(row["replacement_entry_id"]) in included_ids
+            )
+        ]
+        from .profile_store import ProfileStore
+
+        ProfileStore(self.path.parent / "Profile.md").merge_legacy(
+            entries, feedback
+        )
+        connection.execute("PRAGMA foreign_keys = OFF")
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute("DROP TABLE profile_feedback")
+            connection.execute("DROP TABLE profile_entries")
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.execute("PRAGMA foreign_keys = ON")
 
     def start_run(
         self,
@@ -287,36 +341,6 @@ class AnalysisStore:
         if status not in RUN_STATUSES:
             raise ValueError(f"无效运行状态: {status}")
         with self.transaction() as connection:
-            if status == "completed":
-                stale = connection.execute(
-                    """
-                    SELECT child.supersedes_id
-                    FROM profile_entries AS child
-                    JOIN profile_entries AS parent ON parent.id = child.supersedes_id
-                    WHERE child.run_id = ? AND child.status = 'accepted'
-                      AND child.supersedes_id IS NOT NULL
-                      AND parent.status != 'accepted'
-                    LIMIT 1
-                    """,
-                    (run_id,),
-                ).fetchone()
-                if stale:
-                    raise RuntimeError(
-                        "分析运行期间人物画像已被其他操作更新，本次候选不能覆盖新状态"
-                    )
-                connection.execute(
-                    """
-                    UPDATE profile_entries
-                    SET status = 'superseded', updated_at = ?
-                    WHERE status = 'accepted' AND id IN (
-                        SELECT supersedes_id
-                        FROM profile_entries
-                        WHERE run_id = ? AND status = 'accepted'
-                          AND supersedes_id IS NOT NULL
-                    )
-                    """,
-                    (_now(), run_id),
-                )
             connection.execute(
                 """
                 UPDATE analysis_runs
@@ -505,209 +529,3 @@ class AnalysisStore:
         finally:
             connection.close()
         return [dict(row) for row in rows]
-
-    def active_profiles(
-        self, period_end: str, limit: int | None = None
-    ) -> list[dict]:
-        connection = self._connect()
-        try:
-            query = """
-                SELECT p.* FROM profile_entries AS p
-                JOIN analysis_runs AS r ON r.id = p.run_id
-                WHERE p.last_observed <= ?
-                  AND r.period_end <= ?
-                  AND r.status = 'completed'
-                  AND (
-                    p.status = 'accepted'
-                    OR (
-                      p.status = 'superseded'
-                      AND (
-                        EXISTS (
-                          SELECT 1 FROM profile_feedback AS f
-                          WHERE f.entry_id = p.id
-                            AND f.action IN ('accept', 'correct')
-                            AND substr(f.created_at, 1, 10) > ?
-                        )
-                        OR (
-                          NOT EXISTS (
-                            SELECT 1 FROM profile_feedback AS f
-                            WHERE f.entry_id = p.id
-                              AND f.action IN ('accept', 'correct')
-                          )
-                          AND NOT EXISTS (
-                            SELECT 1 FROM profile_entries AS child
-                            JOIN analysis_runs AS child_run
-                              ON child_run.id = child.run_id
-                            WHERE child.supersedes_id = p.id
-                              AND child.created_by = 'retrospective'
-                              AND child_run.status = 'completed'
-                              AND child_run.period_end <= ?
-                          )
-                        )
-                      )
-                    )
-                    OR (
-                      p.status = 'rejected'
-                      AND EXISTS (
-                        SELECT 1 FROM profile_feedback AS f
-                        WHERE f.entry_id = p.id AND f.action = 'reject'
-                          AND substr(f.created_at, 1, 10) > ?
-                      )
-                    )
-                  )
-                  AND (
-                    p.created_by != 'user'
-                    OR substr(p.created_at, 1, 10) <= ?
-                  )
-                ORDER BY p.updated_at DESC
-                """
-            parameters: list[object] = [
-                period_end,
-                period_end,
-                period_end,
-                period_end,
-                period_end,
-                period_end,
-            ]
-            if limit is not None:
-                query += " LIMIT ?"
-                parameters.append(limit)
-            rows = connection.execute(query, parameters).fetchall()
-        finally:
-            connection.close()
-        return [self._profile_dict(row) for row in rows]
-
-    def save_profile_entries(
-        self,
-        run_id: str,
-        entries: Sequence[dict],
-        decisions: dict[str, str],
-    ) -> dict[str, str]:
-        id_map: dict[str, str] = {}
-        with self.transaction() as connection:
-            now = _now()
-            for entry in entries:
-                temp_id = str(entry["temp_id"])
-                status = decisions.get(temp_id, "rejected")
-                if status not in {"accepted", "rejected"}:
-                    raise ValueError(f"无效画像决定: {status}")
-                entry_id = uuid.uuid4().hex
-                supersedes_id = entry.get("supersedes_id") or None
-                connection.execute(
-                    """
-                    INSERT INTO profile_entries(
-                        id, run_id, category, title, statement, status, confidence,
-                        source_refs_json, first_observed, last_observed, created_by,
-                        supersedes_id, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'retrospective', ?, ?, ?)
-                    """,
-                    (
-                        entry_id,
-                        run_id,
-                        entry["category"],
-                        entry["title"],
-                        entry["statement"],
-                        status,
-                        float(entry["confidence"]),
-                        _json(entry["source_refs"]),
-                        entry["first_observed"],
-                        entry["last_observed"],
-                        supersedes_id,
-                        now,
-                        now,
-                    ),
-                )
-                id_map[temp_id] = entry_id
-        return id_map
-
-    def feedback_candidates(self, limit: int = 20) -> list[dict]:
-        connection = self._connect()
-        try:
-            rows = connection.execute(
-                """
-                SELECT p.*, r.period_start, r.period_end
-                FROM profile_entries AS p
-                JOIN analysis_runs AS r ON r.id = p.run_id
-                WHERE p.status = 'accepted' AND r.status = 'completed'
-                ORDER BY r.completed_at DESC, p.updated_at DESC LIMIT ?
-                """,
-                (limit,),
-            ).fetchall()
-        finally:
-            connection.close()
-        return [self._profile_dict(row) for row in rows]
-
-    def record_user_feedback(
-        self,
-        entry_id: str,
-        action: str,
-        *,
-        title: str = "",
-        body: str = "",
-    ) -> str | None:
-        if action not in {"accept", "reject", "correct"}:
-            raise ValueError(f"未知反馈操作: {action}")
-        with self.transaction() as connection:
-            entry = connection.execute(
-                """
-                SELECT p.* FROM profile_entries AS p
-                JOIN analysis_runs AS r ON r.id = p.run_id
-                WHERE p.id = ? AND p.status = 'accepted'
-                  AND r.status = 'completed'
-                """,
-                (entry_id,),
-            ).fetchone()
-            if not entry:
-                raise ValueError(f"人物画像条目不存在或已不是可反馈状态: {entry_id}")
-            now = _now()
-            replacement_id = None
-            if action == "reject":
-                connection.execute(
-                    "UPDATE profile_entries SET status='rejected', updated_at=? WHERE id=?",
-                    (now, entry_id),
-                )
-            else:
-                replacement_id = uuid.uuid4().hex
-                connection.execute(
-                    """
-                    INSERT INTO profile_entries(
-                        id, run_id, category, title, statement, status, confidence,
-                        source_refs_json, first_observed, last_observed, created_by,
-                        supersedes_id, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, 'accepted', 1.0, ?, ?, ?, 'user', ?, ?, ?)
-                    """,
-                    (
-                        replacement_id,
-                        entry["run_id"],
-                        entry["category"],
-                        title.strip() or entry["title"],
-                        body.strip() or entry["statement"],
-                        entry["source_refs_json"],
-                        entry["first_observed"],
-                        entry["last_observed"],
-                        entry_id,
-                        now,
-                        now,
-                    ),
-                )
-                connection.execute(
-                    "UPDATE profile_entries SET status='superseded', updated_at=? WHERE id=?",
-                    (now, entry_id),
-                )
-            connection.execute(
-                """
-                INSERT INTO profile_feedback(
-                    id, entry_id, action, replacement_entry_id, created_at
-                ) VALUES (?, ?, ?, ?, ?)
-                """,
-                (uuid.uuid4().hex, entry_id, action, replacement_id, now),
-            )
-        return replacement_id
-
-    @staticmethod
-    def _profile_dict(row: sqlite3.Row) -> dict:
-        item = dict(row)
-        item["source_refs"] = _loads(item.pop("source_refs_json"))
-        item["body"] = item["statement"]
-        item["node_type"] = item["category"]
-        return item

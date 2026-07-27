@@ -32,7 +32,7 @@ _MAX_TASK_REPAIRS = 1
 _MAX_EVIDENCE_PER_QUERY = 5
 _PLANNER_MAX_TOKENS = 1600
 _COLLECTOR_MAX_TOKENS = 8000
-_PIPELINE_VERSION = 2
+_PIPELINE_VERSION = 3
 
 
 class _InformationError(RuntimeError):
@@ -734,15 +734,11 @@ def _normalize_collector_payload(
         )
 
     raw_explorations = payload.get("explorations")
-    if not isinstance(raw_explorations, list):
-        raise ValueError("explorations 必须是数组")
-    expected_ids = [item["topic_id"] for item in targeted]
-    actual_ids = [
-        str(item.get("topic_id", "")).strip()
-        for item in raw_explorations
-        if isinstance(item, dict)
-    ]
-    if len(actual_ids) != len(raw_explorations) or actual_ids != expected_ids:
+    if (
+        not isinstance(raw_explorations, list)
+        or len(raw_explorations) != len(targeted)
+        or any(not isinstance(item, dict) for item in raw_explorations)
+    ):
         raise ValueError("explorations 必须按输入顺序逐项返回，不得遗漏或增加")
     explorations = []
     for index, (item, topic) in enumerate(zip(raw_explorations, targeted), 1):
@@ -869,7 +865,7 @@ def _collector_prompt(
 - 每条 highlight 分开填写 change、details、why；details 应列出可核查的数字、实体、日期、规则或实验结果，不能用字符填充或“影响深远”等宏大套话代替。
 - 会议即将举行、数据即将公布、报纸出版、市场关注或积极评价本身不构成 highlight。
 - highlights 只能引用 kind=general 的 evidence_ids。若证据 previously_used=true，只有存在实质更新时才可使用，并填写 new_since_prior。
-- explorations 必须按定向选题顺序逐项返回。证据确实回答问题时 status=supported，并只引用该 topic_id 的 evidence_ids；证据泛泛、不相关或不足时 status=insufficient_evidence，说明原因，不得硬写结论。
+- explorations 必须按定向选题顺序逐项返回，不要生成 topic_id。证据确实回答问题时 status=supported，并只引用当前位置主题的 evidence_ids；证据泛泛、不相关或不足时 status=insufficient_evidence，说明原因，不得硬写结论。
 - followups 只保存未来真正值得核查的具体问题；它不会成为以后选题依据。
 - 不得输出 URL、Markdown、R-* 或自行编造证据 ID，中控负责渲染来源和记录依据。
 - 只输出以下 JSON：
@@ -883,7 +879,6 @@ def _collector_prompt(
     "evidence_ids":["I-Q001-001"]
   }}],
   "explorations":[{{
-    "topic_id":"T001",
     "status":"supported",
     "finding":"核查得到的具体结论",
     "details":["细节1","细节2"],

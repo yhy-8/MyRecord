@@ -83,8 +83,17 @@ def _show_automation_status() -> None:
         )
 
 
+def _show_configuration_warnings() -> None:
+    from .. import settings
+    from .terminal import console
+
+    for warning in settings.configuration_warnings():
+        console.print(f"[yellow][!] {warning}[/yellow]")
+
+
 def main() -> None:
     from ..logging_config import configure_logging
+    from .. import settings
 
     configure_logging()
     action = next(
@@ -92,8 +101,11 @@ def main() -> None:
         "interactive",
     )
     logger.info("application_started action=%s", action)
+    for warning in settings.configuration_warnings():
+        logger.warning("configuration_warning detail=%s", warning)
     if _handle_process_action(sys.argv[1:]):
         return
+    _show_configuration_warnings()
     _show_automation_status()
     from .app import run_interactive
 

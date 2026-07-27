@@ -14,6 +14,7 @@ from ..analysis import (
     launch_automation_retry,
     summarize_diary,
 )
+from ..analysis.profile_store import ProfileStore
 from ..analysis.store import AnalysisStore
 from .report_jobs import manual_report_jobs
 from .terminal import console, post_notification, safe_input, show_view_help
@@ -267,7 +268,8 @@ def _handle_status() -> None:
 
 def _handle_feedback() -> None:
     try:
-        store = AnalysisStore()
+        AnalysisStore()  # Ensures a legacy SQLite profile is exported once.
+        store = ProfileStore()
         nodes = store.feedback_candidates()
     except Exception as error:
         console.print(

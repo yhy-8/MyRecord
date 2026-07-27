@@ -1,8 +1,8 @@
-"""Agent and validation contract for the report's retrospective section."""
+"""Structured semantic contract for the report's retrospective section."""
 
 import re
 
-from .base import AgentPipelineError, AgentSpec, cited_source_ids, confidence
+from .base import AgentPipelineError, AgentSpec, confidence
 
 
 PROFILE_CATEGORIES = {
@@ -22,37 +22,68 @@ SPEC = AgentSpec(
     writable_node_types=frozenset(PROFILE_CATEGORIES),
     writable_relation_types=frozenset(),
     allowed_tools=frozenset(),
-    instructions="""生成报告第一板块“整理与回顾”的正文，并提出少量值得长期保存的人物画像更新。
-正文必须忠实回顾本周期做过什么、关注点如何分配，以及观点、理念、理想或行为模式出现了怎样的变化。行为分析属于事实整理的一部分，但不得把时间先后写成因果，不得心理诊断，不得给出行为教练式命令。每个事实或判断所在段落都必须就近引用输入中提供的 [R-YYYYMMDD-NNN-内容哈希]；旧数据的 ID 可能没有哈希后缀，只能原样复制实际输入 ID。
+    instructions="""生成报告第一板块“整理与回顾”的语义内容，并提出少量值得长期保存的人物画像更新。
+内容必须忠实回顾本周期做过什么、关注点如何分配，以及观点、理念、理想或行为模式出现了怎样的变化。行为分析属于事实整理的一部分，但不得把时间先后写成因果，不得心理诊断，不得给出行为教练式命令。
+不要生成 Markdown 标题、引用标点或来源索引。把正文拆成少量 section，每个 paragraph 只填写自然语言 text，并在 source_refs 数组中原样选择直接支持该段的输入来源 ID；中控负责标题、[R-*] 引用和排版。每段必须有来源，不能自行编造、缩写或扩展来源 ID。
 历史画像只用于比较此前状态；不得使用晚于报告周期结束的内容。新的画像条目只保存相对稳定或反复出现的内容，不保存一次性事件、任务、外部事实或 AI 自己的建议。supersedes_id 只能复制输入中的 P 三位短别名；没有明确变化时为 null。
-只返回 JSON：{"markdown":"不含一、二级标题的第一板块正文","profile_entries":[{"temp_id":"p1","category":"viewpoint|principle|ideal|behavior_pattern|interest","title":"...","statement":"...","confidence":0到1,"source_refs":["R-..."],"supersedes_id":null}]}。""",
+不要生成 temp_id，中控会为候选分配临时 ID。
+只返回 JSON：{"sections":[{"title":"小节标题，可为空","paragraphs":[{"text":"一个自然语言段落","source_refs":["R-..."]}]}],"profile_entries":[{"category":"viewpoint|principle|ideal|behavior_pattern|interest","title":"...","statement":"...","confidence":0到1,"source_refs":["R-..."],"supersedes_id":null}]}。""",
 )
 
 
-def section_errors(markdown: str, allowed_source_ids: set[str]) -> list[str]:
-    errors = []
-    if not markdown.strip():
-        errors.append("整理与回顾正文为空")
-        return errors
-    if re.search(r"^#{1,2}\s", markdown, re.MULTILINE):
-        errors.append("整理与回顾包含一、二级标题")
-    if "```" in markdown:
-        errors.append("整理与回顾包含代码围栏")
-    if len(markdown) > 24000:
-        errors.append("整理与回顾正文超过 24000 字符")
-    cited = cited_source_ids(markdown)
-    unknown = cited - allowed_source_ids
-    if unknown:
-        errors.append("整理与回顾引用未知来源: " + ", ".join(sorted(unknown)))
-    for paragraph in re.split(r"\n\s*\n", markdown.strip()):
-        content = paragraph.strip()
-        if not content or content.startswith("### "):
-            continue
-        if not cited_source_ids(content):
-            preview = re.sub(r"\s+", " ", content)[:160]
-            errors.append(f"整理与回顾存在没有来源引用的段落：{preview}")
-            break
-    return errors
+def _plain_text(value: object) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def _validated_sections(
+    payload: dict, allowed_source_ids: set[str]
+) -> tuple[list[dict], str]:
+    raw_sections = payload.get("sections", [])
+    if not isinstance(raw_sections, list) or not 1 <= len(raw_sections) <= 8:
+        raise AgentPipelineError("Retrospective sections 必须是一至八项数组")
+    sections = []
+    total_length = 0
+    for raw_section in raw_sections:
+        if not isinstance(raw_section, dict):
+            raise AgentPipelineError("Retrospective section 必须是对象")
+        title = _plain_text(raw_section.get("title"))
+        if len(title) > 200:
+            raise AgentPipelineError("Retrospective 小节标题过长")
+        raw_paragraphs = raw_section.get("paragraphs", [])
+        if not isinstance(raw_paragraphs, list) or not 1 <= len(raw_paragraphs) <= 8:
+            raise AgentPipelineError("Retrospective paragraphs 必须是一至八项数组")
+        paragraphs = []
+        for raw_paragraph in raw_paragraphs:
+            if not isinstance(raw_paragraph, dict):
+                raise AgentPipelineError("Retrospective paragraph 必须是对象")
+            text = _plain_text(raw_paragraph.get("text"))
+            refs = raw_paragraph.get("source_refs", [])
+            if not text:
+                raise AgentPipelineError("Retrospective paragraph text 为空")
+            if len(text) > 4000:
+                raise AgentPipelineError("Retrospective 单段超过 4000 字符")
+            if not isinstance(refs, list) or not refs:
+                raise AgentPipelineError("Retrospective 每段必须选择 source_refs")
+            if any(
+                not isinstance(ref, str) or ref not in allowed_source_ids
+                for ref in refs
+            ):
+                raise AgentPipelineError("Retrospective paragraph 包含未知来源")
+            normalized_refs = list(dict.fromkeys(refs))
+            paragraphs.append({"text": text, "source_refs": normalized_refs})
+            total_length += len(text)
+        sections.append({"title": title, "paragraphs": paragraphs})
+    if total_length > 24000:
+        raise AgentPipelineError("Retrospective 正文超过 24000 字符")
+
+    rendered = []
+    for section in sections:
+        if section["title"]:
+            rendered.append(f"### {section['title']}")
+        for paragraph in section["paragraphs"]:
+            citations = ", ".join(paragraph["source_refs"])
+            rendered.append(f"{paragraph['text']} [{citations}]")
+    return sections, "\n\n".join(rendered)
 
 
 def validate(
@@ -63,17 +94,11 @@ def validate(
     visible_profile_ids: set[str],
     visible_profiles: dict[str, dict] | None = None,
 ) -> tuple[str, list[dict]]:
-    markdown = payload.get("markdown", "")
-    if not isinstance(markdown, str):
-        raise AgentPipelineError("Retrospective markdown 必须是字符串")
-    errors = section_errors(markdown, allowed_source_ids)
-    if errors:
-        raise AgentPipelineError("；".join(errors))
+    _, markdown = _validated_sections(payload, allowed_source_ids)
     raw_entries = payload.get("profile_entries", [])
     if not isinstance(raw_entries, list) or len(raw_entries) > 12:
         raise AgentPipelineError("Retrospective profile_entries 必须是不超过 12 项的数组")
     entries = []
-    seen = set()
     superseded = set()
     seen_signatures = set()
     existing_signatures = {
@@ -84,17 +109,15 @@ def validate(
         ): profile_id
         for profile_id, profile in (visible_profiles or {}).items()
     }
-    for raw in raw_entries:
+    for index, raw in enumerate(raw_entries, 1):
         if not isinstance(raw, dict):
             raise AgentPipelineError("人物画像条目必须是对象")
-        temp_id = str(raw.get("temp_id", "")).strip()
+        temp_id = f"p{index}"
         category = str(raw.get("category", "")).strip()
         title = str(raw.get("title", "")).strip()
         statement = str(raw.get("statement", "")).strip()
         refs = raw.get("source_refs", [])
         supersedes_id = raw.get("supersedes_id") or None
-        if not temp_id or temp_id in seen:
-            raise AgentPipelineError("人物画像 temp_id 为空或重复")
         if category not in PROFILE_CATEGORIES:
             raise AgentPipelineError("人物画像 category 无效")
         if not title or not statement:
@@ -134,8 +157,7 @@ def validate(
                 "supersedes_id": supersedes_id,
             }
         )
-        seen.add(temp_id)
         seen_signatures.add(signature)
         if supersedes_id:
             superseded.add(supersedes_id)
-    return markdown.strip(), entries
+    return markdown, entries

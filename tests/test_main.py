@@ -190,7 +190,9 @@ class MainCommandTests(unittest.TestCase):
                 "body": "原内容",
             }
         ]
-        with patch("AgentRecord.cli.commands.AnalysisStore", return_value=store), patch(
+        with patch("AgentRecord.cli.commands.AnalysisStore"), patch(
+            "AgentRecord.cli.commands.ProfileStore", return_value=store
+        ), patch(
             "AgentRecord.cli.commands.safe_input",
             side_effect=["1", "3", "新洞见", "新内容"],
         ):
@@ -212,7 +214,9 @@ class MainCommandTests(unittest.TestCase):
             }
         ]
         store.record_user_feedback.side_effect = ValueError("画像已被其他操作更新")
-        with patch("AgentRecord.cli.commands.AnalysisStore", return_value=store), patch(
+        with patch("AgentRecord.cli.commands.AnalysisStore"), patch(
+            "AgentRecord.cli.commands.ProfileStore", return_value=store
+        ), patch(
             "AgentRecord.cli.commands.safe_input", side_effect=["1", "1"]
         ), patch("AgentRecord.cli.commands.console.print") as console_print:
             commands._handle_feedback()

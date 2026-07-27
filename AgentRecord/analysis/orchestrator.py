@@ -34,16 +34,20 @@ from .context import (
     _referenced_source_records,
     _log_without_summary,
 )
+from .profile_store import ProfileStore
 from .store import AnalysisStore
 
 
 logger = logging.getLogger(__name__)
 _LONG_ID_PATTERN = re.compile(r"(?<![0-9a-f])[0-9a-f]{32}(?![0-9a-f])")
 _MAX_AGENT_ATTEMPTS = 3
+_MAX_STRUCTURE_REPAIRS = 2
+_MAX_CONTENT_REVISIONS = 1
+_MAX_GENERATOR_ATTEMPTS = 1 + _MAX_STRUCTURE_REPAIRS + _MAX_CONTENT_REVISIONS
 _MAX_AGENT_INPUT_CHARACTERS = 120000
 _MAX_RECORD_CHUNK_CHARACTERS = 30000
 _MAX_PROFILE_CONTEXT_CHARACTERS = 24000
-_PIPELINE_VERSION = 6
+_PIPELINE_VERSION = 7
 
 
 def _analysis_config_signature(model_config: settings.ModelDict) -> dict:
@@ -162,11 +166,21 @@ def summarize_diary(date: str, model_config: settings.ModelDict) -> tuple[str, b
         )
         if not success:
             return summary, False
+        summary = summary.strip()
+        fenced = re.fullmatch(
+            r"```(?:markdown|md)?\s*\n?(.*?)\n?```",
+            summary,
+            re.DOTALL | re.IGNORECASE,
+        )
+        if fenced:
+            summary = fenced.group(1).strip()
+        summary = re.sub(r"</?summary>", "", summary, flags=re.IGNORECASE).strip()
+        lines = summary.splitlines()
+        if lines and re.fullmatch(r"#{1,6}\s+.*", lines[0].strip()):
+            summary = "\n".join(lines[1:]).strip()
         errors = []
         if not summary.strip() or summary.strip() == "(AI 未给出最终回答)":
             errors.append("总结为空")
-        if summary.lstrip().startswith(("```", "# ")) or "<summary>" in summary:
-            errors.append("总结包含标题、代码围栏或 summary 标签")
         if not errors:
             break
         if attempt == _MAX_AGENT_ATTEMPTS:
@@ -262,6 +276,7 @@ def _revision_context(
     feedback: object,
     *,
     source: str,
+    maximum_attempts: int = _MAX_AGENT_ATTEMPTS,
 ) -> dict:
     """Build the common correction suffix while keeping the original prompt stable."""
     def model_visible(value: object) -> object:
@@ -279,7 +294,7 @@ def _revision_context(
 
     return {
         "attempt": attempt,
-        "maximum_attempts": _MAX_AGENT_ATTEMPTS,
+        "maximum_attempts": maximum_attempts,
         "feedback_source": source,
         "problems_to_fix": model_visible(feedback),
         "rejected_previous_output": model_visible(previous_output),
@@ -413,6 +428,7 @@ def _review_feedback(payload: dict) -> dict:
         "required_changes": payload.get("required_changes", []),
         "unsupported_claims": payload.get("unsupported_claims", []),
         "entry_decisions": payload.get("entry_decisions", []),
+        "topic_decisions": payload.get("topic_decisions", []),
     }
 
 
@@ -425,12 +441,15 @@ def _review(
     store: AnalysisStore,
     run_id: str,
     *,
+    topic_ids: set[str] | None = None,
     attempt_budget: list[int] | None = None,
-) -> tuple[bool, dict[str, str], list[str], dict]:
+) -> tuple[bool, dict[str, str], dict[str, str], list[str], dict]:
+    expected_topic_ids = topic_ids or set()
     review_input = {
         "mode": mode,
         "section": section_payload,
         "valid_profile_temp_ids": sorted(entry_ids),
+        "valid_research_topic_ids": sorted(expected_topic_ids),
         "review_context": review_context,
     }
     payload, result = _validated_agent_call(
@@ -438,7 +457,9 @@ def _review(
         "审查该板块；逐项检查核心判断和来源，只报告会影响真实性、可追溯性或交付质量的实质问题。",
         review_input,
         lambda candidate: reviewer.validate(
-            candidate, expected_entry_ids=entry_ids
+            candidate,
+            expected_entry_ids=entry_ids,
+            expected_topic_ids=expected_topic_ids,
         ),
         model_config,
         store,
@@ -466,8 +487,11 @@ def _retrospective_section(
 ) -> tuple[str, list[dict], dict[str, str]]:
     revision_context = None
     last_feedback: list[str] = []
-    review_attempt_budget = [_MAX_AGENT_ATTEMPTS]
-    for attempt in range(1, _MAX_AGENT_ATTEMPTS + 1):
+    attempt = 0
+    structure_repairs = 0
+    content_revisions = 0
+    while attempt < _MAX_GENERATOR_ATTEMPTS:
+        attempt += 1
         try:
             payload = _call_agent(
                 retrospective.SPEC,
@@ -479,13 +503,18 @@ def _retrospective_section(
                 revision_context=revision_context,
             )
         except AgentOutputError as error:
-            if attempt == _MAX_AGENT_ATTEMPTS:
+            if (
+                structure_repairs >= _MAX_STRUCTURE_REPAIRS
+                or attempt == _MAX_GENERATOR_ATTEMPTS
+            ):
                 raise
+            structure_repairs += 1
             revision_context = _revision_context(
                 attempt + 1,
                 error.response,
                 [str(error)],
                 source="中控 JSON 解析",
+                maximum_attempts=_MAX_GENERATOR_ATTEMPTS,
             )
             continue
         payload = _replace_profile_aliases(payload, profile_aliases)
@@ -501,17 +530,26 @@ def _retrospective_section(
             _save_validation_failure(
                 store, run_id, retrospective.SPEC.name, payload, error
             )
-            if attempt == _MAX_AGENT_ATTEMPTS:
+            if (
+                structure_repairs >= _MAX_STRUCTURE_REPAIRS
+                or attempt == _MAX_GENERATOR_ATTEMPTS
+            ):
                 raise
+            structure_repairs += 1
             revision_context = _revision_context(
                 attempt + 1,
                 payload,
                 [str(error)],
                 source="中控确定性校验",
+                maximum_attempts=_MAX_GENERATOR_ATTEMPTS,
             )
             continue
 
-        normalized_payload = {"markdown": markdown, "profile_entries": entries}
+        normalized_payload = {
+            "markdown": markdown,
+            "structured_sections": payload.get("sections", []),
+            "profile_entries": entries,
+        }
         cited_ids = cited_source_ids(markdown)
         cited_ids.update(ref for entry in entries for ref in entry["source_refs"])
         reviewable_records = [
@@ -527,7 +565,7 @@ def _retrospective_section(
             ],
             "historical_profiles": base_input["historical_profiles"],
         }
-        passed, decisions, last_feedback, review_payload = _review(
+        passed, decisions, _, last_feedback, review_payload = _review(
             "retrospective_review",
             normalized_payload,
             {entry["temp_id"] for entry in entries},
@@ -535,7 +573,6 @@ def _retrospective_section(
             model_config,
             store,
             run_id,
-            attempt_budget=review_attempt_budget,
         )
         if passed:
             store.save_artifact(
@@ -555,13 +592,21 @@ def _retrospective_section(
         _save_validation_failure(
             store, run_id, retrospective.SPEC.name, normalized_payload, error
         )
-        if attempt == _MAX_AGENT_ATTEMPTS or review_attempt_budget[0] == 0:
+        if (
+            content_revisions >= _MAX_CONTENT_REVISIONS
+            or attempt == _MAX_GENERATOR_ATTEMPTS
+        ):
             raise error
+        content_revisions += 1
         revision_context = _revision_context(
             attempt + 1,
-            normalized_payload,
+            {
+                "sections": payload.get("sections", []),
+                "profile_entries": entries,
+            },
             _review_feedback(review_payload),
             source="Reviewer 实质审查",
+            maximum_attempts=_MAX_GENERATOR_ATTEMPTS,
         )
     raise AgentPipelineError("整理与回顾修订次数耗尽: " + "; ".join(last_feedback))
 
@@ -727,13 +772,16 @@ def _native_research_section(
     }
     revision_context = None
     last_feedback: list[str] = []
-    review_attempt_budget = [_MAX_AGENT_ATTEMPTS]
     accumulated_evidence: dict[tuple, dict] = {}
-    for attempt in range(1, _MAX_AGENT_ATTEMPTS + 1):
+    attempt = 0
+    structure_repairs = 0
+    content_revisions = 0
+    while attempt < _MAX_GENERATOR_ATTEMPTS:
+        attempt += 1
         try:
             payload = _call_agent(
                 researcher.NATIVE_SEARCH_SPEC,
-                "逐项联网查证并生成领域探索与研究板块；本次调用即使是修订稿也必须重新执行 web_search。",
+                "逐项联网查证并返回语义段落；本次调用即使是修订稿也必须重新执行 web_search。",
                 research_input,
                 model_config,
                 store,
@@ -743,8 +791,12 @@ def _native_research_section(
             )
         except AgentOutputError as error:
             _merge_search_evidence(accumulated_evidence, error.telemetry)
-            if attempt == _MAX_AGENT_ATTEMPTS:
+            if (
+                structure_repairs >= _MAX_STRUCTURE_REPAIRS
+                or attempt == _MAX_GENERATOR_ATTEMPTS
+            ):
                 raise
+            structure_repairs += 1
             revision_context = _revision_context(
                 attempt + 1,
                 error.response,
@@ -755,14 +807,12 @@ def _native_research_section(
                     ),
                 },
                 source="中控 JSON 解析",
+                maximum_attempts=_MAX_GENERATOR_ATTEMPTS,
             )
             continue
         telemetry = payload.get("_telemetry", {})
         _merge_search_evidence(accumulated_evidence, telemetry)
         try:
-            markdown, sources = researcher.validate_linked(
-                payload, topics, current_source_ids
-            )
             used_search = bool(
                 telemetry.get("web_citations", 0)
                 or telemetry.get("search_results", 0)
@@ -770,24 +820,35 @@ def _native_research_section(
             )
             if not used_search:
                 raise AgentPipelineError("领域研究没有实际执行联网搜索")
-            evidence_urls = set(accumulated_evidence)
-            if evidence_urls:
-                unsupported_urls = [
-                    source["url"]
-                    for source in sources
-                    if researcher.canonical_url(source["url"]) not in evidence_urls
-                ]
-                if unsupported_urls:
-                    raise AgentPipelineError(
-                        "领域研究声明的来源未出现在实际搜索结果中: "
-                        + "、".join(unsupported_urls[:3])
-                    )
+            drafts, evidence = researcher.validate_native(
+                payload,
+                topics,
+                list(accumulated_evidence.values()),
+                current_source_ids,
+            )
+            supported_topic_ids = {
+                draft["topic_id"]
+                for draft in drafts
+                if draft["status"] == "supported"
+            }
+            supported_topics = [
+                topic
+                for topic in topics
+                if topic["topic_id"] in supported_topic_ids
+            ]
+            rendered_markdown, sources = researcher.render_grounded(
+                drafts, topics, evidence
+            )
         except AgentPipelineError as error:
             _save_validation_failure(
                 store, run_id, researcher.SPEC.name, payload, error
             )
-            if attempt == _MAX_AGENT_ATTEMPTS:
+            if (
+                structure_repairs >= _MAX_STRUCTURE_REPAIRS
+                or attempt == _MAX_GENERATOR_ATTEMPTS
+            ):
                 raise
+            structure_repairs += 1
             revision_context = _revision_context(
                 attempt + 1,
                 payload,
@@ -798,6 +859,7 @@ def _native_research_section(
                     ),
                 },
                 source="中控确定性校验",
+                maximum_attempts=_MAX_GENERATOR_ATTEMPTS,
             )
             continue
 
@@ -805,42 +867,80 @@ def _native_research_section(
             **telemetry,
             "search_evidence": list(accumulated_evidence.values()),
         }
-        normalized_payload = {"markdown": markdown, "sources": sources}
-        passed, _, last_feedback, review_payload = _review(
+        normalized_payload = {
+            "markdown": rendered_markdown,
+            "sources": sources,
+            "structured_topics": drafts,
+        }
+        passed, _, topic_decisions, last_feedback, review_payload = _review(
             "research_review",
             normalized_payload,
             set(),
             {
-                "research_topics": topics,
+                "research_topics": supported_topics,
                 "information_leads": information_leads,
                 "search_telemetry": _review_search_telemetry(telemetry, sources),
             },
             model_config,
             store,
             run_id,
-            attempt_budget=review_attempt_budget,
+            topic_ids=supported_topic_ids,
         )
-        if passed:
+        accepted_topic_ids = {
+            topic_id
+            for topic_id, status in topic_decisions.items()
+            if status == "accepted"
+        }
+        if accepted_topic_ids:
+            final_markdown, final_sources = researcher.render_grounded(
+                drafts,
+                topics,
+                evidence,
+                accepted_topic_ids=accepted_topic_ids,
+            )
             store.save_artifact(
                 run_id,
                 researcher.SPEC.name,
-                {**normalized_payload, "_telemetry": telemetry},
+                {
+                    "markdown": final_markdown,
+                    "sources": final_sources,
+                    "structured_topics": drafts,
+                    "topic_decisions": topic_decisions,
+                    "dropped_topic_ids": [
+                        topic["topic_id"]
+                        for topic in topics
+                        if topic["topic_id"] not in accepted_topic_ids
+                    ],
+                    "_telemetry": telemetry,
+                },
             )
-            return markdown
+            if not passed:
+                logger.info(
+                    "research_topics_dropped run=%s accepted=%s dropped=%s",
+                    run_id,
+                    len(accepted_topic_ids),
+                    len(topics) - len(accepted_topic_ids),
+                )
+            return final_markdown
 
         error = AgentPipelineError(
-            "领域研究未通过审查: " + "; ".join(last_feedback)
+            "领域研究没有主题通过审查: " + "; ".join(last_feedback)
         )
         _save_validation_failure(
             store, run_id, researcher.SPEC.name, normalized_payload, error
         )
-        if attempt == _MAX_AGENT_ATTEMPTS or review_attempt_budget[0] == 0:
+        if (
+            content_revisions >= _MAX_CONTENT_REVISIONS
+            or attempt == _MAX_GENERATOR_ATTEMPTS
+        ):
             raise error
+        content_revisions += 1
         revision_context = _revision_context(
             attempt + 1,
-            normalized_payload,
+            {"topics": drafts},
             _review_feedback(review_payload),
             source="Reviewer 实质审查",
+            maximum_attempts=_MAX_GENERATOR_ATTEMPTS,
         )
     raise AgentPipelineError("领域研究修订次数耗尽: " + "; ".join(last_feedback))
 
@@ -1035,12 +1135,15 @@ def _grounded_research_section(
     }
     revision_context = None
     last_feedback: list[str] = []
-    review_attempt_budget = [_MAX_AGENT_ATTEMPTS]
-    for attempt in range(1, _MAX_AGENT_ATTEMPTS + 1):
+    attempt = 0
+    structure_repairs = 0
+    content_revisions = 0
+    while attempt < _MAX_GENERATOR_ATTEMPTS:
+        attempt += 1
         try:
             payload = _call_agent(
                 researcher.SPEC,
-                "基于中控已经检索的证据生成领域探索与研究板块；只引用 W-* 证据 ID，不要自行输出 URL。",
+                "基于中控已经检索的证据返回逐主题语义段落；只选择 W-* 证据 ID，不要自行输出 URL。",
                 research_input,
                 model_config,
                 store,
@@ -1048,43 +1151,67 @@ def _grounded_research_section(
                 revision_context=revision_context,
             )
         except AgentOutputError as error:
-            if attempt == _MAX_AGENT_ATTEMPTS:
+            if (
+                structure_repairs >= _MAX_STRUCTURE_REPAIRS
+                or attempt == _MAX_GENERATOR_ATTEMPTS
+            ):
                 raise
+            structure_repairs += 1
             revision_context = _revision_context(
                 attempt + 1,
                 error.response,
                 [str(error)],
                 source="中控 JSON 解析",
+                maximum_attempts=_MAX_GENERATOR_ATTEMPTS,
             )
             continue
         try:
-            grounded_markdown, cited_ids = researcher.validate_grounded(
+            drafts = researcher.validate_grounded(
                 payload, usable_topics, evidence, current_source_ids
             )
+            supported_topic_ids = {
+                draft["topic_id"]
+                for draft in drafts
+                if draft["status"] == "supported"
+            }
+            supported_topics = [
+                topic
+                for topic in usable_topics
+                if topic["topic_id"] in supported_topic_ids
+            ]
             rendered_markdown, sources = researcher.render_grounded(
-                grounded_markdown, cited_ids, evidence
+                drafts, usable_topics, evidence
             )
         except AgentPipelineError as error:
             _save_validation_failure(
                 store, run_id, researcher.SPEC.name, payload, error
             )
-            if attempt == _MAX_AGENT_ATTEMPTS:
+            if (
+                structure_repairs >= _MAX_STRUCTURE_REPAIRS
+                or attempt == _MAX_GENERATOR_ATTEMPTS
+            ):
                 raise
+            structure_repairs += 1
             revision_context = _revision_context(
                 attempt + 1,
                 payload,
                 [str(error)],
                 source="中控确定性校验",
+                maximum_attempts=_MAX_GENERATOR_ATTEMPTS,
             )
             continue
 
-        normalized_payload = {"markdown": rendered_markdown, "sources": sources}
-        passed, _, last_feedback, review_payload = _review(
+        normalized_payload = {
+            "markdown": rendered_markdown,
+            "sources": sources,
+            "structured_topics": drafts,
+        }
+        passed, _, topic_decisions, last_feedback, review_payload = _review(
             "research_review",
             normalized_payload,
             set(),
             {
-                "research_topics": usable_topics,
+                "research_topics": supported_topics,
                 "search_telemetry": _review_search_telemetry(
                     search_telemetry, sources
                 ),
@@ -1092,45 +1219,75 @@ def _grounded_research_section(
             model_config,
             store,
             run_id,
-            attempt_budget=review_attempt_budget,
+            topic_ids=supported_topic_ids,
         )
-        if passed:
+        accepted_topic_ids = {
+            topic_id
+            for topic_id, status in topic_decisions.items()
+            if status == "accepted"
+        }
+        if accepted_topic_ids:
+            final_markdown, final_sources = researcher.render_grounded(
+                drafts,
+                usable_topics,
+                evidence,
+                accepted_topic_ids=accepted_topic_ids,
+            )
             model_telemetry = payload.get("_telemetry", {})
             store.save_artifact(
                 run_id,
                 researcher.SPEC.name,
                 {
-                    **normalized_payload,
-                    "grounded_markdown": grounded_markdown,
+                    "markdown": final_markdown,
+                    "sources": final_sources,
+                    "structured_topics": drafts,
+                    "topic_decisions": topic_decisions,
+                    "dropped_topic_ids": [
+                        topic["topic_id"]
+                        for topic in usable_topics
+                        if topic["topic_id"] not in accepted_topic_ids
+                    ],
                     "_telemetry": {
                         **model_telemetry,
                         **search_telemetry,
                     },
                 },
             )
-            return rendered_markdown
+            if not passed:
+                logger.info(
+                    "research_topics_dropped run=%s accepted=%s dropped=%s",
+                    run_id,
+                    len(accepted_topic_ids),
+                    len(usable_topics) - len(accepted_topic_ids),
+                )
+            return final_markdown
 
         error = AgentPipelineError(
-            "领域研究未通过审查: " + "; ".join(last_feedback)
+            "领域研究没有主题通过审查: " + "; ".join(last_feedback)
         )
         _save_validation_failure(
             store,
             run_id,
             researcher.SPEC.name,
             {
-                "markdown": grounded_markdown,
+                "structured_topics": drafts,
                 "rendered_markdown": rendered_markdown,
                 "sources": sources,
             },
             error,
         )
-        if attempt == _MAX_AGENT_ATTEMPTS or review_attempt_budget[0] == 0:
+        if (
+            content_revisions >= _MAX_CONTENT_REVISIONS
+            or attempt == _MAX_GENERATOR_ATTEMPTS
+        ):
             raise error
+        content_revisions += 1
         revision_context = _revision_context(
             attempt + 1,
-            {"markdown": grounded_markdown},
+            {"topics": drafts},
             _review_feedback(review_payload),
             source="Reviewer 实质审查",
+            maximum_attempts=_MAX_GENERATOR_ATTEMPTS,
         )
     raise AgentPipelineError("领域研究修订次数耗尽: " + "; ".join(last_feedback))
 
@@ -1224,8 +1381,9 @@ def generate_daily_profile(
     run_id: str | None = None
     try:
         store = AnalysisStore()
+        profile_store = ProfileStore()
         current_source_ids = {record["source_id"] for record in records}
-        profiles = store.active_profiles(date.isoformat())
+        profiles = profile_store.active_profiles(date.isoformat())
         historical_source_ids = {
             ref for profile in profiles for ref in profile["source_refs"]
         }
@@ -1293,8 +1451,18 @@ def generate_daily_profile(
             ),
         )
         _observed_dates(entries, profiles_by_id, store)
-        store.save_profile_entries(run_id, entries, decisions)
-        store.complete_run(run_id)
+        _, profile_snapshot = profile_store.commit_entries(
+            run_id=run_id,
+            period_start=date.isoformat(),
+            period_end=date.isoformat(),
+            entries=entries,
+            decisions=decisions,
+        )
+        try:
+            store.complete_run(run_id)
+        except Exception:
+            profile_store.restore(profile_snapshot)
+            raise
         accepted = sum(
             decisions.get(entry["temp_id"]) == "accepted" for entry in entries
         )
@@ -1368,8 +1536,9 @@ def generate_analysis_report(
     run_id: str | None = None
     try:
         store = AnalysisStore()
+        profile_store = ProfileStore()
         current_source_ids = {record["source_id"] for record in records}
-        profiles = store.active_profiles(end.isoformat())
+        profiles = profile_store.active_profiles(end.isoformat())
         historical_source_ids = {
             ref for profile in profiles for ref in profile["source_refs"]
         }
@@ -1490,7 +1659,6 @@ def generate_analysis_report(
                 cache_run_id,
             )
         _observed_dates(entries, profiles_by_id, store)
-        store.save_profile_entries(run_id, entries, decisions)
 
         planner_input = {
             "period": {"kind": kind, "start": start.isoformat(), "end": end.isoformat()},
@@ -1596,9 +1764,21 @@ def generate_analysis_report(
         previous_content = report_path.read_bytes() if report_path.exists() else None
         temp_path.write_text(final_content, encoding="utf-8")
         temp_path.replace(report_path)
+        profile_snapshot: bytes | None = None
+        profile_committed = False
         try:
+            _, profile_snapshot = profile_store.commit_entries(
+                run_id=run_id,
+                period_start=start.isoformat(),
+                period_end=end.isoformat(),
+                entries=entries,
+                decisions=decisions,
+            )
+            profile_committed = True
             store.complete_run(run_id, report_path)
         except Exception:
+            if profile_committed:
+                profile_store.restore(profile_snapshot)
             if previous_content is None:
                 report_path.unlink(missing_ok=True)
             else:
