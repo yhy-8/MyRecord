@@ -59,7 +59,7 @@ class ModelSettingsTests(unittest.TestCase):
         self.assertEqual(32768, effective["max_tokens"])
         self.assertNotIn("json_mode", raw_model)
 
-    def test_config_warnings_explain_legacy_defaults_and_search_cap(self):
+    def test_config_warnings_explain_provider_defaults_and_search_cap(self):
         with patch.object(
             settings,
             "CONFIG",
@@ -76,7 +76,7 @@ class ModelSettingsTests(unittest.TestCase):
             warnings = settings.configuration_warnings()
 
         message = " ".join(warnings)
-        self.assertIn("当前版本为 4", message)
+        self.assertNotIn("版本", message)
         self.assertIn("json_mode, max_tokens", message)
         self.assertIn("有效上限 10", message)
 

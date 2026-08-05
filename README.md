@@ -67,7 +67,7 @@ Windows 交互终端使用按键事件等待和批量 Unicode 回显，不再通
 
 ## 配置
 
-配置项、默认值和注释见应用目录中的 [`config.yaml`](./config.yaml)。初次使用需填写模型密钥并确认 `current_model`；启用周报时还必须配置 `third_search`，因为探索流程需要中控对每条查询和来源进行审计。月报不联网，不依赖搜索配置。相对目录以配置文件所在目录为基准。配置版本为 4；模型 `search` 与 `third_search.max_rounds` 已删除，因为模型不再自行调用搜索。旧版 DeepSeek 官方配置缺少 `json_mode` 或 `max_tokens` 时程序会应用窄默认值并明确警告。更新实际运行目录时应合并新模板字段并保留真实密钥。
+配置项、默认值和注释见应用目录中的 [`config.yaml`](./config.yaml)。初次使用需填写模型密钥并确认 `current_model`；启用周报时还必须配置 `third_search`，因为探索流程需要中控对每条查询和来源进行审计。月报不联网，不依赖搜索配置。相对目录以配置文件所在目录为基准。模型不再自行调用搜索，因此不需要模型 `search` 或 `third_search.max_rounds`。DeepSeek 官方配置缺少 `json_mode` 或 `max_tokens` 时程序会应用窄默认值并明确警告。更新实际运行目录时应合并新模板字段并保留真实密钥。
 
 ## 自动任务
 

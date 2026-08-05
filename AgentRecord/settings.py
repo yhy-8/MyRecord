@@ -36,7 +36,6 @@ def _load_config() -> dict:
 
 CONFIG = _load_config()
 CONFIG_DIR = _get_config_path().parent
-CURRENT_CONFIG_VERSION = 4
 
 
 def _configured_path(key: str, default: str) -> Path:
@@ -125,14 +124,8 @@ class ModelConfig:
 
 
 def configuration_warnings() -> list[str]:
-    """Return actionable compatibility warnings without exposing secrets."""
+    """Return actionable configuration warnings without exposing secrets."""
     warnings = []
-    version = CONFIG.get("config_version")
-    if version != CURRENT_CONFIG_VERSION:
-        warnings.append(
-            f"config.yaml 版本为 {version or '未声明'}，当前版本为 "
-            f"{CURRENT_CONFIG_VERSION}；已应用兼容默认值，请合并最新配置模板。"
-        )
     for raw_model in ModelConfig.models():
         hostname = urlsplit(str(raw_model.get("api_url", ""))).hostname or ""
         if hostname.casefold() != "api.deepseek.com":

@@ -37,7 +37,6 @@ logger = logging.getLogger(__name__)
 
 
 _MAX_AUTOMATIC_CONTENT_FAILURES = 2
-_CONTENT_FAILURE_POLICY_VERSION = 4
 _AUTOMATION_TASK_ORDER = (
     "daily_summary",
     "weekly_report",
@@ -229,7 +228,6 @@ def _content_failure_key(
         }
         target = target or _default_task_target(task, now)
         payload: dict = {
-            "policy_version": _CONTENT_FAILURE_POLICY_VERSION,
             "task": task,
             "model": model_signature,
         }

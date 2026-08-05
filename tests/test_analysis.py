@@ -265,7 +265,8 @@ class AnalysisWorkflowTests(unittest.TestCase):
 
         self.assertTrue(success, message)
         content = path.read_text(encoding="utf-8")
-        self.assertIn("> 使用模型：测试模型（mock-v1）", content)
+        self.assertIn("> 使用模型：mock-v1", content)
+        self.assertNotIn("测试模型（", content)
         self.assertIn("> 生成耗时：1 分 5 秒", content)
         self.assertIn(
             "> Token 用量：20（输入 14，输出 6，缓存命中 4）", content
@@ -1038,6 +1039,7 @@ class AnalysisWorkflowTests(unittest.TestCase):
             json.dumps(
                 {
                     "errors": {
+                        "daily_summary": "失败",
                         "daily_information": "失败",
                         "weekly_report": "失败",
                         "monthly_report": "失败",
@@ -1060,7 +1062,7 @@ class AnalysisWorkflowTests(unittest.TestCase):
             _, success = automation.retry_failed_automatic_tasks()
         self.assertTrue(success)
         self.assertEqual(
-            ["weekly_report", "monthly_report"], calls
+            ["daily_summary", "weekly_report", "monthly_report"], calls
         )
         self.assertNotIn(
             "daily_information", automation._load_automation_state().get("errors", {})

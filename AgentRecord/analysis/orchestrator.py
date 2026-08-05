@@ -44,7 +44,6 @@ _MAX_CONTENT_REVISIONS = 1
 _MAX_GENERATOR_ATTEMPTS = 1 + _MAX_STRUCTURE_REPAIRS + _MAX_CONTENT_REVISIONS
 _MAX_AGENT_INPUT_CHARACTERS = 120000
 _MAX_RECORD_CHUNK_CHARACTERS = 30000
-_PIPELINE_VERSION = 9
 
 
 def _analysis_config_signature(
@@ -947,11 +946,9 @@ def _source_appendix(markdown: str, source_records: list[dict]) -> str:
 
 
 def _model_label(model_config: settings.ModelDict) -> str:
-    name = str(model_config.get("name", "")).strip()
     model_id = str(model_config.get("model_id", "")).strip()
-    if name and model_id and name.casefold() != model_id.casefold():
-        return f"{name}（{model_id}）"
-    return name or model_id or "未标明"
+    name = str(model_config.get("name", "")).strip()
+    return model_id or name or "未标明"
 
 
 def _duration_label(seconds: float) -> str:
@@ -1037,7 +1034,6 @@ def generate_analysis_report(
             else "（周报不读取下级周期报告）"
         )
         snapshot = {
-            "pipeline_version": _PIPELINE_VERSION,
             "analysis_config": _analysis_config_signature(model_config, kind),
             "kind": kind,
             "records": records,
@@ -1054,7 +1050,7 @@ def generate_analysis_report(
             start.isoformat(),
             end.isoformat(),
             origin,
-            model_config.get("name", ""),
+            _model_label(model_config),
             input_hash,
             trigger=trigger,
         )
@@ -1074,7 +1070,7 @@ def generate_analysis_report(
             start.isoformat(),
             end.isoformat(),
             origin,
-            model_config.get("name", ""),
+            _model_label(model_config),
         )
 
         retrospective_input = {

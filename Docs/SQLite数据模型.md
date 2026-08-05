@@ -33,7 +33,7 @@ SQLite 只承担两项职责：
 | `period_start/end` | 分析闭区间日期 |
 | `origin` | `manual` 或 `auto` |
 | `trigger` | `manual`、`scheduled` 或 `retry` |
-| `model_name` | 模型显示名 |
+| `model_name` | 实际请求使用的模型标识 |
 | `status` | `running`、`completed`、`failed` |
 | `input_hash` | 完整输入快照 SHA-256 |
 | `report_path` | 成功交付文件路径 |
