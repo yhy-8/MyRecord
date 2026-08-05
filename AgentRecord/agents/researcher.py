@@ -46,8 +46,6 @@ def validate(payload: dict) -> tuple[str, str]:
         raise AgentPipelineError("Researcher status 无效")
     if not body:
         raise AgentPipelineError("Researcher 正文为空")
-    if len(body) > 12000:
-        raise AgentPipelineError("Researcher 正文超过 12000 字符")
     if re.search(r"(?m)^\s{0,3}#{1,6}\s+", body):
         raise AgentPipelineError("Researcher 不得自行输出标题")
     if re.search(r"(?m)^\s*(?:[-*+]\s+|\d+[.)、]\s+)", body):

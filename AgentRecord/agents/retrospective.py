@@ -22,8 +22,6 @@ def validate(payload: dict) -> str:
     body = payload["text"].strip()
     if not body:
         raise AgentPipelineError("Retrospective 正文为空")
-    if len(body) > 24000:
-        raise AgentPipelineError("Retrospective 正文超过 24000 字符")
     if re.search(r"(?m)^\s{0,3}#{1,6}\s+", body):
         raise AgentPipelineError("Retrospective 不得自行输出标题")
     if re.search(r"(?m)^\s*(?:[-*+]\s+|\d+[.)、]\s+)", body):

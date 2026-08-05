@@ -27,6 +27,7 @@ class AgentModuleTests(unittest.TestCase):
             {"records": ["内容"]},
         )
         self.assertIn("只负责当前这一项语义任务", prompt)
+        self.assertIn("完整覆盖本任务所需信息的前提下保持简洁", prompt)
         self.assertIn("一个最小 JSON 对象", prompt)
         self.assertIn("不得自行增加数组", prompt)
 
@@ -90,6 +91,31 @@ class AgentModuleTests(unittest.TestCase):
         self.assertIn("[email]", query)
         self.assertIn("[local-path]", query)
         self.assertNotIn("test@example.com", query)
+
+    def test_semantic_outputs_are_not_rejected_or_truncated_by_length(self):
+        retrospective_text = "回顾正文" * 10000
+        research_text = "研究正文" * 10000
+        feedback = "具体修改意见" * 2000
+        query = "公开研究问题" * 100
+
+        self.assertEqual(
+            retrospective_text,
+            retrospective.validate({"text": retrospective_text}),
+        )
+        self.assertEqual(
+            ("supported", research_text),
+            researcher.validate({"status": "supported", "text": research_text}),
+        )
+        self.assertEqual(
+            (False, feedback),
+            reviewer.validate({"approved": False, "feedback": feedback}),
+        )
+        self.assertEqual(
+            query,
+            research_planner.normalize_query(
+                {"action": "search", "query": query}
+            ),
+        )
 
     def test_researcher_renders_controller_owned_heading_and_sources(self):
         topic = {

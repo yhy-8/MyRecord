@@ -24,8 +24,6 @@ def validate(payload: dict) -> tuple[bool, str]:
             "Reviewer approved 必须是布尔值且 feedback 必须是字符串"
         )
     feedback = feedback_value.strip()
-    if len(feedback) > 4000:
-        raise AgentPipelineError("Reviewer 修改意见超过 4000 字符")
     if approved and not feedback:
         return True, ""
     if not approved and feedback:

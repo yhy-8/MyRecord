@@ -77,7 +77,7 @@ def summarize_diary(date: str, model_config: settings.ModelDict) -> tuple[str, b
 请总结 {date} 的日记。只输出要写入 <summary> 的 Markdown 正文，不要输出标题、标签、代码围栏或完成提示。
 
 要求：
-- 概括当天的重要事件、观点、决定、问题和进展，不逐条复述。
+- 在完整保留重要信息的前提下简洁概括当天的事件、观点、决定、问题和进展，不逐条复述，不重复或无必要展开。
 - 区分用户记录与引用的 AI 内容；AI 内容不能当作用户已经认可的观点。
 - 保留重要具体信息，禁止编造、心理诊断和行为指导。
 
@@ -489,7 +489,7 @@ def _research_topics(
         topics.append(
             {
                 "topic_id": topic_id,
-                "title": query[:200],
+                "title": query,
                 "query": query,
                 "origin": "records",
                 "source_refs": source_refs,
