@@ -2,14 +2,12 @@ import datetime
 import json
 import tempfile
 import unittest
-from contextlib import closing
 from pathlib import Path
 from unittest.mock import Mock, patch
 
 from AgentRecord import settings
 from AgentRecord.ai_client import ToolResult
 from AgentRecord.analysis import automation, context, orchestrator
-from AgentRecord.analysis.profile_store import ProfileStore
 from AgentRecord.analysis.store import AnalysisStore
 from AgentRecord.agents.base import AgentPipelineError
 
@@ -30,8 +28,6 @@ class AnalysisWorkflowTests(unittest.TestCase):
         settings.CONFIG["automation"] = {
             "enabled": True,
             "daily_summary": True,
-            "daily_profile": False,
-            "daily_information": False,
             "weekly_report": False,
             "monthly_report": False,
         }
@@ -89,16 +85,6 @@ class AnalysisWorkflowTests(unittest.TestCase):
         if "任务:retrospective]" in prompt:
             record = data["records"][0]
             source = record["source_id"]
-            profile_entries = [] if data.get("historical_profiles") else [
-                {
-                    "category": "viewpoint",
-                    "title": "重视可验证性",
-                    "statement": "用户开始重视可验证的记录。",
-                    "confidence": 0.8,
-                    "source_refs": [source],
-                    "supersedes_id": None,
-                }
-            ]
             payload = {
                 "sections": [
                     {
@@ -111,7 +97,6 @@ class AnalysisWorkflowTests(unittest.TestCase):
                         ],
                     }
                 ],
-                "profile_entries": profile_entries,
             }
         elif "任务:research_planner]" in prompt:
             source = data["records"][0]["source_id"]
@@ -147,14 +132,6 @@ class AnalysisWorkflowTests(unittest.TestCase):
                 ]
             }
         else:
-            decisions = [
-                {
-                    "temp_id": temp_id,
-                    "status": "accepted",
-                    "reason": "记录直接支持",
-                }
-                for temp_id in data.get("valid_profile_temp_ids", [])
-            ]
             topic_decisions = [
                 {
                     "topic_id": topic_id,
@@ -165,7 +142,6 @@ class AnalysisWorkflowTests(unittest.TestCase):
             ]
             payload = {
                 "pass": True,
-                "entry_decisions": decisions,
                 "topic_decisions": topic_decisions,
                 "unsupported_claims": [],
                 "required_changes": [],
@@ -204,7 +180,6 @@ class AnalysisWorkflowTests(unittest.TestCase):
         self.assertIn("### 记录与反思方法", content)
         self.assertIn("https://example.com/source", content)
         self.assertEqual(original, diary.read_bytes())
-        self.assertEqual(1, len(ProfileStore().active_profiles("2026-07-20")))
         retrospective_review = next(
             prompt
             for prompt in self.ai_calls
@@ -248,22 +223,23 @@ class AnalysisWorkflowTests(unittest.TestCase):
         self.assertIsNone(path)
         self.assertIn("weekly", message)
 
-    def test_daily_profile_activates_reviewed_candidates_without_report_file(self):
+    def test_monthly_report_only_summarizes_without_search(self):
         day = datetime.date(2026, 7, 14)
         self.write_diary(day.isoformat())
+        settings.CONFIG["third_search"] = {"enabled": False}
 
-        message, success = orchestrator.generate_daily_profile(
-            day, {"name": "mock"}
+        message, success, path = orchestrator.generate_analysis_report(
+            "monthly", day, {"name": "mock"}
         )
 
         self.assertTrue(success, message)
-        active = ProfileStore().active_profiles(day.isoformat())
-        self.assertEqual(["重视可验证性"], [item["title"] for item in active])
-        with closing(AnalysisStore()._connect()) as connection:
-            run = connection.execute(
-                "SELECT kind, status, report_path FROM analysis_runs"
-            ).fetchone()
-        self.assertEqual(("daily_profile", "completed", None), tuple(run))
+        content = path.read_text(encoding="utf-8")
+        self.assertIn("## 整理与回顾", content)
+        self.assertNotIn("领域探索与研究", content)
+        self.assertFalse(
+            any("任务:research_planner]" in prompt for prompt in self.ai_calls)
+        )
+        self.assertFalse(any("任务:researcher]" in prompt for prompt in self.ai_calls))
 
     def test_manual_and_automatic_reports_remain_separate(self):
         day = datetime.date(2026, 7, 14)
@@ -336,7 +312,6 @@ class AnalysisWorkflowTests(unittest.TestCase):
                                 ],
                             }
                         ],
-                        "profile_entries": [],
                     },
                     ensure_ascii=False,
                 ),
@@ -347,8 +322,8 @@ class AnalysisWorkflowTests(unittest.TestCase):
             )
 
         orchestrator.call_ai = reference_fake
-        message, success = orchestrator.generate_daily_profile(
-            datetime.date(2026, 7, 14), {"name": "mock"}
+        message, success, _ = orchestrator.generate_analysis_report(
+            "monthly", datetime.date(2026, 7, 14), {"name": "mock"}
         )
 
         self.assertTrue(success, message)
@@ -361,7 +336,7 @@ class AnalysisWorkflowTests(unittest.TestCase):
         self.assertIn("被引用的旧记录", review_prompt)
         self.assertIn("R-20260713-001", review_prompt)
 
-    def test_information_briefing_reaches_research_planner(self):
+    def test_legacy_information_briefing_does_not_reach_research_planner(self):
         day = datetime.date(2026, 7, 14)
         self.write_diary(day.isoformat())
         info = settings.ANALYSIS_DIR / "Information" / day.isoformat()
@@ -371,7 +346,7 @@ class AnalysisWorkflowTests(unittest.TestCase):
         planner_prompt = next(
             prompt for prompt in self.ai_calls if "任务:research_planner]" in prompt
         )
-        self.assertIn("综合新闻雷达线索", planner_prompt)
+        self.assertNotIn("综合新闻雷达线索", planner_prompt)
 
     def test_kernel_lock_releases_without_deleting_sentinel(self):
         first = automation._acquire_automation_lock()
@@ -416,7 +391,7 @@ class AnalysisWorkflowTests(unittest.TestCase):
 
         summarize.assert_not_called()
 
-    def test_five_automatic_tasks_include_daily_profile_and_information(self):
+    def test_three_automatic_tasks_include_summary_and_period_reports(self):
         now = datetime.datetime(2026, 7, 17, 9, 0)
         yesterday = settings.DIARY_DIR / "2026-07-16.md"
         yesterday.write_text(
@@ -428,8 +403,6 @@ class AnalysisWorkflowTests(unittest.TestCase):
         self.write_diary("2026-06-15")
 
         self.assertTrue(automation._task_missing("daily_summary", now))
-        self.assertTrue(automation._task_missing("daily_profile", now))
-        self.assertTrue(automation._task_missing("daily_information", now))
         self.assertTrue(automation._task_missing("weekly_report", now))
         self.assertTrue(automation._task_missing("monthly_report", now))
 
@@ -437,18 +410,6 @@ class AnalysisWorkflowTests(unittest.TestCase):
             yesterday.read_text(encoding="utf-8").replace("暂无今日总结。", "已有总结。"),
             encoding="utf-8",
         )
-        profile_run = AnalysisStore().start_run(
-            "daily_profile",
-            "2026-07-16",
-            "2026-07-16",
-            "auto",
-            "mock",
-            "hash",
-        )
-        AnalysisStore().complete_run(profile_run)
-        info_path = automation.information_briefing_path(now.date())
-        info_path.parent.mkdir(parents=True, exist_ok=True)
-        info_path.write_text("简报", encoding="utf-8")
         week_start, week_end = automation._latest_week_period(now.date())
         month_start, month_end = automation._latest_month_period(now.date())
         weekly_path = context._analysis_report_path(
@@ -489,7 +450,6 @@ class AnalysisWorkflowTests(unittest.TestCase):
         base_input = {
             "period": {"kind": "weekly", "start": "2026-07-13", "end": "2026-07-19"},
             "records": [{"source_id": source_id, "text": "记录"}],
-            "historical_profiles": [],
         }
         invalid = {
             "sections": [
@@ -498,7 +458,6 @@ class AnalysisWorkflowTests(unittest.TestCase):
                     "paragraphs": [{"text": "缺少来源", "source_refs": []}],
                 }
             ],
-            "profile_entries": [],
         }
         store = Mock()
 
@@ -510,8 +469,6 @@ class AnalysisWorkflowTests(unittest.TestCase):
             orchestrator._retrospective_section(
                 base_input,
                 {source_id},
-                {source_id},
-                {},
                 {"name": "mock"},
                 store,
                 "run-id",
@@ -532,7 +489,6 @@ class AnalysisWorkflowTests(unittest.TestCase):
                 "end": "2026-07-19",
             },
             "records": [{"source_id": source_id, "text": "用户记录"}],
-            "historical_profiles": [],
         }
         invalid = {
             "sections": [
@@ -541,7 +497,6 @@ class AnalysisWorkflowTests(unittest.TestCase):
                     "paragraphs": [{"text": "缺少来源", "source_refs": []}],
                 }
             ],
-            "profile_entries": [],
         }
         valid = {
             "sections": [
@@ -552,7 +507,6 @@ class AnalysisWorkflowTests(unittest.TestCase):
                     ],
                 }
             ],
-            "profile_entries": [],
         }
         revised = {
             "sections": [
@@ -563,7 +517,6 @@ class AnalysisWorkflowTests(unittest.TestCase):
                     ],
                 }
             ],
-            "profile_entries": [],
         }
         store = Mock()
 
@@ -578,18 +531,15 @@ class AnalysisWorkflowTests(unittest.TestCase):
                 (
                     False,
                     {},
-                    {},
                     ["内容需要修订"],
                     {"pass": False, "required_changes": ["内容需要修订"]},
                 ),
-                (True, {}, {}, [], {"pass": True}),
+                (True, {}, [], {"pass": True}),
             ],
         ):
-            markdown, _, _ = orchestrator._retrospective_section(
+            markdown = orchestrator._retrospective_section(
                 base_input,
                 {source_id},
-                {source_id},
-                {},
                 {"name": "mock"},
                 store,
                 "run-id",
@@ -607,7 +557,6 @@ class AnalysisWorkflowTests(unittest.TestCase):
         base_input = {
             "period": {"kind": "weekly", "start": "2026-07-13", "end": "2026-07-19"},
             "records": [{"source_id": source_id, "text": "用户记录"}],
-            "historical_profiles": [],
         }
         first = {
             "sections": [
@@ -618,7 +567,6 @@ class AnalysisWorkflowTests(unittest.TestCase):
                     ],
                 }
             ],
-            "profile_entries": [],
         }
         revised = {
             "sections": [
@@ -632,11 +580,9 @@ class AnalysisWorkflowTests(unittest.TestCase):
                     ],
                 }
             ],
-            "profile_entries": [],
         }
         rejected_review = {
             "pass": False,
-            "entry_decisions": [],
             "topic_decisions": [],
             "unsupported_claims": ["第一稿判断超出记录支持范围"],
             "required_changes": ["删除无依据判断"],
@@ -650,23 +596,19 @@ class AnalysisWorkflowTests(unittest.TestCase):
             orchestrator,
             "_review",
             side_effect=[
-                (False, {}, {}, ["删除无依据判断"], rejected_review),
-                (True, {}, {}, [], {"pass": True}),
+                (False, {}, ["删除无依据判断"], rejected_review),
+                (True, {}, [], {"pass": True}),
             ],
         ):
-            markdown, entries, decisions = orchestrator._retrospective_section(
+            markdown = orchestrator._retrospective_section(
                 base_input,
                 {source_id},
-                {source_id},
-                {},
                 {"name": "mock"},
                 store,
                 "run-id",
             )
 
         self.assertIn("修订后", markdown)
-        self.assertEqual([], entries)
-        self.assertEqual({}, decisions)
         correction = call_agent.call_args_list[1].kwargs["revision_context"]
         self.assertEqual("Reviewer 实质审查", correction["feedback_source"])
         self.assertEqual(
@@ -804,10 +746,10 @@ class AnalysisWorkflowTests(unittest.TestCase):
         ), patch.object(
             orchestrator,
             "_review",
-            return_value=(True, {}, {"Q001": "accepted"}, [], {"pass": True}),
+            return_value=(True, {"Q001": "accepted"}, [], {"pass": True}),
         ):
             markdown = orchestrator._research_section(
-                topics, "", set(), {"name": "mock"}, store, "run-id"
+                topics, set(), {"name": "mock"}, store, "run-id"
             )
 
         self.assertIn(prior_url, markdown)
@@ -868,10 +810,10 @@ class AnalysisWorkflowTests(unittest.TestCase):
         ) as call_agent, patch.object(
             orchestrator,
             "_review",
-            return_value=(True, {}, {"Q001": "accepted"}, [], {"pass": True}),
+            return_value=(True, {"Q001": "accepted"}, [], {"pass": True}),
         ):
             markdown = orchestrator._research_section(
-                topics, "不应送入模型", set(), {"name": "mock"}, store, "run-id"
+                topics, set(), {"name": "mock"}, store, "run-id"
             )
 
         self.assertEqual(1, search.call_count)
@@ -950,7 +892,7 @@ class AnalysisWorkflowTests(unittest.TestCase):
         ) as call_agent, patch.object(
             orchestrator,
             "_review",
-            return_value=(True, {}, {"Q001": "accepted"}, [], {"pass": True}),
+            return_value=(True, {"Q001": "accepted"}, [], {"pass": True}),
         ):
             markdown = orchestrator._grounded_research_section(
                 topics, set(), {"name": "mock"}, store, "run-id"
@@ -1014,7 +956,6 @@ class AnalysisWorkflowTests(unittest.TestCase):
             "_review",
             return_value=(
                 False,
-                {},
                 {"Q001": "accepted", "Q002": "rejected"},
                 ["第二个主题证据不足"],
                 {"pass": False},
@@ -1198,7 +1139,10 @@ class AnalysisWorkflowTests(unittest.TestCase):
             _, success = automation.retry_failed_automatic_tasks()
         self.assertTrue(success)
         self.assertEqual(
-            ["daily_information", "weekly_report", "monthly_report"], calls
+            ["weekly_report", "monthly_report"], calls
+        )
+        self.assertNotIn(
+            "daily_information", automation._load_automation_state().get("errors", {})
         )
 
     def test_retry_stops_after_any_predecessor_failure(self):
@@ -1207,7 +1151,7 @@ class AnalysisWorkflowTests(unittest.TestCase):
             {
                 "errors": {
                     "daily_summary": "失败",
-                    "daily_information": "失败",
+                    "weekly_report": "失败",
                 }
             }
         )
@@ -1235,10 +1179,7 @@ class AnalysisWorkflowTests(unittest.TestCase):
         settings.CONFIG["automation"] = {
             "enabled": True,
             "daily_summary": True,
-            "daily_profile": False,
-            "daily_information": True,
-            "daily_information_time": "08:05",
-            "weekly_report": False,
+            "weekly_report": True,
             "monthly_report": False,
         }
         settings.ANALYSIS_DIR.mkdir()
@@ -1255,60 +1196,16 @@ class AnalysisWorkflowTests(unittest.TestCase):
         ), patch.object(
             automation,
             "_task_missing",
-            side_effect=lambda task, now: task in {"daily_summary", "daily_information"},
-        ), patch.object(automation, "_run_daily_information") as run_information:
+            side_effect=lambda task, now: task in {"daily_summary", "weekly_report"},
+        ), patch.object(automation, "_run_weekly_reports") as run_weekly:
             automation.run_due_automatic_tasks()
 
-        run_information.assert_not_called()
-
-    def test_information_time_scan_still_runs_predecessor_checks_in_same_hour(self):
-        class FixedDateTime(datetime.datetime):
-            @classmethod
-            def now(cls, tz=None):
-                return cls(2026, 7, 17, 8, 5)
-
-        settings.CONFIG["automation"] = {
-            "enabled": True,
-            "daily_summary": True,
-            "daily_profile": False,
-            "daily_information": True,
-            "daily_information_time": "08:05",
-            "weekly_report": False,
-            "monthly_report": False,
-        }
-        settings.ANALYSIS_DIR.mkdir()
-        automation._save_automation_state(
-            {"last_detection_hour": "2026-07-17T08"}
-        )
-
-        def fail_summary(today, state, model, *, target=None):
-            state.setdefault("errors", {})["daily_summary"] = "总结失败"
-
-        with patch.object(
-            automation.datetime, "datetime", FixedDateTime
-        ), patch.object(
-            automation,
-            "_task_missing",
-            side_effect=lambda task, now: task
-            in {"daily_summary", "daily_information"},
-        ), patch.object(
-            automation, "_automation_model", return_value={"name": "mock"}
-        ), patch.object(
-            automation, "_run_daily_summaries", side_effect=fail_summary
-        ) as run_summary, patch.object(
-            automation, "_run_daily_information"
-        ) as run_information:
-            automation.run_due_automatic_tasks()
-
-        run_summary.assert_called_once()
-        run_information.assert_not_called()
+        run_weekly.assert_not_called()
 
     def test_minute_scheduler_does_not_repeat_recorded_failures(self):
         settings.CONFIG["automation"] = {
             "enabled": True,
             "daily_summary": False,
-            "daily_profile": False,
-            "daily_information": False,
             "weekly_report": True,
             "monthly_report": True,
         }
@@ -1344,10 +1241,7 @@ class AnalysisWorkflowTests(unittest.TestCase):
         settings.CONFIG["automation"] = {
             "enabled": True,
             "daily_summary": False,
-            "daily_profile": False,
-            "daily_information": True,
-            "daily_information_time": "08:05",
-            "weekly_report": False,
+            "weekly_report": True,
             "monthly_report": False,
         }
         settings.ANALYSIS_DIR.mkdir()
@@ -1361,13 +1255,13 @@ class AnalysisWorkflowTests(unittest.TestCase):
         ), patch.object(
             automation,
             "_task_missing",
-            side_effect=lambda task, now: task == "daily_information",
+            side_effect=lambda task, now: task == "weekly_report",
         ), patch.object(
             automation, "_automation_model", return_value={"name": "mock"}
-        ), patch.object(automation, "_run_daily_information") as run_information:
+        ), patch.object(automation, "_run_weekly_reports") as run_weekly:
             automation.run_due_automatic_tasks()
 
-        run_information.assert_called_once()
+        run_weekly.assert_called_once()
         state = automation._load_automation_state()
         self.assertEqual("2026-07-17T10", state["last_detection_hour"])
 
@@ -1419,42 +1313,15 @@ class AnalysisWorkflowTests(unittest.TestCase):
         self.assertNotIn("failure_keys", state)
         self.assertNotIn("failure_targets", state)
 
-    def test_retry_uses_original_daily_target_after_date_changes(self):
-        state = {
-            "errors": {"daily_information": "2026-07-17 09:00 失败"},
-            "failure_targets": {
-                "daily_information": {
-                    "start": "2026-07-17",
-                    "end": "2026-07-17",
-                }
-            },
-        }
-        now = datetime.datetime(2026, 7, 18, 9, 0)
-
-        with patch.object(automation, "_run_daily_information") as run:
-            automation._retry_one_task(
-                "daily_information", now, state, {"name": "mock"}
-            )
-
-        self.assertEqual(
-            {
-                "trigger": "retry",
-                "target": {"start": "2026-07-17", "end": "2026-07-17"},
-                "ignore_schedule": True,
-            },
-            run.call_args.kwargs,
-        )
-
     def test_retry_processes_cross_day_followups_with_original_targets(self):
         summary_target = {"start": "2026-07-16", "end": "2026-07-16"}
-        information_target = {"start": "2026-07-17", "end": "2026-07-17"}
+        weekly_target = {"start": "2026-07-06", "end": "2026-07-12"}
         state = {
             "errors": {"daily_summary": "2026-07-17 09:00 失败"},
             "failure_targets": {"daily_summary": summary_target},
             "pending_targets": {
                 "daily_summary": [summary_target],
-                "daily_profile": [summary_target],
-                "daily_information": [information_target],
+                "weekly_report": [weekly_target],
             },
         }
         automation._save_automation_state(state)
@@ -1465,29 +1332,16 @@ class AnalysisWorkflowTests(unittest.TestCase):
             automation._clear_task_error(current_state, task)
             automation._save_automation_state(current_state)
 
-        def run_profile(today, current_state, model, *, trigger, target):
-            calls.append(("daily_profile", target))
-
-        def run_information(
-            now,
-            current_state,
-            model,
-            *,
-            trigger,
-            target,
-            ignore_schedule,
-        ):
+        def run_weekly(today, current_state, model, *, trigger, target):
             self.assertEqual("retry", trigger)
-            calls.append(("daily_information", target))
+            calls.append(("weekly_report", target))
 
         with patch.object(
             automation, "_retry_one_task", side_effect=retry_summary
         ), patch.object(
             automation, "_task_should_run", return_value=True
         ), patch.object(
-            automation, "_run_daily_profile", side_effect=run_profile
-        ), patch.object(
-            automation, "_run_daily_information", side_effect=run_information
+            automation, "_run_weekly_reports", side_effect=run_weekly
         ):
             automation._process_pending_targets(
                 datetime.datetime(2026, 7, 18, 9, 0),
@@ -1500,8 +1354,7 @@ class AnalysisWorkflowTests(unittest.TestCase):
         self.assertEqual(
             [
                 ("daily_summary", summary_target),
-                ("daily_profile", summary_target),
-                ("daily_information", information_target),
+                ("weekly_report", weekly_target),
             ],
             calls,
         )
@@ -1514,13 +1367,12 @@ class AnalysisWorkflowTests(unittest.TestCase):
             "period": {"kind": "weekly", "start": "2026-07-13", "end": "2026-07-19"},
             "records": [{"source_id": source_id, "text": text}],
             "referenced_records": [],
-            "historical_profiles": [],
         }
         seen_parts = []
 
         def process_chunk(chunk_input, *args, **kwargs):
             seen_parts.extend(record["text"] for record in chunk_input["records"])
-            return f"分块 {chunk_input['chunk']['index']} [{source_id}]", [], {}
+            return f"分块 {chunk_input['chunk']['index']} [{source_id}]"
 
         store = Mock()
         with patch.object(
@@ -1530,11 +1382,9 @@ class AnalysisWorkflowTests(unittest.TestCase):
         ), patch.object(
             orchestrator, "_retrospective_section", side_effect=process_chunk
         ) as section:
-            markdown, entries, decisions = orchestrator._retrospective_with_input_budget(
+            markdown = orchestrator._retrospective_with_input_budget(
                 base_input,
                 {source_id},
-                {source_id},
-                {},
                 {"name": "mock"},
                 store,
                 "run-id",
@@ -1543,32 +1393,6 @@ class AnalysisWorkflowTests(unittest.TestCase):
         self.assertGreater(section.call_count, 1)
         self.assertEqual(text, "".join(seen_parts))
         self.assertIn("分块 1", markdown)
-        self.assertEqual([], entries)
-        self.assertEqual({}, decisions)
-
-    def test_profile_context_budget_prefers_recent_observations(self):
-        def profile(entry_id, observed, text):
-            return {
-                "id": entry_id,
-                "category": "interest",
-                "title": entry_id,
-                "statement": text,
-                "confidence": 0.8,
-                "source_refs": [],
-                "first_observed": observed,
-                "last_observed": observed,
-                "updated_at": observed,
-            }
-
-        profiles = [
-            profile("old", "2026-01-01", "旧" * 600),
-            profile("new", "2026-07-14", "新" * 600),
-        ]
-        with patch.object(orchestrator, "_MAX_PROFILE_CONTEXT_CHARACTERS", 1000):
-            compact, aliases = orchestrator._profile_input(profiles)
-
-        self.assertEqual(["new"], list(aliases.values()))
-        self.assertEqual("new", compact[0]["title"])
 
     def test_same_content_failure_stops_after_one_automatic_retry(self):
         state = {}
@@ -1586,24 +1410,6 @@ class AnalysisWorkflowTests(unittest.TestCase):
                 state, "weekly_report", datetime.datetime(2026, 7, 17, 12, 0)
             )
         )
-
-    def test_daily_information_content_failure_does_not_repeat_automatically(self):
-        state = {}
-        with patch.object(
-            automation, "_content_failure_key", return_value="same-input"
-        ):
-            automation._set_task_error(
-                state,
-                "daily_information",
-                "Collector JSON 校验失败",
-            )
-
-        self.assertEqual(
-            "content_blocked",
-            state["retry_kind"]["daily_information"],
-        )
-        self.assertEqual(1, state["failure_counts"]["daily_information"])
-        self.assertNotIn("daily_information", state.get("retry_after", {}))
 
     def test_changed_input_unlocks_content_failure_on_hourly_detection(self):
         state = {
@@ -1636,14 +1442,14 @@ class AnalysisWorkflowTests(unittest.TestCase):
         state = {}
         with patch.object(automation.datetime, "datetime", FixedDateTime):
             automation._set_task_error(
-                state, "daily_information", "网络异常: DNS 解析失败"
+                state, "weekly_report", "网络异常: DNS 解析失败"
             )
 
         self.assertEqual(
             "2026-07-17T00:30:41",
-            state["retry_after"]["daily_information"],
+            state["retry_after"]["weekly_report"],
         )
-        self.assertEqual("network", state["retry_kind"]["daily_information"])
+        self.assertEqual("network", state["retry_kind"]["weekly_report"])
 
     def test_auth_failure_waits_for_manual_retry_after_configuration_fix(self):
         state = {}
@@ -1683,7 +1489,7 @@ class AnalysisWorkflowTests(unittest.TestCase):
             _, success = automation.retry_failed_automatic_tasks()
 
         self.assertFalse(success)
-        self.assertEqual(["daily_information"], calls)
+        self.assertEqual(["weekly_report"], calls)
 
     def test_monthly_context_excludes_cross_month_weeks_and_deduplicates_origin(self):
         weekly = settings.ANALYSIS_DIR / "Weekly"

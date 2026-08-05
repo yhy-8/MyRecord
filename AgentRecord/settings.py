@@ -36,7 +36,7 @@ def _load_config() -> dict:
 
 CONFIG = _load_config()
 CONFIG_DIR = _get_config_path().parent
-CURRENT_CONFIG_VERSION = 2
+CURRENT_CONFIG_VERSION = 3
 
 
 def _configured_path(key: str, default: str) -> Path:

@@ -197,33 +197,6 @@ def _monthly_supporting_reports(
     return "\n\n".join(sections) or "（没有可用的同期周报）"
 
 
-def _information_briefings(
-    start: datetime.date, end: datetime.date, max_characters: int = 30000
-) -> str:
-    """读取周期内的每日信息简报，仅作为需要重新查证的外部线索。"""
-    directory = settings.ANALYSIS_DIR / "Information"
-    sections = []
-    size = 0
-    for path in sorted(directory.glob("*.md"), reverse=True):
-        try:
-            date = datetime.date.fromisoformat(path.stem)
-        except ValueError:
-            continue
-        if not start <= date <= end:
-            continue
-        try:
-            content = path.read_text(encoding="utf-8")[:8000]
-        except OSError:
-            continue
-        section = f"### {path.name}\n{content}"
-        if size + len(section) > max_characters:
-            break
-        sections.append(section)
-        size += len(section)
-    sections.reverse()
-    return "\n\n".join(sections) or "（本周期没有可用的每日信息简报）"
-
-
 _RECORD_PATTERN = re.compile(
     r"^\*\*(\d{2}:\d{2})(?: ([^\n]*?))?:\*\*\s?(.*?)"
     r"(?=^\*\*\d{2}:\d{2}(?: [^\n]*?)?:\*\*|\Z)",

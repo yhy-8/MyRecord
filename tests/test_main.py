@@ -150,16 +150,14 @@ class MainCommandTests(unittest.TestCase):
             "current_task_detail": "",
             "current_task_started_at": "",
             "daily_summary_status": "2026-07-14 已存在",
-            "daily_profile_status": "2026-07-14 已更新",
-            "daily_information_status": "2026-07-15 已存在",
             "weekly_report_status": "2026-07-06 至 2026-07-12 缺失",
             "monthly_report_status": "2026-06 已存在",
             "last_detection_hour": "2026-07-15T20",
             "retry_after": {"weekly_report": "2026-07-15T21:00:00"},
             "retry_kind": {"weekly_report": "hourly"},
             "pending_targets": {
-                "daily_profile": [
-                    {"start": "2026-07-14", "end": "2026-07-14"}
+                "weekly_report": [
+                    {"start": "2026-07-06", "end": "2026-07-12"}
                 ]
             },
             "errors": {"weekly_report": "周报失败"},
@@ -172,58 +170,11 @@ class MainCommandTests(unittest.TestCase):
 
         output = str(console_print.call_args.args[0].renderable)
         self.assertIn("2026-07-14", output)
-        self.assertIn("昨日人物画像", output)
         self.assertIn("待处理目标", output)
-        self.assertIn("daily_profile: 2026-07-14", output)
+        self.assertIn("weekly_report: 2026-07-06 至 2026-07-12", output)
         self.assertIn("weekly_report", output)
         self.assertIn("非网络错误", output)
         self.assertNotIn("weekly_report [网络错误]", output)
-
-    def test_feedback_command_records_correction(self):
-        store = Mock()
-        store.feedback_candidates.return_value = [
-            {
-                "id": "node-1",
-                "node_type": "viewpoint",
-                "period_start": "2026-07-14",
-                "title": "原洞见",
-                "body": "原内容",
-            }
-        ]
-        with patch("AgentRecord.cli.commands.AnalysisStore"), patch(
-            "AgentRecord.cli.commands.ProfileStore", return_value=store
-        ), patch(
-            "AgentRecord.cli.commands.safe_input",
-            side_effect=["1", "3", "新洞见", "新内容"],
-        ):
-            commands._handle_feedback()
-
-        store.record_user_feedback.assert_called_once_with(
-            "node-1", "correct", title="新洞见", body="新内容"
-        )
-
-    def test_feedback_write_failure_is_reported_without_exiting_cli(self):
-        store = Mock()
-        store.feedback_candidates.return_value = [
-            {
-                "id": "node-1",
-                "node_type": "viewpoint",
-                "period_start": "2026-07-14",
-                "title": "原洞见",
-                "body": "原内容",
-            }
-        ]
-        store.record_user_feedback.side_effect = ValueError("画像已被其他操作更新")
-        with patch("AgentRecord.cli.commands.AnalysisStore"), patch(
-            "AgentRecord.cli.commands.ProfileStore", return_value=store
-        ), patch(
-            "AgentRecord.cli.commands.safe_input", side_effect=["1", "1"]
-        ), patch("AgentRecord.cli.commands.console.print") as console_print:
-            commands._handle_feedback()
-
-        output = " ".join(str(call.args[0]) for call in console_print.call_args_list)
-        self.assertIn("反馈未写入", output)
-        self.assertIn("画像已被其他操作更新", output)
 
     def test_help_commands_are_separated_by_mode(self):
         self.assertEqual(
@@ -231,7 +182,7 @@ class MainCommandTests(unittest.TestCase):
             set(app.MODE_COMMANDS[terminal.RECORD_MODE]),
         )
         self.assertEqual(
-            {"/h", "/mode", "/status", "/s", "/a", "/retry", "/f", "/m"},
+            {"/h", "/mode", "/status", "/s", "/a", "/retry", "/m"},
             set(app.MODE_COMMANDS[terminal.REPORT_MODE]),
         )
 

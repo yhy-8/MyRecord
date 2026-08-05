@@ -23,38 +23,27 @@ from ..ai_client import (
 from .context import (
     _analysis_report_path,
     _existing_logs,
-    _information_briefings,
     _monthly_supporting_reports,
-    _period_records,
     _recent_summary_context,
     _referenced_source_context,
 )
-from .information import (
-    _prior_week_briefings,
-    _week_record_context,
-    generate_information_briefing,
-    information_briefing_path,
-)
 from .orchestrator import (
     generate_analysis_report,
-    generate_daily_profile,
     summarize_diary,
 )
-from .store import AnalysisStore
 
 
 logger = logging.getLogger(__name__)
 
 
 _MAX_AUTOMATIC_CONTENT_FAILURES = 2
-_CONTENT_FAILURE_POLICY_VERSION = 3
+_CONTENT_FAILURE_POLICY_VERSION = 4
 _AUTOMATION_TASK_ORDER = (
     "daily_summary",
-    "daily_profile",
-    "daily_information",
     "weekly_report",
     "monthly_report",
 )
+_RETIRED_AUTOMATION_TASKS = {"daily_profile", "daily_information"}
 
 
 class _AutomationLock:
@@ -138,11 +127,9 @@ def _next_hour(now: datetime.datetime) -> datetime.datetime:
 
 def _default_task_target(task: str, now: datetime.datetime) -> dict[str, str]:
     today = now.date()
-    if task in {"daily_summary", "daily_profile"}:
+    if task == "daily_summary":
         date = today - datetime.timedelta(days=1)
         return {"start": date.isoformat(), "end": date.isoformat()}
-    if task == "daily_information":
-        return {"start": today.isoformat(), "end": today.isoformat()}
     if task == "weekly_report":
         start, end = _latest_week_period(today)
         return {"start": start.isoformat(), "end": end.isoformat()}
@@ -260,24 +247,6 @@ def _content_failure_key(
                 target=date.isoformat(),
                 diary=path.read_text(encoding="utf-8") if path.is_file() else "",
             )
-        elif task == "daily_profile":
-            date = datetime.date.fromisoformat(target["start"])
-            path = settings.DIARY_DIR / f"{date.isoformat()}.md"
-            payload.update(
-                target=date.isoformat(),
-                diary=path.read_text(encoding="utf-8") if path.is_file() else "",
-            )
-        elif task == "daily_information":
-            today = datetime.date.fromisoformat(target["start"])
-            week_start = today - datetime.timedelta(days=today.weekday())
-            prior_briefings, prior_queries = _prior_week_briefings(today)
-            payload.update(
-                target=today.isoformat(),
-                week_start=week_start.isoformat(),
-                records=_week_record_context(today),
-                prior_briefings=prior_briefings,
-                prior_queries=prior_queries,
-            )
         elif task in {"weekly_report", "monthly_report"}:
             start = datetime.date.fromisoformat(target["start"])
             end = datetime.date.fromisoformat(target["end"])
@@ -292,7 +261,6 @@ def _content_failure_key(
                 referenced_sources=_referenced_source_context(logs),
                 recent_summaries=_recent_summary_context(start),
                 supporting_reports=supporting_reports,
-                information_leads=_information_briefings(start, end),
             )
         return hashlib.sha256(
             json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
@@ -352,11 +320,7 @@ def _set_task_error(
                 state.setdefault("failure_counts", {})[task] = failure_count
                 if failure_key:
                     state.setdefault("failure_keys", {})[task] = failure_key
-                maximum_failures = (
-                    1
-                    if task == "daily_information"
-                    else _MAX_AUTOMATIC_CONTENT_FAILURES
-                )
+                maximum_failures = _MAX_AUTOMATIC_CONTENT_FAILURES
                 if failure_count >= maximum_failures:
                     retry_kind = "content_blocked"
                     state.get("retry_after", {}).pop(task, None)
@@ -408,6 +372,26 @@ def _remove_legacy_progress(state: dict) -> None:
         "deferred_reason",
     ):
         state.pop(key, None)
+    for key in (
+        "errors",
+        "retry_after",
+        "retry_kind",
+        "failure_counts",
+        "failure_keys",
+        "failure_targets",
+        "pending_targets",
+    ):
+        values = state.get(key)
+        if not isinstance(values, dict):
+            continue
+        for task in _RETIRED_AUTOMATION_TASKS:
+            values.pop(task, None)
+        if not values:
+            state.pop(key, None)
+    if state.get("current_task") in _RETIRED_AUTOMATION_TASKS:
+        state.pop("current_task", None)
+        state.pop("current_task_detail", None)
+        state.pop("current_task_started_at", None)
 
 
 def _diary_summary_needs_generation(path: Path) -> bool:
@@ -453,16 +437,6 @@ def _hour_key(now: datetime.datetime) -> str:
     return now.strftime("%Y-%m-%dT%H")
 
 
-def _daily_information_scheduled_time() -> datetime.time:
-    time_text = str(
-        settings.CONFIG.get("automation", {}).get("daily_information_time", "08:05")
-    )
-    try:
-        return datetime.time.fromisoformat(time_text)
-    except ValueError:
-        return datetime.time(8, 5)
-
-
 def _latest_week_period(today: datetime.date) -> tuple[datetime.date, datetime.date]:
     end = today - datetime.timedelta(days=today.weekday() + 1)
     return end - datetime.timedelta(days=6), end
@@ -485,21 +459,6 @@ def _task_missing(
         date = datetime.date.fromisoformat(target["start"])
         path = settings.DIARY_DIR / f"{date.isoformat()}.md"
         return path.exists() and _diary_summary_needs_generation(path)
-    if task == "daily_profile":
-        date = datetime.date.fromisoformat(target["start"])
-        logs = _existing_logs(date, date)
-        if not _period_records(logs):
-            return False
-        return not AnalysisStore.has_completed_run(
-            "daily_profile",
-            date.isoformat(),
-            date.isoformat(),
-        )
-    if task == "daily_information":
-        date = datetime.date.fromisoformat(target["start"])
-        if date == today and now.time() < _daily_information_scheduled_time():
-            return False
-        return not information_briefing_path(date).exists()
     if task == "weekly_report":
         start = datetime.date.fromisoformat(target["start"])
         end = datetime.date.fromisoformat(target["end"])
@@ -529,16 +488,6 @@ def _task_artifact_status(task: str, now: datetime.datetime) -> str:
         if not path.exists():
             return f"{yesterday} 无日记"
         return f"{yesterday} {'缺失' if _diary_summary_needs_generation(path) else '已存在'}"
-    if task == "daily_profile":
-        yesterday = today - datetime.timedelta(days=1)
-        logs = _existing_logs(yesterday, yesterday)
-        if not _period_records(logs):
-            return f"{yesterday} 无日记"
-        return f"{yesterday} {'缺失' if _task_missing(task, now) else '已更新'}"
-    if task == "daily_information":
-        if now.time() < _daily_information_scheduled_time():
-            return f"{today} 未到生成时间"
-        return f"{today} {'缺失' if _task_missing(task, now) else '已存在'}"
     if task == "weekly_report":
         start, end = _latest_week_period(today)
         if not _existing_logs(start, end):
@@ -627,13 +576,10 @@ def _scan_missing_targets(
     automation: dict,
     *,
     hourly_detection_due: bool,
-    daily_information_due: bool,
 ) -> None:
     """Persist exact targets before a predecessor can block their execution."""
     initial_due = {
-        "daily_summary": hourly_detection_due or daily_information_due,
-        "daily_profile": hourly_detection_due or daily_information_due,
-        "daily_information": hourly_detection_due or daily_information_due,
+        "daily_summary": hourly_detection_due,
         "weekly_report": hourly_detection_due,
         "monthly_report": hourly_detection_due,
     }
@@ -653,10 +599,8 @@ def _scan_missing_targets(
 
 
 def _failure_batch_date(task: str, target: dict[str, str]) -> datetime.date:
-    if task in {"daily_summary", "daily_profile"}:
+    if task == "daily_summary":
         return datetime.date.fromisoformat(target["start"]) + datetime.timedelta(days=1)
-    if task == "daily_information":
-        return datetime.date.fromisoformat(target["start"])
     return datetime.date.fromisoformat(target["end"]) + datetime.timedelta(days=1)
 
 
@@ -702,17 +646,6 @@ def _run_pending_task(
     )
     if task == "daily_summary":
         _run_daily_summaries(now.date(), state, model, target=target)
-    elif task == "daily_profile":
-        _run_daily_profile(now.date(), state, model, trigger=trigger, target=target)
-    elif task == "daily_information":
-        _run_daily_information(
-            now,
-            state,
-            model,
-            trigger=trigger,
-            target=target,
-            ignore_schedule=retry_trigger,
-        )
     elif task == "weekly_report":
         _run_weekly_reports(
             now.date(), state, model, trigger=trigger, target=target
@@ -785,7 +718,7 @@ def _process_pending_targets(
 
 
 def run_due_automatic_tasks() -> None:
-    """执行到期的日总结、每日信息简报和闭合周期报告。"""
+    """执行到期的日总结和闭合周期报告。"""
     automation = settings.CONFIG.get("automation", {})
     if not automation.get("enabled", True):
         return
@@ -807,16 +740,11 @@ def run_due_automatic_tasks() -> None:
         return
     try:
         hourly_detection_due = state.get("last_detection_hour") != _hour_key(now)
-        daily_information_due = (
-            now.time() >= _daily_information_scheduled_time()
-            and _task_missing("daily_information", now)
-        )
         _scan_missing_targets(
             state,
             now,
             automation,
             hourly_detection_due=hourly_detection_due,
-            daily_information_due=daily_information_due,
         )
         _enqueue_legacy_failure_followups(state, now, automation)
         _save_automation_state(state)
@@ -846,93 +774,6 @@ def run_due_automatic_tasks() -> None:
             _save_automation_state(state)
         finally:
             automation_lock.release()
-
-
-def _run_daily_information(
-    now: datetime.datetime,
-    state: dict,
-    model_config: settings.ModelDict,
-    *,
-    trigger: str = "scheduled",
-    target: dict[str, str] | None = None,
-    ignore_schedule: bool = False,
-) -> None:
-    date = (
-        datetime.date.fromisoformat(target["start"])
-        if target
-        else now.date()
-    )
-    date_text = date.isoformat()
-    if (
-        date == now.date()
-        and not ignore_schedule
-        and now.time() < _daily_information_scheduled_time()
-    ) or information_briefing_path(date).exists():
-        _clear_task_error(state, "daily_information")
-        _save_automation_state(state)
-        return
-    try:
-        _set_current_task(state, "daily_information", f"正在收集 {date_text} 信息")
-        message, success, _ = generate_information_briefing(
-            date,
-            model_config,
-            trigger=trigger,
-        )
-    except Exception as error:
-        message, success = f"接口异常: {error}", False
-    if success:
-        _clear_task_error(state, "daily_information")
-    else:
-        _set_task_error(
-            state,
-            "daily_information",
-            f"自动收集 {date_text} 信息失败: {message[:500]}",
-            target=target or {"start": date_text, "end": date_text},
-        )
-    _save_automation_state(state)
-
-
-def _run_daily_profile(
-    today: datetime.date,
-    state: dict,
-    model_config: settings.ModelDict,
-    *,
-    trigger: str = "scheduled",
-    target: dict[str, str] | None = None,
-) -> None:
-    date = (
-        datetime.date.fromisoformat(target["start"])
-        if target
-        else today - datetime.timedelta(days=1)
-    )
-    date_text = date.isoformat()
-    logs = _existing_logs(date, date)
-    completed = AnalysisStore.has_completed_run(
-        "daily_profile", date_text, date_text
-    )
-    if not _period_records(logs) or completed:
-        _clear_task_error(state, "daily_profile")
-        _save_automation_state(state)
-        return
-    try:
-        _set_current_task(
-            state, "daily_profile", f"正在更新 {date_text} 人物画像"
-        )
-        message, success = generate_daily_profile(
-            date, model_config, trigger=trigger
-        )
-    except Exception as error:
-        message, success = f"接口异常: {error}", False
-    if success:
-        _clear_task_error(state, "daily_profile")
-    else:
-        _set_task_error(
-            state,
-            "daily_profile",
-            f"自动更新 {date_text} 人物画像失败: {message[:500]}",
-            target=target or {"start": date_text, "end": date_text},
-        )
-    _save_automation_state(state)
 
 
 def _run_weekly_reports(
@@ -1009,8 +850,6 @@ def _run_monthly_reports(
 
 AUTOMATION_TASK_LABELS = {
     "daily_summary": "日总结",
-    "daily_profile": "每日人物画像",
-    "daily_information": "每日信息简报",
     "weekly_report": "自动周报",
     "monthly_report": "自动月报",
 }
@@ -1035,19 +874,6 @@ def _retry_one_task(
     target = _stored_task_target(state, task, now)
     if task == "daily_summary":
         _run_daily_summaries(now.date(), state, model, target=target)
-    elif task == "daily_profile":
-        _run_daily_profile(
-            now.date(), state, model, trigger="retry", target=target
-        )
-    elif task == "daily_information":
-        _run_daily_information(
-            now,
-            state,
-            model,
-            trigger="retry",
-            target=target,
-            ignore_schedule=True,
-        )
     elif task == "weekly_report":
         _run_weekly_reports(
             now.date(), state, model, trigger="retry", target=target
@@ -1067,6 +893,8 @@ def retry_failed_automatic_tasks() -> tuple[str, bool]:
     tasks: list[str] = []
     try:
         state = _load_automation_state()
+        _remove_legacy_progress(state)
+        _save_automation_state(state)
         tasks = [
             task
             for task in AUTOMATION_TASK_LABELS
@@ -1239,13 +1067,13 @@ def system_automation_status() -> tuple[bool, str]:
                 return True, "系统自动任务已安装；每分钟唤醒调度器检查到期任务。"
             if installed_count:
                 return False, "系统自动任务安装不完整，请重新执行安装命令。"
-            return False, "系统自动任务未安装；自动总结、信息简报和周期报告不会运行。"
+            return False, "系统自动任务未安装；自动总结和周期报告不会运行。"
 
         current = subprocess.run(
             ["crontab", "-l"], capture_output=True, text=True, timeout=30
         )
         if current.returncode == 1:
-            return False, "系统自动任务未安装；自动总结、信息简报和周期报告不会运行。"
+            return False, "系统自动任务未安装；自动总结和周期报告不会运行。"
         if current.returncode != 0:
             message = current.stderr.strip() or "无法读取当前 crontab。"
             return False, f"无法确认系统自动任务状态：{message}"
@@ -1259,7 +1087,7 @@ def system_automation_status() -> tuple[bool, str]:
             return True, "系统自动任务已安装；每分钟唤醒调度器检查到期任务。"
         if has_startup or has_minute:
             return False, "系统自动任务安装不完整，请重新执行安装命令。"
-        return False, "系统自动任务未安装；自动总结、信息简报和周期报告不会运行。"
+        return False, "系统自动任务未安装；自动总结和周期报告不会运行。"
     except (OSError, subprocess.SubprocessError) as error:
         return False, f"无法确认系统自动任务状态：{error}"
 
@@ -1268,6 +1096,7 @@ def automation_status_snapshot() -> dict:
     """汇总安装状态、真实产物状态、调度时间和当前失败。"""
     installed, install_message = system_automation_status()
     state = _load_automation_state()
+    _remove_legacy_progress(state)
     now = datetime.datetime.now()
     return {
         "installed": installed,
@@ -1280,8 +1109,6 @@ def automation_status_snapshot() -> dict:
         "current_task_detail": state.get("current_task_detail", ""),
         "current_task_started_at": state.get("current_task_started_at", ""),
         "daily_summary_status": _task_artifact_status("daily_summary", now),
-        "daily_profile_status": _task_artifact_status("daily_profile", now),
-        "daily_information_status": _task_artifact_status("daily_information", now),
         "weekly_report_status": _task_artifact_status("weekly_report", now),
         "monthly_report_status": _task_artifact_status("monthly_report", now),
         "last_detection_hour": state.get("last_detection_hour", ""),

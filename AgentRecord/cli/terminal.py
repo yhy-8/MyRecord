@@ -419,7 +419,6 @@ def show_help(mode: str = RECORD_MODE) -> None:
             "  [cyan]/a weekly [日期][/cyan] → 后台生成分析周报（空=快速选择自然周）\n"
             "  [cyan]/a monthly [日期][/cyan] → 后台生成分析月报（空=快速选择自然月）\n"
             "  [cyan]/retry[/cyan]    → 独立后台按依赖顺序重试失败自动任务\n"
-            "  [cyan]/f[/cyan]        → 认可、否决或修正最近的人物画像条目\n"
             "  [cyan]/m[/cyan]        → 永久切换总结和报告使用的模型"
         )
         title = "[bold]报告模式[/bold]"

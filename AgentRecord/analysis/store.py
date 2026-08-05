@@ -1,7 +1,7 @@
-"""SQLite persistence for disposable analysis runs and Agent audit artifacts.
+"""SQLite persistence for disposable report runs and Agent audit artifacts.
 
-The durable personal profile lives in ``AnalysisReports/Profile.md``.  SQLite
-keeps only rebuildable runs, sources, validated-stage cache and telemetry.
+SQLite keeps only rebuildable runs, sources, validated-stage cache and telemetry.
+Legacy profile export remains solely to avoid data loss during old-schema upgrades.
 """
 
 import datetime
@@ -286,12 +286,10 @@ class AnalysisStore:
         *,
         trigger: str | None = None,
     ) -> str:
-        if kind not in {"daily_profile", "daily_information", "weekly", "monthly"}:
+        if kind not in {"weekly", "monthly"}:
             raise ValueError(f"不支持的分析类型: {kind}")
         if origin not in {"manual", "auto"}:
             raise ValueError(f"不支持的报告来源: {origin}")
-        if kind in {"daily_profile", "daily_information"} and origin != "auto":
-            raise ValueError("每日人物画像和信息简报只支持自动来源")
         trigger = trigger or ("manual" if origin == "manual" else "scheduled")
         if trigger not in {"manual", "scheduled", "retry"}:
             raise ValueError(f"不支持的触发方式: {trigger}")

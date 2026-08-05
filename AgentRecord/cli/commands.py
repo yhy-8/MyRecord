@@ -14,8 +14,6 @@ from ..analysis import (
     launch_automation_retry,
     summarize_diary,
 )
-from ..analysis.profile_store import ProfileStore
-from ..analysis.store import AnalysisStore
 from .report_jobs import manual_report_jobs
 from .terminal import console, post_notification, safe_input, show_view_help
 
@@ -202,8 +200,6 @@ def _handle_status() -> None:
         f"  最后缺漏检测小时：{status['last_detection_hour'] or '尚未记录'}",
         f"  最后手动重试：{status.get('last_retry_completed_at') or '尚未记录'}",
         f"  昨日日记总结：{status['daily_summary_status']}",
-        f"  昨日人物画像：{status['daily_profile_status']}",
-        f"  今日信息简报：{status['daily_information_status']}",
         f"  上周自动周报：{status['weekly_report_status']}",
         f"  上月自动月报：{status['monthly_report_status']}",
     ]
@@ -217,8 +213,6 @@ def _handle_status() -> None:
         lines.append("  [cyan]待处理目标（严格按以下任务顺序执行）：[/cyan]")
         for task in (
             "daily_summary",
-            "daily_profile",
-            "daily_information",
             "weekly_report",
             "monthly_report",
         ):
@@ -264,67 +258,6 @@ def _handle_status() -> None:
     else:
         lines.append("  当前失败：无")
     console.print(Panel("\n".join(lines), title="[bold]自动任务状态[/bold]", border_style="cyan"))
-
-
-def _handle_feedback() -> None:
-    try:
-        AnalysisStore()  # Ensures a legacy SQLite profile is exported once.
-        store = ProfileStore()
-        nodes = store.feedback_candidates()
-    except Exception as error:
-        console.print(
-            f"[red][x][/red] 无法读取人物画像反馈列表: "
-            f"{str(error) or error.__class__.__name__}"
-        )
-        return
-    if not nodes:
-        console.print("[yellow][!][/yellow] 暂无可反馈的人物画像条目。")
-        return
-    type_labels = {
-        "viewpoint": "观点",
-        "principle": "理念",
-        "ideal": "理想",
-        "behavior_pattern": "行为模式",
-        "interest": "关注领域",
-    }
-    content = "\n".join(
-        f"  [cyan]{index}[/cyan]. [{type_labels.get(node['node_type'], node['node_type'])}] "
-        f"{node['period_start']}  {node['title']}"
-        for index, node in enumerate(nodes, 1)
-    )
-    console.print(Panel(content, title="[bold]选择要反馈的节点[/bold]", border_style="cyan"))
-    selection = safe_input("选择编号 [空=取消] >> ").strip()
-    if not selection:
-        return
-    try:
-        index = int(selection) - 1
-        if index < 0:
-            raise IndexError
-        node = nodes[index]
-    except (ValueError, IndexError):
-        console.print(f"[yellow][!][/yellow] 无效编号: {selection}")
-        return
-    console.print(Panel(node["body"], title=node["title"], border_style="cyan"))
-    action_text = safe_input("操作 [1=认可, 2=否决, 3=修正，空=取消] >> ").strip()
-    actions = {"1": "accept", "2": "reject", "3": "correct"}
-    action = actions.get(action_text)
-    if not action:
-        if action_text:
-            console.print(f"[yellow][!][/yellow] 无效操作: {action_text}")
-        return
-    title = body = ""
-    if action == "correct":
-        title = safe_input("新标题 [空=保留原标题] >> ").strip()
-        body = safe_input("新内容 [空=保留原内容] >> ").strip()
-    try:
-        store.record_user_feedback(node["id"], action, title=title, body=body)
-    except Exception as error:
-        console.print(
-            f"[red][x][/red] 人物画像反馈未写入: "
-            f"{str(error) or error.__class__.__name__}"
-        )
-        return
-    console.print("[cyan][*][/cyan] 反馈已记录；将影响以后的分析，不会改写已有报告。")
 
 
 def _handle_reference(user_input: str) -> None:

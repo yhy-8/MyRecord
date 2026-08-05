@@ -482,6 +482,65 @@ class JournalAITests(unittest.TestCase):
         self.assertEqual(["length"], response.telemetry["finish_reasons"])
 
     @patch("AgentRecord.ai_client.requests.post")
+    def test_empty_stop_response_gets_one_final_answer_retry(self, post):
+        post.side_effect = [
+            FakeResponse(
+                {
+                    "choices": [
+                        {
+                            "finish_reason": "stop",
+                            "message": {
+                                "role": "assistant",
+                                "content": "",
+                                "reasoning_content": "内部思考",
+                            },
+                        }
+                    ]
+                }
+            ),
+            FakeResponse(
+                {
+                    "choices": [
+                        {
+                            "finish_reason": "stop",
+                            "message": {"role": "assistant", "content": "最终回答"},
+                        }
+                    ]
+                }
+            ),
+        ]
+
+        response = ai_client.call_ai("结构化任务", self.model)
+
+        self.assertTrue(response.success)
+        self.assertEqual("最终回答", response.text)
+        self.assertEqual(2, post.call_count)
+        self.assertEqual(1, response.telemetry["empty_content_retries"])
+        retry_message = post.call_args_list[1].kwargs["json"]["messages"][-1]
+        self.assertEqual("user", retry_message["role"])
+        self.assertIn("没有返回最终正文", retry_message["content"])
+
+    @patch("AgentRecord.ai_client.requests.post")
+    def test_repeated_empty_stop_response_still_fails_boundedly(self, post):
+        post.return_value = FakeResponse(
+            {
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": ""},
+                    }
+                ]
+            }
+        )
+
+        response = ai_client.call_ai("结构化任务", self.model)
+
+        self.assertFalse(response.success)
+        self.assertEqual("(AI 未给出最终回答)", response.text)
+        self.assertEqual(2, post.call_count)
+        self.assertEqual(1, response.telemetry["empty_content_retries"])
+
+    @patch("AgentRecord.ai_client.requests.post")
     def test_filtered_and_resource_exhausted_finishes_are_failures(self, post):
         post.side_effect = [
             FakeResponse(

@@ -1,5 +1,5 @@
 # ================= AgentRecord 配置文件 =================
-config_version: 2
+config_version: 3
 
 # 模型列表
 #   name:     显示名称（人看的）
@@ -10,14 +10,14 @@ models:
     model_id: deepseek-v4-pro
     search: false         # 通用 AI 调用是否开放模型原生搜索
     json_mode: true       # DeepSeek 官方接口支持 JSON Output
-    max_tokens: 32768     # 长月报全局上限；每日 Planner/Collector 会再按阶段收紧
+    max_tokens: 32768     # 长报告输出上限
     api_url: https://api.deepseek.com/chat/completions
     api_key:
 
 # 总结、手动报告和自动报告统一使用此模型；/m 会永久更新该项
 current_model: "deepseek-v4-pro"
 
-# 第三方搜索：每日信息简报和周/月报必需，用于审计固定查询与来源
+# 第三方搜索：周报探索板块必需，用于审计固定查询与来源
 third_search:
   enabled: false               # 全局开关
   api_url: "https://api.bocha.cn/v1/web-search"
@@ -41,14 +41,12 @@ log_dir: "./Log"
 # 休眠或关机后由下一分钟的小时水位补查；内核锁在进程退出后自动释放。
 # 同一输入的内容失败最多自动尝试两次；随后等待输入/模型变化或 /retry。
 # 已记录失败不会每分钟反复调用模型，/retry 可按依赖顺序明确重试。
-# 自动总结上一自然日、审查并更新人物画像，每天生成信息简报，
-# 并生成上一完整自然周和自然月报告。前项失败时不会越过它生成后项。
+# 自动总结上一自然日，并生成上一完整自然周和自然月报告。
+# 周报保留整理回顾与联网探索；月报只做总结，不联网探索。
+# 前项失败时不会越过它生成后项。
 # 每次只核对昨日/今日与最近一个已闭合周期，不遍历长期关机期间的历史周月。
 automation:
   enabled: true
   daily_summary: true       # 自动写入前一日日记顶部 <summary>
-  daily_profile: true       # 根据前一日原始记录审查并更新跨周期人物画像
-  daily_information: true   # 每日联网收集综合新闻和本周记录的定向信息
-  daily_information_time: "08:05"  # 该时间后的首次分钟检查中运行
   weekly_report: true       # 每周生成上一完整自然周的分析周报
-  monthly_report: true      # 每月生成上一完整自然月的分析月报
+  monthly_report: true      # 每月生成上一完整自然月的总结月报

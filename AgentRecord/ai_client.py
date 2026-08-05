@@ -497,6 +497,7 @@ def call_ai(
     rejected_tool_calls: list[str] = []
     completed_search_queries: set[str] = set()
     finish_reasons: list[str] = []
+    empty_content_retries = 0
 
     def observe_attempt(_attempt: int) -> None:
         nonlocal http_attempts
@@ -520,6 +521,7 @@ def call_ai(
                 "rejected_tool_calls": rejected_tool_calls,
                 "search_evidence": search_evidence,
                 "finish_reasons": finish_reasons,
+                "empty_content_retries": empty_content_retries,
             },
         )
 
@@ -606,6 +608,19 @@ def call_ai(
                         False,
                     )
                 if not text:
+                    if finish_reason == "stop" and empty_content_retries == 0:
+                        empty_content_retries += 1
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": (
+                                    "[系统提示] 上一轮只完成了内部思考，没有返回最终正文。"
+                                    "请立即按原任务输出完整最终答案。"
+                                ),
+                            }
+                        )
+                        payload["messages"] = messages
+                        continue
                     return finish("(AI 未给出最终回答)", False)
                 return finish(text, True)
 
