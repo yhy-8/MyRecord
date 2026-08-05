@@ -146,7 +146,7 @@ class JournalTests(unittest.TestCase):
         self.assertRegex(first["source_id"], r"^R-20260715-001-[0-9a-f]{12}$")
 
     def test_tool_date_cannot_escape_diary_directory(self):
-        message = journal.read_daily_log(date="../Docs/设计与实现")
+        message = journal.read_daily_log(date="../Docs/设计原则与系统架构")
 
         self.assertIn("YYYY-MM-DD", message)
 
