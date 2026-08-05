@@ -56,7 +56,7 @@ class ModelSettingsTests(unittest.TestCase):
             effective = settings.ModelConfig.get_model()
 
         self.assertTrue(effective["json_mode"])
-        self.assertEqual(32768, effective["max_tokens"])
+        self.assertEqual(100000, effective["max_tokens"])
         self.assertNotIn("json_mode", raw_model)
 
     def test_config_warnings_explain_provider_defaults_and_search_cap(self):

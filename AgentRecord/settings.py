@@ -63,7 +63,7 @@ class ModelConfig:
         hostname = urlsplit(str(effective.get("api_url", ""))).hostname or ""
         if hostname.casefold() == "api.deepseek.com":
             effective.setdefault("json_mode", True)
-            effective.setdefault("max_tokens", 32768)
+            effective.setdefault("max_tokens", 100000)
         return effective
 
     @classmethod

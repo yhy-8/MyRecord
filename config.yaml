@@ -7,7 +7,7 @@ models:
   - name: deepseek-v4-pro
     model_id: deepseek-v4-pro
     json_mode: true       # DeepSeek 官方接口支持 JSON Output
-    max_tokens: 32768     # 长报告输出上限
+    max_tokens: 100000    # 单次生成上限；V4 官方最大输出为 384K
     api_url: https://api.deepseek.com/chat/completions
     api_key:
 

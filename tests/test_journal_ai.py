@@ -130,14 +130,14 @@ class JournalAITests(unittest.TestCase):
         post.return_value = FakeResponse(
             {"choices": [{"message": {"role": "assistant", "content": "{}"}}]}
         )
-        model = {**self.model, "json_mode": True, "max_tokens": 32768}
+        model = {**self.model, "json_mode": True, "max_tokens": 100000}
 
         response = ai_client.call_ai("JSON 任务", model, structured_output=True)
 
         self.assertTrue(response.success)
         payload = post.call_args.kwargs["json"]
         self.assertEqual({"type": "json_object"}, payload["response_format"])
-        self.assertEqual(32768, payload["max_tokens"])
+        self.assertEqual(100000, payload["max_tokens"])
 
     @patch("AgentRecord.ai_client.requests.post")
     def test_output_length_stop_is_classified_as_truncation(self, post):
