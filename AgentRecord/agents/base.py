@@ -84,7 +84,7 @@ def _prompt(
         prompt += f"""
 
 【中控修订请求】
-这是同一项正文的一次有限修订。只根据反馈改写正文，不要解释修改过程。
+这是同一项正文的本次有限修订。只根据反馈改写正文，不要解释修改过程。
 {json.dumps(revision_context, ensure_ascii=False)}"""
     return prompt + """
 

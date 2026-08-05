@@ -36,8 +36,6 @@ from .store import AnalysisStore
 
 
 logger = logging.getLogger(__name__)
-_MAX_AGENT_ATTEMPTS = 3
-_MAX_CONTENT_REVISIONS = 1
 _MAX_AGENT_INPUT_CHARACTERS = 120000
 _MAX_RECORD_CHUNK_CHARACTERS = 30000
 
@@ -85,7 +83,8 @@ def summarize_diary(date: str, model_config: settings.ModelDict) -> tuple[str, b
 {content}"""
     current_prompt = prompt
     summary = ""
-    for attempt in range(1, _MAX_AGENT_ATTEMPTS + 1):
+    maximum_attempts = settings.retry_policy()["daily_summary_retry_limit"] + 1
+    for attempt in range(1, maximum_attempts + 1):
         summary, success = call_ai(current_prompt, model_config)
         if not success:
             return summary, False
@@ -106,10 +105,16 @@ def summarize_diary(date: str, model_config: settings.ModelDict) -> tuple[str, b
             errors.append("总结为空")
         if not errors:
             break
-        if attempt == _MAX_AGENT_ATTEMPTS:
-            return f"日记总结连续 {_MAX_AGENT_ATTEMPTS} 次未通过校验: {'；'.join(errors)}", False
+        if attempt == maximum_attempts:
+            return f"日记总结连续 {maximum_attempts} 次未通过校验: {'；'.join(errors)}", False
         current_prompt = prompt + "\n\n【中控修订请求】\n" + json.dumps(
-            _revision_context(attempt + 1, summary, errors, source="中控确定性校验"),
+            _revision_context(
+                attempt + 1,
+                summary,
+                errors,
+                source="中控确定性校验",
+                maximum_attempts=maximum_attempts,
+            ),
             ensure_ascii=False,
         )
     result = journal.update_summary_for_date(date, summary)
@@ -198,9 +203,12 @@ def _revision_context(
     feedback: object,
     *,
     source: str,
-    maximum_attempts: int = _MAX_AGENT_ATTEMPTS,
+    maximum_attempts: int | None = None,
 ) -> dict:
     """Build the common correction suffix while keeping the original prompt stable."""
+    if maximum_attempts is None:
+        maximum_attempts = settings.retry_policy()["agent_revision_limit"] + 1
+
     def model_visible(value: object) -> object:
         if isinstance(value, dict):
             return {
@@ -270,9 +278,10 @@ def _retrospective_section(
     *,
     task: str = "生成整理与回顾板块。",
 ) -> str:
+    revision_limit = settings.retry_policy()["agent_revision_limit"]
     revision_context = None
     last_feedback = ""
-    for attempt in range(1, _MAX_CONTENT_REVISIONS + 2):
+    for attempt in range(1, revision_limit + 2):
         payload, telemetry = _call_agent(
             retrospective.SPEC,
             task,
@@ -292,14 +301,14 @@ def _retrospective_section(
                 {"result": payload},
                 error,
             )
-            if attempt > _MAX_CONTENT_REVISIONS:
+            if attempt > revision_limit:
                 raise
             revision_context = _revision_context(
                 attempt + 1,
                 payload,
                 [str(error)],
                 source="中控确定性校验",
-                maximum_attempts=_MAX_CONTENT_REVISIONS + 1,
+                maximum_attempts=revision_limit + 1,
             )
             continue
 
@@ -343,14 +352,14 @@ def _retrospective_section(
             {"text": body, "markdown": markdown},
             error,
         )
-        if attempt > _MAX_CONTENT_REVISIONS:
+        if attempt > revision_limit:
             raise error
         revision_context = _revision_context(
             attempt + 1,
             body,
             last_feedback,
             source="Reviewer 实质审查",
-            maximum_attempts=_MAX_CONTENT_REVISIONS + 1,
+            maximum_attempts=revision_limit + 1,
         )
     raise AgentPipelineError("整理与回顾修订次数耗尽: " + last_feedback)
 
@@ -695,7 +704,8 @@ def _research_one_topic(
     revision_context = None
     last_feedback = ""
     telemetry_calls = []
-    for attempt in range(1, _MAX_CONTENT_REVISIONS + 2):
+    revision_limit = settings.retry_policy()["agent_revision_limit"]
+    for attempt in range(1, revision_limit + 2):
         payload, telemetry = _call_agent(
             researcher.SPEC,
             "研究这一个问题，并按最小对象返回状态和正文。",
@@ -726,7 +736,7 @@ def _research_one_topic(
                 {"topic_id": topic["topic_id"], "result": payload},
                 error,
             )
-            if attempt > _MAX_CONTENT_REVISIONS:
+            if attempt > revision_limit:
                 return {
                     "topic": topic,
                     "accepted": False,
@@ -738,7 +748,7 @@ def _research_one_topic(
                 payload,
                 str(error),
                 source="中控确定性校验",
-                maximum_attempts=_MAX_CONTENT_REVISIONS + 1,
+                maximum_attempts=revision_limit + 1,
             )
             continue
 
@@ -762,7 +772,7 @@ def _research_one_topic(
                 "sources": sources,
                 "_telemetry": {"calls": telemetry_calls},
             }
-        if attempt > _MAX_CONTENT_REVISIONS:
+        if attempt > revision_limit:
             return {
                 "topic": topic,
                 "accepted": False,
@@ -775,7 +785,7 @@ def _research_one_topic(
             body,
             last_feedback,
             source="Reviewer 实质审查",
-            maximum_attempts=_MAX_CONTENT_REVISIONS + 1,
+            maximum_attempts=revision_limit + 1,
         )
     raise RuntimeError("unreachable")
 

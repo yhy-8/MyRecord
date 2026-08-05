@@ -44,7 +44,7 @@ class ToolResult:
 
 
 def is_network_failure(message: str) -> bool:
-    """Return whether an automation error is safe to retry after five minutes."""
+    """Return whether an automation error is safe to retry later."""
     return NETWORK_ERROR_MARKER in str(message)
 
 
@@ -78,21 +78,24 @@ def _transient_http_error(error: requests.HTTPError) -> bool:
 
 
 def _post_with_transient_retry(*args, **kwargs):
-    """Retry connection failures and transient server responses at most twice."""
+    """Retry connection failures and transient server responses as configured."""
     attempt_observer = kwargs.pop("attempt_observer", None)
-    for attempt in range(3):
+    retry = settings.retry_policy()
+    maximum_attempts = retry["transient_http_retry_limit"] + 1
+    backoff_seconds = retry["transient_http_backoff_seconds"]
+    for attempt in range(maximum_attempts):
         if attempt_observer:
             attempt_observer(attempt + 1)
         try:
             response = requests.post(*args, **kwargs)
         except (requests.ConnectionError, requests.Timeout):
-            if attempt == 2:
+            if attempt + 1 == maximum_attempts:
                 raise
-            time.sleep(1 << attempt)
+            time.sleep(backoff_seconds * (1 << attempt))
             continue
         if response.status_code == 408 or 500 <= response.status_code < 600:
-            if attempt < 2:
-                time.sleep(1 << attempt)
+            if attempt + 1 < maximum_attempts:
+                time.sleep(backoff_seconds * (1 << attempt))
                 continue
         return response
     raise RuntimeError("unreachable")
@@ -295,6 +298,9 @@ def call_ai(
     }
     finish_reasons: list[str] = []
     empty_content_retries = 0
+    empty_response_retry_limit = settings.retry_policy()[
+        "empty_response_retry_limit"
+    ]
 
     def observe_attempt(_attempt: int) -> None:
         nonlocal http_attempts
@@ -314,7 +320,7 @@ def call_ai(
         )
 
     try:
-        for _ in range(2):
+        for _ in range(empty_response_retry_limit + 1):
             response = _post_with_transient_retry(
                 model_config["api_url"],
                 headers=headers,
@@ -351,7 +357,10 @@ def call_ai(
                 )
             if text:
                 return finish(text, True)
-            if finish_reason == "stop" and empty_content_retries == 0:
+            if (
+                finish_reason == "stop"
+                and empty_content_retries < empty_response_retry_limit
+            ):
                 empty_content_retries += 1
                 messages.append(
                     {

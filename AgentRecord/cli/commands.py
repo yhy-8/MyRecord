@@ -192,6 +192,11 @@ def _handle_retry() -> bool:
 
 def _handle_status() -> None:
     status = automation_status_snapshot()
+    retry = settings.retry_policy()
+    network_retry_minutes = retry["automation_network_retry_minutes"]
+    content_retry_interval = retry[
+        "automation_content_retry_interval_minutes"
+    ]
     installed = "已安装" if status["installed"] else "未完整安装"
     lines = [
         f"  系统自动任务：{installed}",
@@ -242,11 +247,11 @@ def _handle_status() -> None:
                 "content_blocked": "内容/格式失败，已暂停自动重试",
             }.get(kind, "非网络错误（内容或格式错误）")
             retry_policy = {
-                "network": "5 分钟后重试",
-                "rate_limit": "5 分钟后重试",
+                "network": f"{network_retry_minutes} 分钟后重试",
+                "rate_limit": f"{network_retry_minutes} 分钟后重试",
                 "blocked": "修正配置后用 /retry 重试",
                 "content_blocked": "输入或模型变化后自动解锁，也可用 /retry 重试",
-            }.get(kind, "下个整点重试")
+            }.get(kind, f"到下一个 {content_retry_interval} 分钟边界重试")
             suffix = f"；{retry_policy}不早于 {deadline}" if deadline else ""
             if kind in {"blocked", "content_blocked"}:
                 suffix = f"；{retry_policy}"

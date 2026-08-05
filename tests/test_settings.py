@@ -80,6 +80,27 @@ class ModelSettingsTests(unittest.TestCase):
         self.assertIn("json_mode, max_tokens", message)
         self.assertIn("有效上限 10", message)
 
+    def test_retry_policy_uses_configured_values_and_defaults(self):
+        with patch.object(
+            settings,
+            "CONFIG",
+            {"retry": {"agent_revision_limit": 3}},
+        ):
+            policy = settings.retry_policy()
+
+        self.assertEqual(3, policy["agent_revision_limit"])
+        self.assertEqual(2, policy["transient_http_retry_limit"])
+        self.assertEqual(60, policy["automation_content_retry_interval_minutes"])
+
+    def test_retry_policy_rejects_invalid_numeric_controls(self):
+        with patch.object(
+            settings,
+            "CONFIG",
+            {"retry": {"automation_content_failure_limit": 0}},
+        ):
+            with self.assertRaisesRegex(RuntimeError, "必须是正整数"):
+                settings.retry_policy()
+
 
 if __name__ == "__main__":
     unittest.main()

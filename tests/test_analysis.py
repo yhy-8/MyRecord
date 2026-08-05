@@ -473,6 +473,53 @@ class AnalysisWorkflowTests(unittest.TestCase):
             call_agent.call_args.kwargs["revision_context"]["maximum_attempts"],
         )
 
+    def test_agent_revision_limit_is_configurable(self):
+        source_id = "R-20260714-001"
+        base_input = {
+            "period": {
+                "kind": "weekly",
+                "start": "2026-07-13",
+                "end": "2026-07-19",
+            },
+            "records": [{"source_id": source_id, "text": "用户记录"}],
+        }
+        store = Mock()
+
+        with patch.dict(
+            settings.CONFIG,
+            {"retry": {"agent_revision_limit": 2}},
+        ), patch.object(
+            orchestrator,
+            "_call_agent",
+            side_effect=[
+                ({"text": "第一稿。"}, {}),
+                ({"text": "第二稿。"}, {}),
+                ({"text": "第三稿。"}, {}),
+            ],
+        ) as call_agent, patch.object(
+            orchestrator,
+            "_review_body",
+            side_effect=[
+                (False, "继续修改", {"approved": False}),
+                (False, "仍需修改", {"approved": False}),
+                (True, "", {"approved": True}),
+            ],
+        ):
+            markdown = orchestrator._retrospective_section(
+                base_input,
+                {source_id},
+                {"name": "mock"},
+                store,
+                "run-id",
+            )
+
+        self.assertIn("第三稿", markdown)
+        self.assertEqual(3, call_agent.call_count)
+        self.assertEqual(
+            3,
+            call_agent.call_args.kwargs["revision_context"]["maximum_attempts"],
+        )
+
     def test_reviewer_feedback_is_returned_to_original_agent(self):
         source_id = "R-20260714-001"
         base_input = {
@@ -1093,7 +1140,7 @@ class AnalysisWorkflowTests(unittest.TestCase):
         self.assertEqual(
             "2026-07-17T01:00:00", state["retry_after"]["weekly_report"]
         )
-        self.assertEqual("hourly", state["retry_kind"]["weekly_report"])
+        self.assertEqual("content", state["retry_kind"]["weekly_report"])
         self.assertEqual(1, state["failure_counts"]["weekly_report"])
         self.assertEqual(
             {"start": "2026-07-06", "end": "2026-07-12"},
@@ -1204,6 +1251,37 @@ class AnalysisWorkflowTests(unittest.TestCase):
                 state, "weekly_report", datetime.datetime(2026, 7, 17, 12, 0)
             )
         )
+
+    def test_automatic_failure_limit_and_retry_boundary_are_configurable(self):
+        class FixedDateTime(datetime.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 7, 17, 0, 25, 41)
+
+        state = {}
+        with patch.dict(
+            settings.CONFIG,
+            {
+                "retry": {
+                    "automation_content_failure_limit": 3,
+                    "automation_content_retry_interval_minutes": 30,
+                }
+            },
+        ), patch.object(
+            automation, "_content_failure_key", return_value="same-input"
+        ), patch.object(automation.datetime, "datetime", FixedDateTime):
+            automation._set_task_error(state, "weekly_report", "第一次失败")
+            self.assertEqual(
+                "2026-07-17T00:30:00",
+                state["retry_after"]["weekly_report"],
+            )
+            automation._set_task_error(state, "weekly_report", "第二次失败")
+            self.assertEqual("content", state["retry_kind"]["weekly_report"])
+            automation._set_task_error(state, "weekly_report", "第三次失败")
+
+        self.assertEqual("content_blocked", state["retry_kind"]["weekly_report"])
+        self.assertEqual(3, state["failure_counts"]["weekly_report"])
+        self.assertNotIn("weekly_report", state.get("retry_after", {}))
 
     def test_changed_input_unlocks_content_failure_on_hourly_detection(self):
         state = {

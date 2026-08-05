@@ -21,6 +21,19 @@ models:
 # 总结、手动报告和自动报告统一使用此模型；/m 会永久更新该项
 current_model: "deepseek-v4-pro"
 
+# 失败重试策略
+# *_retry_limit 都表示首次调用失败后还能重试多少次，不含首次调用。
+# Agent 修订由确定性校验失败和 Reviewer 拒绝共享；JSON 无法解析或 API 失败不修订。
+retry:
+  agent_revision_limit: 1                    # 同一报告正文最多修订次数
+  daily_summary_retry_limit: 2               # 日记总结为空时最多补写次数
+  empty_response_retry_limit: 1              # 接口 stop 但正文为空时最多补答次数
+  transient_http_retry_limit: 2              # 连接、超时、HTTP 408/5xx 最多重试次数
+  transient_http_backoff_seconds: 1          # HTTP 重试的初始等待秒数，后续指数增加
+  automation_content_failure_limit: 2        # 同一输入累计失败多少次后暂停自动重试
+  automation_network_retry_minutes: 5        # 网络错误和限流后的等待分钟数
+  automation_content_retry_interval_minutes: 60  # 内容失败重试边界；60 表示下一整点
+
 # 第三方搜索：周报探索板块必需，用于审计固定查询与来源
 third_search:
   enabled: false               # 全局开关
@@ -42,7 +55,8 @@ log_dir: "./Log"
 # 安装系统后台任务后，登录或重启时检查，此后每分钟检查；
 # 不检测桌面锁定；系统仍允许运行时照常执行，断网则按网络错误重试。
 # 休眠或关机后由下一分钟的小时水位补查；内核锁在进程退出后自动释放。
-# 同一输入的内容失败最多自动尝试两次；随后等待输入/模型变化或 /retry。
+# 同一输入的内容失败达到 retry.automation_content_failure_limit 后暂停；
+# 随后等待输入/相关配置变化或 /retry。
 # 已记录失败不会每分钟反复调用模型，/retry 可按依赖顺序明确重试。
 # 自动总结上一自然日，并生成上一完整自然周和自然月报告。
 # 周报保留整理回顾与联网探索；月报只做总结，不联网探索。

@@ -36,7 +36,6 @@ from .orchestrator import (
 logger = logging.getLogger(__name__)
 
 
-_MAX_AUTOMATIC_CONTENT_FAILURES = 2
 _AUTOMATION_TASK_ORDER = (
     "daily_summary",
     "weekly_report",
@@ -118,10 +117,16 @@ def _automation_model() -> settings.ModelDict:
     return settings.ModelConfig.get_model()
 
 
-def _next_hour(now: datetime.datetime) -> datetime.datetime:
-    return now.replace(minute=0, second=0, microsecond=0) + datetime.timedelta(
-        hours=1
-    )
+def _next_content_retry_boundary(now: datetime.datetime) -> datetime.datetime:
+    interval_minutes = settings.retry_policy()[
+        "automation_content_retry_interval_minutes"
+    ]
+    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    elapsed_minutes = (now - midnight).total_seconds() / 60
+    next_boundary = (
+        int(elapsed_minutes // interval_minutes) + 1
+    ) * interval_minutes
+    return midnight + datetime.timedelta(minutes=next_boundary)
 
 
 def _default_task_target(task: str, now: datetime.datetime) -> dict[str, str]:
@@ -230,6 +235,7 @@ def _content_failure_key(
         payload: dict = {
             "task": task,
             "model": model_signature,
+            "retry": settings.retry_policy(),
         }
         if task == "weekly_report":
             third_search = settings.CONFIG.get("third_search", {})
@@ -288,11 +294,14 @@ def _set_task_error(
         else:
             network_error = is_network_failure(message)
             rate_limited = is_rate_limit_failure(message)
-            retry_at = (
-                now + datetime.timedelta(minutes=5)
-                if network_error or rate_limited
-                else _next_hour(now)
-            )
+            if network_error or rate_limited:
+                retry_at = now + datetime.timedelta(
+                    minutes=settings.retry_policy()[
+                        "automation_network_retry_minutes"
+                    ]
+                )
+            else:
+                retry_at = _next_content_retry_boundary(now)
             state.setdefault("retry_after", {})[task] = retry_at.isoformat(
                 timespec="seconds"
             )
@@ -317,14 +326,16 @@ def _set_task_error(
                 state.setdefault("failure_counts", {})[task] = failure_count
                 if failure_key:
                     state.setdefault("failure_keys", {})[task] = failure_key
-                maximum_failures = _MAX_AUTOMATIC_CONTENT_FAILURES
+                maximum_failures = settings.retry_policy()[
+                    "automation_content_failure_limit"
+                ]
                 if failure_count >= maximum_failures:
                     retry_kind = "content_blocked"
                     state.get("retry_after", {}).pop(task, None)
                     if not state.get("retry_after"):
                         state.pop("retry_after", None)
                 else:
-                    retry_kind = "hourly"
+                    retry_kind = "content"
             state.setdefault("retry_kind", {})[task] = retry_kind
 
 
@@ -427,7 +438,7 @@ def _failure_retry_is_due(
         failed_at = datetime.datetime.strptime(error_text[:16], "%Y-%m-%d %H:%M")
     except ValueError:
         return False
-    return now >= _next_hour(failed_at)
+    return now >= _next_content_retry_boundary(failed_at)
 
 
 def _hour_key(now: datetime.datetime) -> str:

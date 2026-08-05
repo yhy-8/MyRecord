@@ -286,6 +286,53 @@ class JournalAITests(unittest.TestCase):
 
     @patch("AgentRecord.ai_client.time.sleep")
     @patch("AgentRecord.ai_client.requests.post")
+    def test_transient_http_retry_count_and_backoff_are_configurable(
+        self, post, sleep
+    ):
+        expected = FakeResponse({"ok": True})
+        post.side_effect = [ai_client.requests.Timeout("timeout"), expected]
+
+        with patch.dict(
+            settings.CONFIG,
+            {
+                "retry": {
+                    "transient_http_retry_limit": 1,
+                    "transient_http_backoff_seconds": 3,
+                }
+            },
+        ):
+            response = ai_client._post_with_transient_retry(
+                "https://example.test"
+            )
+
+        self.assertIs(expected, response)
+        self.assertEqual(2, post.call_count)
+        sleep.assert_called_once_with(3)
+
+    @patch("AgentRecord.ai_client.requests.post")
+    def test_empty_response_retry_can_be_disabled(self, post):
+        post.return_value = FakeResponse(
+            {
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": ""},
+                    }
+                ]
+            }
+        )
+
+        with patch.dict(
+            settings.CONFIG,
+            {"retry": {"empty_response_retry_limit": 0}},
+        ):
+            response = ai_client.call_ai("问题", self.model)
+
+        self.assertFalse(response.success)
+        self.assertEqual(1, post.call_count)
+
+    @patch("AgentRecord.ai_client.time.sleep")
+    @patch("AgentRecord.ai_client.requests.post")
     def test_transient_server_errors_use_bounded_retry(self, post, sleep):
         unavailable = FakeResponse({})
         unavailable.status_code = 503
