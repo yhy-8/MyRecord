@@ -1,65 +1,33 @@
-"""Independent quality gate for the two report sections."""
+"""Minimal JSON quality gate for one report section or research topic."""
 
 from .base import AgentPipelineError, AgentSpec
 
 
 SPEC = AgentSpec(
     name="reviewer",
-    purpose="分别审查整理回顾和领域研究",
+    purpose="审查一份回顾正文或一个研究主题正文",
     can_read_raw=True,
-    instructions="""严格但只按实质问题检查事实、时期、身份、来源覆盖、因果越界、心理诊断、套话和行为教练倾向，不因措辞偏好或可选润色否决板块。
-retrospective_review 模式必须把正文与 review_context 中的最小记录集合逐项对照，不能因为存在 [R-*] 格式就假定来源支持判断；topic_decisions 返回空数组。
-research_review 模式逐项检查每个 research_topics：外部来源是否真正支持正文，是否包含反例或边界，是否把探索性推断明确标为推断，以及是否避免替用户做最终判断。对每个输入 topic_id 返回 accepted 或 rejected；证据薄弱或正文越界时拒绝该主题，不要为了整份报告凑齐主题。
-pass 只表示板块正文是否可以按当前稿交付。pass=false 时 required_changes 或 unsupported_claims 必须给出能直接修改的具体意见；pass=true 时两者必须为空。
-研究审查的 pass 只有在全部主题都 accepted 时为 true；部分主题 rejected 时为 false，但中控仍可交付其余 accepted 主题。
-只返回 JSON：{"pass":true或false,"topic_decisions":[{"topic_id":"Q001","status":"accepted|rejected","reason":"..."}],"unsupported_claims":["..."],"required_changes":["..."],"summary":"..."}。""",
+    instructions="""本次只审查中控给出的一份正文。
+核对事实、时期、身份、来源覆盖、因果越界、心理诊断、套话和行为教练倾向。研究正文还要检查外部资料是否支持主要判断、是否说明边界和不确定性，以及是否避免替用户做最终判断。只报告影响真实性、可追溯性或交付质量的实质问题，不因措辞偏好否决。
+正文可以直接交付时 approved=true 且 feedback 为空；不能交付时 approved=false，并在 feedback 中只写一段具体、可执行的修改意见。
+只返回 {"approved":true或false,"feedback":""}。""",
 )
 
 
-def validate(
-    payload: dict,
-    *,
-    expected_topic_ids: set[str] | None = None,
-) -> tuple[bool, dict[str, str], list[str]]:
-    if not isinstance(payload.get("pass"), bool):
-        raise AgentPipelineError("Reviewer 缺少布尔 pass")
-    required = payload.get("required_changes", [])
-    unsupported = payload.get("unsupported_claims", [])
-    topic_decisions = payload.get("topic_decisions", [])
-    if not isinstance(required, list) or not isinstance(unsupported, list):
-        raise AgentPipelineError("Reviewer 修改意见格式错误")
-    if not isinstance(topic_decisions, list):
-        raise AgentPipelineError("Reviewer topic_decisions 必须是数组")
-    expected_topics = expected_topic_ids or set()
-    normalized_topics: dict[str, str] = {}
-    topic_reasons = []
-    for decision in topic_decisions:
-        if not isinstance(decision, dict):
-            raise AgentPipelineError("Reviewer 主题决定必须是对象")
-        topic_id = str(decision.get("topic_id", "")).strip()
-        status = str(decision.get("status", "")).strip()
-        reason = str(decision.get("reason", "")).strip()
-        if topic_id not in expected_topics or topic_id in normalized_topics:
-            raise AgentPipelineError("Reviewer 引用未知或重复研究主题")
-        if status not in {"accepted", "rejected"} or not reason:
-            raise AgentPipelineError("Reviewer 主题决定缺少有效状态或原因")
-        normalized_topics[topic_id] = status
-        if status == "rejected":
-            topic_reasons.append(f"{topic_id}: {reason}")
-    if set(normalized_topics) != expected_topics:
-        raise AgentPipelineError("Reviewer 未审查全部研究主题")
-
-    feedback = [
-        str(item)
-        for item in [*required, *unsupported, *topic_reasons]
-        if str(item).strip()
-    ]
-    if expected_topics and payload["pass"] != all(
-        status == "accepted" for status in normalized_topics.values()
-    ):
-        raise AgentPipelineError("Reviewer research pass 与逐主题决定不一致")
-    if payload["pass"] and feedback:
-        raise AgentPipelineError("Reviewer 通过时不应同时要求修改")
-    if not payload["pass"] and not feedback:
-        raise AgentPipelineError("Reviewer 否决时必须给出具体修改意见")
-    return payload["pass"], normalized_topics, feedback
+def validate(payload: dict) -> tuple[bool, str]:
+    if set(payload) != {"approved", "feedback"}:
+        raise AgentPipelineError("Reviewer 必须只返回 approved 和 feedback")
+    approved = payload.get("approved")
+    feedback_value = payload.get("feedback")
+    if not isinstance(approved, bool) or not isinstance(feedback_value, str):
+        raise AgentPipelineError(
+            "Reviewer approved 必须是布尔值且 feedback 必须是字符串"
+        )
+    feedback = feedback_value.strip()
+    if len(feedback) > 4000:
+        raise AgentPipelineError("Reviewer 修改意见超过 4000 字符")
+    if approved and not feedback:
+        return True, ""
+    if not approved and feedback:
+        return False, feedback
+    raise AgentPipelineError("Reviewer approved 与 feedback 不一致")

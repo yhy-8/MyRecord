@@ -1,4 +1,4 @@
-"""Shared Agent contract and model invocation without persistence access."""
+"""Shared minimal-JSON Agent invocation without persistence access."""
 
 import json
 import re
@@ -30,10 +30,11 @@ class AgentPipelineError(RuntimeError):
 
 
 class AgentOutputError(AgentPipelineError):
-    """The model call succeeded, but its structured output could not be read."""
+    """The model call succeeded, but no complete minimal JSON object arrived."""
 
 
 def _parse_json(text: str) -> dict:
+    """Read one JSON object without extracting it from surrounding prose."""
     stripped = text.strip()
     fenced = re.fullmatch(
         r"```(?:json)?\s*\n?(.*?)\n?```",
@@ -45,57 +46,12 @@ def _parse_json(text: str) -> dict:
     try:
         value = json.loads(stripped)
     except json.JSONDecodeError as error:
-        # Some OpenAI-compatible endpoints occasionally append a lone quote or
-        # closing Markdown fence after an otherwise complete JSON object.  This
-        # is unambiguous to recover, unlike extracting JSON from explanatory
-        # prose or attempting to repair malformed content.
-        if error.msg == "Extra data":
-            try:
-                value, end = json.JSONDecoder().raw_decode(stripped)
-            except json.JSONDecodeError:
-                value, end = None, 0
-            trailing = stripped[end:].strip()
-            if not (
-                isinstance(value, dict)
-                and re.fullmatch(r"(?:[`'\"}\]]|\s)*", trailing)
-            ):
-                raise AgentOutputError(
-                    f"Agent JSON 无法解析: {error}", response=text
-                ) from error
-        else:
-            raise AgentOutputError(
-                f"Agent JSON 无法解析: {error}", response=text
-            ) from error
+        raise AgentOutputError(
+            f"Agent JSON 无法解析: {error}", response=text
+        ) from error
     if not isinstance(value, dict):
         raise AgentOutputError("Agent JSON 顶层必须是对象", response=text)
     return value
-
-
-def cited_source_ids(markdown: str) -> set[str]:
-    """Return source IDs appearing inside Markdown citation brackets."""
-    refs: set[str] = set()
-    for citation in re.findall(r"\[([^\]\n]+)\]", markdown):
-        refs.update(
-            re.findall(r"R-\d{8}-\d{3}(?:-[0-9a-f]{12})?", citation)
-        )
-        for match in re.finditer(
-            r"R-(\d{8})-(\d{3})\s*(?:~|～|–|—|至)\s*"
-            r"(?:(?:R-(\d{8})-)?(\d{3}))",
-            citation,
-        ):
-            start_date, start_text, end_date, end_text = match.groups()
-            if end_date and end_date != start_date:
-                continue
-            start_number = int(start_text)
-            end_number = int(end_text)
-            # A range is only shorthand within one diary.  Bound expansion so
-            # malformed model output cannot create an enormous review context.
-            if start_number <= end_number and end_number - start_number <= 200:
-                refs.update(
-                    f"R-{start_date}-{number:03d}"
-                    for number in range(start_number, end_number + 1)
-                )
-    return refs
 
 
 def _prompt(
@@ -106,32 +62,32 @@ def _prompt(
 ) -> str:
     permission_text = (
         f"中控是否提供原始记录：{'是' if spec.can_read_raw else '否'}。"
-        "只能使用本次输入 JSON，不能读写文件、数据库或调用工具。"
+        "只能使用本次输入，不能读写文件、数据库或调用工具。"
     )
     prompt = f"""[程序 Agent 任务:{spec.name}]
 你是 AgentRecord 的 {spec.name} Agent。{spec.purpose}。
 
 【中控权限】
 {permission_text}
-你只返回候选 JSON；中控负责搜索、数据库和文件写入。
+你只负责当前这一项语义任务。任务拆分、编号、来源绑定、搜索、审查调度、Markdown 结构和持久化都由中控完成。
 
-【职责和输出契约】
+【职责和输出约束】
 {spec.instructions}
 
 【本次任务】
 {task}
 
-【中控提供的输入 JSON】
+【中控提供的输入】
 {json.dumps(input_data, ensure_ascii=False)}"""
     if revision_context:
         prompt += f"""
 
 【中控修订请求】
-这是同一阶段的有限修订，不是新任务。保留原稿中正确且有依据的内容，只修正下列问题，然后重新输出完整结果；不要解释修改过程。
+这是同一项正文的一次有限修订。只根据反馈改写正文，不要解释修改过程。
 {json.dumps(revision_context, ensure_ascii=False)}"""
     return prompt + """
 
-只输出一个符合契约的 JSON 对象，不要输出代码围栏、解释或完成提示。"""
+只输出职责约束中指定的一个最小 JSON 对象，不要输出代码围栏、来源 ID、链接、完成提示或额外说明。JSON 中不得自行增加数组、嵌套对象或未指定字段。"""
 
 
 def invoke_agent(
@@ -142,8 +98,8 @@ def invoke_agent(
     call_model: Callable,
     *,
     revision_context: dict | None = None,
-) -> dict:
-    """Invoke one Agent with controller-supplied input and no tool access."""
+) -> tuple[dict, dict]:
+    """Invoke one Agent for one minimal JSON object."""
     response = call_model(
         _prompt(spec, task, input_data, revision_context),
         model_config,
@@ -166,9 +122,7 @@ def invoke_agent(
             f"{spec.name} 调用失败: {text}", response=text, telemetry=telemetry
         )
     try:
-        payload = _parse_json(text)
+        return _parse_json(text), telemetry
     except AgentPipelineError as error:
         error.telemetry = telemetry
         raise
-    payload["_telemetry"] = telemetry
-    return payload

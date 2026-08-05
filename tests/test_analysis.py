@@ -78,69 +78,22 @@ class AnalysisWorkflowTests(unittest.TestCase):
         self.ai_calls.append(prompt)
         if "[程序 Agent 任务:" not in prompt:
             return "测试总结", True
-        input_text = prompt.split("【中控提供的输入 JSON】\n", 1)[1]
-        data = json.loads(input_text.split("\n\n只输出一个符合契约", 1)[0])
+        input_text = prompt.split("【中控提供的输入】\n", 1)[1]
+        data, _ = json.JSONDecoder().raw_decode(input_text)
         if "任务:retrospective]" in prompt:
-            record = data["records"][0]
-            source = record["source_id"]
-            payload = {
-                "paragraphs": [
-                    {
-                        "title": "本期回顾",
-                        "text": "本期完成了一次记录与思考。",
-                        "source_refs": [source],
-                    }
-                ],
-            }
+            payload = {"text": "本期完成了一次记录与思考。"}
         elif "任务:research_planner]" in prompt:
-            source = data["records"][0]["source_id"]
             payload = {
-                "topics": [
-                    {
-                        "title": "记录与反思方法",
-                        "query": "记录与反思方法的研究和边界",
-                        "reason": "拓宽记录方法的理解",
-                        "origin": "records",
-                        "source_refs": [source],
-                    }
-                ]
+                "action": "search",
+                "query": "记录与反思方法的研究和边界",
             }
         elif "任务:researcher]" in prompt:
-            source = data["research_topics"][0]["source_refs"][0]
-            evidence = data["evidence_sources"][0]["source_id"]
             payload = {
-                "topics": [
-                    {
-                        "topic_id": data["research_topics"][0]["topic_id"],
-                        "status": "supported",
-                        "reason": "",
-                        "paragraphs": [
-                            {
-                                "kind": "evidence",
-                                "text": "外部研究提供了不同边界与反例。",
-                                "record_refs": [source],
-                                "evidence_refs": [evidence],
-                            }
-                        ],
-                    }
-                ]
+                "status": "supported",
+                "text": "外部研究提供了不同边界与反例。",
             }
         else:
-            topic_decisions = [
-                {
-                    "topic_id": topic_id,
-                    "status": "accepted",
-                    "reason": "证据直接支持",
-                }
-                for topic_id in data.get("valid_research_topic_ids", [])
-            ]
-            payload = {
-                "pass": True,
-                "topic_decisions": topic_decisions,
-                "unsupported_claims": [],
-                "required_changes": [],
-                "summary": "通过",
-            }
+            payload = {"approved": True, "feedback": ""}
         return AIResponse(
             json.dumps(payload, ensure_ascii=False),
             True,
@@ -320,22 +273,8 @@ class AnalysisWorkflowTests(unittest.TestCase):
             if "任务:retrospective]" not in prompt:
                 return default_fake(prompt, model_cfg, **kwargs)
             self.ai_calls.append(prompt)
-            input_text = prompt.split("【中控提供的输入 JSON】\n", 1)[1]
-            data = json.loads(input_text.split("\n\n只输出一个符合契约", 1)[0])
-            source = data["referenced_records"][0]["source_id"]
             return AIResponse(
-                json.dumps(
-                    {
-                        "paragraphs": [
-                            {
-                                "title": "",
-                                "text": "引用记录中的事实",
-                                "source_refs": [source],
-                            }
-                        ],
-                    },
-                    ensure_ascii=False,
-                ),
+                json.dumps({"text": "引用记录中的事实"}, ensure_ascii=False),
                 True,
             )
 
@@ -463,28 +402,21 @@ class AnalysisWorkflowTests(unittest.TestCase):
             [call.args[0] for call in generate.call_args_list],
         )
 
-    def test_retrospective_validation_failure_uses_bounded_revisions(self):
+    def test_retrospective_plain_text_validation_uses_one_revision(self):
         source_id = "R-20260714-001"
         base_input = {
             "period": {"kind": "weekly", "start": "2026-07-13", "end": "2026-07-19"},
             "records": [{"source_id": source_id, "text": "记录"}],
         }
-        invalid = {
-            "paragraphs": [
-                {
-                    "title": "",
-                    "text": "缺少来源",
-                    "source_refs": [],
-                }
-            ],
-        }
         store = Mock()
 
         with patch.object(
-            orchestrator, "_call_agent", return_value=invalid
-        ) as call_agent, patch.object(orchestrator, "_review") as review, self.assertRaises(
-            AgentPipelineError
-        ):
+            orchestrator,
+            "_call_agent",
+            return_value=({"text": "正文 https://model.example"}, {}),
+        ) as call_agent, patch.object(
+            orchestrator, "_review_body"
+        ) as review, self.assertRaises(AgentPipelineError):
             orchestrator._retrospective_section(
                 base_input,
                 {source_id},
@@ -493,13 +425,13 @@ class AnalysisWorkflowTests(unittest.TestCase):
                 "run-id",
             )
 
-        self.assertEqual(3, call_agent.call_count)
+        self.assertEqual(2, call_agent.call_count)
         correction = call_agent.call_args.kwargs["revision_context"]
         self.assertEqual("中控确定性校验", correction["feedback_source"])
-        self.assertIn("每段必须选择", correction["problems_to_fix"][0])
+        self.assertIn("不得自行输出 URL", correction["problems_to_fix"][0])
         review.assert_not_called()
 
-    def test_structure_repairs_do_not_consume_content_revision_budget(self):
+    def test_retrospective_reviewer_can_request_one_content_revision(self):
         source_id = "R-20260714-001"
         base_input = {
             "period": {
@@ -509,50 +441,21 @@ class AnalysisWorkflowTests(unittest.TestCase):
             },
             "records": [{"source_id": source_id, "text": "用户记录"}],
         }
-        invalid = {
-            "paragraphs": [
-                {
-                    "title": "",
-                    "text": "缺少来源",
-                    "source_refs": [],
-                }
-            ],
-        }
-        valid = {
-            "paragraphs": [
-                {
-                    "title": "",
-                    "text": "有来源的判断。",
-                    "source_refs": [source_id],
-                }
-            ],
-        }
-        revised = {
-            "paragraphs": [
-                {
-                    "title": "",
-                    "text": "审查后修订。",
-                    "source_refs": [source_id],
-                }
-            ],
-        }
         store = Mock()
 
         with patch.object(
             orchestrator,
             "_call_agent",
-            side_effect=[invalid, invalid, valid, revised],
+            side_effect=[
+                ({"text": "第一稿判断。"}, {}),
+                ({"text": "审查后修订。"}, {}),
+            ],
         ) as call_agent, patch.object(
             orchestrator,
-            "_review",
+            "_review_body",
             side_effect=[
-                (
-                    False,
-                    {},
-                    ["内容需要修订"],
-                    {"pass": False, "required_changes": ["内容需要修订"]},
-                ),
-                (True, {}, [], {"pass": True}),
+                (False, "内容需要修订", {"approved": False}),
+                (True, "", {"approved": True}),
             ],
         ):
             markdown = orchestrator._retrospective_section(
@@ -564,9 +467,9 @@ class AnalysisWorkflowTests(unittest.TestCase):
             )
 
         self.assertIn("审查后修订", markdown)
-        self.assertEqual(4, call_agent.call_count)
+        self.assertEqual(2, call_agent.call_count)
         self.assertEqual(
-            4,
+            2,
             call_agent.call_args.kwargs["revision_context"]["maximum_attempts"],
         )
 
@@ -576,41 +479,20 @@ class AnalysisWorkflowTests(unittest.TestCase):
             "period": {"kind": "weekly", "start": "2026-07-13", "end": "2026-07-19"},
             "records": [{"source_id": source_id, "text": "用户记录"}],
         }
-        first = {
-            "paragraphs": [
-                {
-                    "title": "",
-                    "text": "第一稿判断。",
-                    "source_refs": [source_id],
-                }
-            ],
-        }
-        revised = {
-            "paragraphs": [
-                {
-                    "title": "",
-                    "text": "修订后仅保留有依据的判断。",
-                    "source_refs": [source_id],
-                }
-            ],
-        }
-        rejected_review = {
-            "pass": False,
-            "topic_decisions": [],
-            "unsupported_claims": ["第一稿判断超出记录支持范围"],
-            "required_changes": ["删除无依据判断"],
-            "summary": "需要修订",
-        }
+        first = "第一稿判断。"
+        revised = "修订后仅保留有依据的判断。"
         store = Mock()
 
         with patch.object(
-            orchestrator, "_call_agent", side_effect=[first, revised]
+            orchestrator,
+            "_call_agent",
+            side_effect=[({"text": first}, {}), ({"text": revised}, {})],
         ) as call_agent, patch.object(
             orchestrator,
-            "_review",
+            "_review_body",
             side_effect=[
-                (False, {}, ["删除无依据判断"], rejected_review),
-                (True, {}, [], {"pass": True}),
+                (False, "删除无依据判断", {"approved": False}),
+                (True, "", {"approved": True}),
             ],
         ):
             markdown = orchestrator._retrospective_section(
@@ -624,13 +506,8 @@ class AnalysisWorkflowTests(unittest.TestCase):
         self.assertIn("修订后", markdown)
         correction = call_agent.call_args_list[1].kwargs["revision_context"]
         self.assertEqual("Reviewer 实质审查", correction["feedback_source"])
-        self.assertEqual(
-            first["paragraphs"],
-            correction["rejected_previous_output"]["paragraphs"],
-        )
-        self.assertIn(
-            "删除无依据判断", correction["problems_to_fix"]["required_changes"]
-        )
+        self.assertEqual(first, correction["rejected_previous_output"])
+        self.assertIn("删除无依据判断", correction["problems_to_fix"])
 
     def test_revision_context_does_not_echo_large_internal_telemetry(self):
         correction = orchestrator._revision_context(
@@ -647,25 +524,41 @@ class AnalysisWorkflowTests(unittest.TestCase):
             {"markdown": "原稿"}, correction["rejected_previous_output"]
         )
 
-    def test_reviewer_receives_only_evidence_used_by_draft(self):
-        telemetry = {
-            "tool_calls": {"web_search": 1},
-            "search_results": 25,
-            "search_queries": ["查询"],
-            "search_evidence": [
-                {"url": "https://example.com/used", "snippet": "支持稿件"},
-                {"url": "https://example.com/unused", "snippet": "无关结果"},
-            ],
+    def test_reviewer_receives_all_controller_bound_topic_evidence(self):
+        topic = {
+            "topic_id": "Q001",
+            "title": "公开主题",
+            "query": "公开查询",
+            "source_refs": ["R-20260714-001"],
         }
-        compact = orchestrator._review_search_telemetry(
-            telemetry,
-            [{"url": "https://example.com/used", "topic_id": "Q001"}],
-        )
+        evidence = [
+            {
+                "source_id": f"W-Q001-00{index}",
+                "topic_id": "Q001",
+                "title": f"来源{index}",
+                "url": f"https://example.com/{index}",
+                "snippet": "支持材料",
+                "published": "",
+            }
+            for index in (1, 2)
+        ]
+        store = Mock()
 
-        self.assertEqual(1, len(compact["search_evidence"]))
-        self.assertEqual(
-            "https://example.com/used", compact["search_evidence"][0]["url"]
-        )
+        with patch.object(
+            orchestrator,
+            "_call_agent",
+            return_value=({"status": "supported", "text": "研究正文"}, {}),
+        ), patch.object(
+            orchestrator,
+            "_review_body",
+            return_value=(True, "", {"approved": True}),
+        ) as review:
+            result = orchestrator._research_one_topic(
+                topic, evidence, {"name": "mock"}, store, "run-id"
+            )
+
+        self.assertTrue(result["accepted"])
+        self.assertEqual(2, len(review.call_args.args[2]["evidence_sources"]))
 
     def test_grounded_research_searches_once_and_controller_renders_url(self):
         topics = [
@@ -692,24 +585,7 @@ class AnalysisWorkflowTests(unittest.TestCase):
                 }
             ],
         )
-        draft = {
-            "topics": [
-                {
-                    "topic_id": "Q001",
-                    "status": "supported",
-                    "reason": "",
-                    "paragraphs": [
-                        {
-                            "kind": "evidence",
-                            "text": "基于证据可以确认边界。",
-                            "record_refs": [],
-                            "evidence_refs": ["W-Q001-001"],
-                        }
-                    ],
-                }
-            ],
-            "_telemetry": {"usage": {"total_tokens": 100}},
-        }
+        draft = ({"status": "supported", "text": "基于证据可以确认边界。"}, {})
 
         with patch.object(
             orchestrator, "third_party_search_available", return_value=True
@@ -719,8 +595,8 @@ class AnalysisWorkflowTests(unittest.TestCase):
             orchestrator, "_call_agent", return_value=draft
         ) as call_agent, patch.object(
             orchestrator,
-            "_review",
-            return_value=(True, {"Q001": "accepted"}, [], {"pass": True}),
+            "_review_body",
+            return_value=(True, "", {"approved": True}),
         ):
             markdown = orchestrator._research_section(
                 topics, set(), {"name": "mock"}, store, "run-id"
@@ -757,40 +633,8 @@ class AnalysisWorkflowTests(unittest.TestCase):
             ],
         )
         drafts = [
-            {
-                "topics": [
-                    {
-                        "topic_id": "Q001",
-                        "status": "supported",
-                        "reason": "",
-                        "paragraphs": [
-                            {
-                                "kind": "evidence",
-                                "text": "缺少证据引用。",
-                                "record_refs": [],
-                                "evidence_refs": [],
-                            }
-                        ],
-                    }
-                ]
-            },
-            {
-                "topics": [
-                    {
-                        "topic_id": "Q001",
-                        "status": "supported",
-                        "reason": "",
-                        "paragraphs": [
-                            {
-                                "kind": "evidence",
-                                "text": "修订后引用证据。",
-                                "record_refs": [],
-                                "evidence_refs": ["W-Q001-001"],
-                            }
-                        ],
-                    }
-                ]
-            },
+            ({"status": "supported", "text": "第一稿正文。"}, {}),
+            ({"status": "supported", "text": "修订后正文。"}, {}),
         ]
         store = Mock()
 
@@ -800,8 +644,11 @@ class AnalysisWorkflowTests(unittest.TestCase):
             orchestrator, "_call_agent", side_effect=drafts
         ) as call_agent, patch.object(
             orchestrator,
-            "_review",
-            return_value=(True, {"Q001": "accepted"}, [], {"pass": True}),
+            "_review_body",
+            side_effect=[
+                (False, "补充适用边界", {"approved": False}),
+                (True, "", {"approved": True}),
+            ],
         ):
             markdown = orchestrator._grounded_research_section(
                 topics, set(), {"name": "mock"}, store, "run-id"
@@ -835,23 +682,6 @@ class AnalysisWorkflowTests(unittest.TestCase):
             }
             for index in (1, 2)
         ]
-        payload = {
-            "topics": [
-                {
-                    "status": "supported",
-                    "reason": "",
-                    "paragraphs": [
-                        {
-                            "kind": "evidence",
-                            "text": f"主题{index}正文。",
-                            "record_refs": [],
-                            "evidence_refs": [f"W-Q{index:03d}-001"],
-                        }
-                    ],
-                }
-                for index in (1, 2)
-            ]
-        }
         store = Mock()
 
         with patch.object(
@@ -859,24 +689,29 @@ class AnalysisWorkflowTests(unittest.TestCase):
             "_collect_research_evidence",
             return_value=(topics, evidence, {"search_evidence": evidence}),
         ), patch.object(
-            orchestrator, "_call_agent", return_value=payload
-        ) as call_agent, patch.object(
             orchestrator,
-            "_review",
-            return_value=(
-                False,
-                {"Q001": "accepted", "Q002": "rejected"},
-                ["第二个主题证据不足"],
-                {"pass": False},
-            ),
-        ):
+            "_research_one_topic",
+            side_effect=[
+                {
+                    "topic": topics[0],
+                    "accepted": True,
+                    "markdown": "### 可交付主题\n\n正文",
+                    "sources": [evidence[0]],
+                },
+                {
+                    "topic": topics[1],
+                    "accepted": False,
+                    "feedback": "证据不足",
+                },
+            ],
+        ) as research_one:
             markdown = orchestrator._grounded_research_section(
                 topics, set(), {"name": "mock"}, store, "run-id"
             )
 
         self.assertIn("### 可交付主题", markdown)
         self.assertNotIn("### 应丢弃主题", markdown)
-        self.assertEqual(1, call_agent.call_count)
+        self.assertEqual(2, research_one.call_count)
 
     def test_grounded_search_cache_avoids_searching_again_on_report_retry(self):
         topics = [
@@ -1008,17 +843,66 @@ class AnalysisWorkflowTests(unittest.TestCase):
         with patch.object(
             orchestrator, "_call_agent", side_effect=failure
         ) as call_agent, self.assertRaises(AgentPipelineError):
-            orchestrator._validated_agent_call(
-                orchestrator.research_planner.SPEC,
-                "选题",
-                {},
-                lambda payload: payload,
+            orchestrator._research_topics(
+                {
+                    "period": {"kind": "weekly"},
+                    "records": [
+                        {
+                            "date": "2026-07-14",
+                            "source_id": "R-20260714-001",
+                            "text": "记录",
+                        }
+                    ],
+                },
+                {"R-20260714-001"},
                 {"name": "mock"},
                 store,
                 "run-id",
             )
 
         self.assertEqual(1, call_agent.call_count)
+
+    def test_planner_dispatches_all_seven_days_in_at_most_five_groups(self):
+        records = [
+            {
+                "date": f"2026-07-{day:02d}",
+                "source_id": f"R-202607{day:02d}-001",
+                "text": f"第 {day} 日记录",
+            }
+            for day in range(13, 20)
+        ]
+        responses = [
+            ({"action": "search", "query": f"公开研究问题 {index}"}, {})
+            for index in range(1, 6)
+        ]
+        store = Mock()
+
+        with patch.object(
+            orchestrator, "_call_agent", side_effect=responses
+        ) as call_agent:
+            topics = orchestrator._research_topics(
+                {"period": {"kind": "weekly"}, "records": records},
+                {record["source_id"] for record in records},
+                {"name": "mock"},
+                store,
+                "run-id",
+            )
+
+        self.assertEqual(5, call_agent.call_count)
+        groups = [call.args[2]["record_group"] for call in call_agent.call_args_list]
+        dispatched_ids = [
+            record["source_id"]
+            for group in groups
+            for record in group["records"]
+        ]
+        self.assertCountEqual(
+            [record["source_id"] for record in records], dispatched_ids
+        )
+        self.assertEqual(len(dispatched_ids), len(set(dispatched_ids)))
+        self.assertCountEqual(
+            dispatched_ids,
+            [source_id for topic in topics for source_id in topic["source_refs"]],
+        )
 
     def test_retry_runs_all_failed_tasks(self):
         settings.ANALYSIS_DIR.mkdir()
