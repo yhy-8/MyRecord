@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from AgentRecord import settings
-from AgentRecord.ai_client import ToolResult
+from AgentRecord.ai_client import AIResponse, ToolResult
 from AgentRecord.analysis import automation, context, orchestrator
 from AgentRecord.analysis.store import AnalysisStore
 from AgentRecord.agents.base import AgentPipelineError
@@ -74,14 +74,12 @@ class AnalysisWorkflowTests(unittest.TestCase):
             "",
         )
 
-    def fake_call_ai(self, prompt, model_cfg, *, allowed_tools=None, **kwargs):
+    def fake_call_ai(self, prompt, model_cfg, **kwargs):
         self.ai_calls.append(prompt)
         if "[程序 Agent 任务:" not in prompt:
-            return "测试总结", True, 0, {}, 0
+            return "测试总结", True
         input_text = prompt.split("【中控提供的输入 JSON】\n", 1)[1]
         data = json.loads(input_text.split("\n\n只输出一个符合契约", 1)[0])
-        tool_counts = {}
-        result_count = 0
         if "任务:retrospective]" in prompt:
             record = data["records"][0]
             source = record["source_id"]
@@ -147,7 +145,18 @@ class AnalysisWorkflowTests(unittest.TestCase):
                 "required_changes": [],
                 "summary": "通过",
             }
-        return json.dumps(payload, ensure_ascii=False), True, 0, tool_counts, result_count
+        return AIResponse(
+            json.dumps(payload, ensure_ascii=False),
+            True,
+            {
+                "usage": {
+                    "prompt_tokens": 7,
+                    "completion_tokens": 3,
+                    "total_tokens": 10,
+                    "cached_tokens": 2,
+                }
+            },
+        )
 
     def write_diary(self, date: str):
         path = settings.DIARY_DIR / f"{date}.md"
@@ -241,6 +250,27 @@ class AnalysisWorkflowTests(unittest.TestCase):
         )
         self.assertFalse(any("任务:researcher]" in prompt for prompt in self.ai_calls))
 
+    def test_report_header_shows_model_duration_and_token_usage(self):
+        day = datetime.date(2026, 7, 14)
+        self.write_diary(day.isoformat())
+
+        with patch.object(
+            orchestrator.time, "perf_counter", side_effect=[100.0, 165.0]
+        ):
+            message, success, path = orchestrator.generate_analysis_report(
+                "monthly",
+                day,
+                {"name": "测试模型", "model_id": "mock-v1"},
+            )
+
+        self.assertTrue(success, message)
+        content = path.read_text(encoding="utf-8")
+        self.assertIn("> 使用模型：测试模型（mock-v1）", content)
+        self.assertIn("> 生成耗时：1 分 5 秒", content)
+        self.assertIn(
+            "> Token 用量：20（输入 14，输出 6，缓存命中 4）", content
+        )
+
     def test_manual_and_automatic_reports_remain_separate(self):
         day = datetime.date(2026, 7, 14)
         self.write_diary(day.isoformat())
@@ -289,16 +319,14 @@ class AnalysisWorkflowTests(unittest.TestCase):
         )
         default_fake = self.fake_call_ai
 
-        def reference_fake(prompt, model_cfg, *, allowed_tools=None, **kwargs):
+        def reference_fake(prompt, model_cfg, **kwargs):
             if "任务:retrospective]" not in prompt:
-                return default_fake(
-                    prompt, model_cfg, allowed_tools=allowed_tools, **kwargs
-                )
+                return default_fake(prompt, model_cfg, **kwargs)
             self.ai_calls.append(prompt)
             input_text = prompt.split("【中控提供的输入 JSON】\n", 1)[1]
             data = json.loads(input_text.split("\n\n只输出一个符合契约", 1)[0])
             source = data["referenced_records"][0]["source_id"]
-            return (
+            return AIResponse(
                 json.dumps(
                     {
                         "sections": [
@@ -316,9 +344,6 @@ class AnalysisWorkflowTests(unittest.TestCase):
                     ensure_ascii=False,
                 ),
                 True,
-                0,
-                {},
-                0,
             )
 
         orchestrator.call_ai = reference_fake
@@ -654,109 +679,6 @@ class AnalysisWorkflowTests(unittest.TestCase):
             "https://example.com/used", compact["search_evidence"][0]["url"]
         )
 
-    def test_research_revision_receives_exact_verified_source_options(self):
-        options = orchestrator._verified_source_options(
-            [{"topic_id": "Q001", "query": "Public Query"}],
-            [
-                {
-                    "query": "  public   query ",
-                    "title": "可核查来源",
-                    "url": "https://example.com/exact",
-                    "published": "2026-07-01",
-                },
-                {
-                    "query": "另一查询",
-                    "title": "无关来源",
-                    "url": "https://example.com/other",
-                },
-            ],
-        )
-
-        self.assertEqual(
-            "https://example.com/exact", options[0]["sources"][0]["url"]
-        )
-        self.assertEqual(1, len(options[0]["sources"]))
-
-    def test_research_revision_can_reuse_prior_audited_url_after_researching(self):
-        topics = [
-            {
-                "topic_id": "Q001",
-                "title": "公开主题",
-                "query": "公开查询",
-                "reason": "研究",
-                "origin": "news",
-                "source_refs": [],
-            }
-        ]
-        prior_url = "https://example.com/prior"
-        first = {
-            "topics": [
-                {
-                    "status": "supported",
-                    "reason": "",
-                    "paragraphs": [
-                        {
-                            "kind": "evidence",
-                            "text": "第一稿没有选择来源。",
-                            "record_refs": [],
-                            "source_urls": [],
-                        }
-                    ],
-                }
-            ],
-            "_telemetry": {
-                "search_results": 1,
-                "search_evidence": [
-                    {"query": "公开查询", "title": "来源", "url": prior_url}
-                ],
-            },
-        }
-        second = {
-            "topics": [
-                {
-                    "status": "supported",
-                    "reason": "",
-                    "paragraphs": [
-                        {
-                            "kind": "evidence",
-                            "text": "修订稿使用已审计来源。",
-                            "record_refs": [],
-                            "source_urls": [prior_url],
-                        }
-                    ],
-                }
-            ],
-            "_telemetry": {
-                "search_results": 1,
-                "search_evidence": [
-                    {
-                        "query": "公开查询",
-                        "title": "本轮另一结果",
-                        "url": "https://example.com/current",
-                    }
-                ],
-            },
-        }
-        store = Mock()
-
-        with patch.object(
-            orchestrator, "_call_agent", side_effect=[first, second]
-        ) as call_agent, patch.object(
-            orchestrator, "third_party_search_available", return_value=False
-        ), patch.object(
-            orchestrator,
-            "_review",
-            return_value=(True, {"Q001": "accepted"}, [], {"pass": True}),
-        ):
-            markdown = orchestrator._research_section(
-                topics, set(), {"name": "mock"}, store, "run-id"
-            )
-
-        self.assertIn(prior_url, markdown)
-        correction = call_agent.call_args_list[1].kwargs["revision_context"]
-        whitelist = correction["problems_to_fix"]["verified_source_options"]
-        self.assertEqual(prior_url, whitelist[0]["sources"][0]["url"])
-
     def test_grounded_research_searches_once_and_controller_renders_url(self):
         topics = [
             {
@@ -821,7 +743,6 @@ class AnalysisWorkflowTests(unittest.TestCase):
         input_data = call_agent.call_args.args[2]
         self.assertNotIn("information_leads", input_data)
         self.assertNotIn("url", input_data["evidence_sources"][0])
-        self.assertEqual(frozenset(), call_agent.call_args.args[0].allowed_tools)
 
     def test_grounded_research_revision_does_not_repeat_search(self):
         topics = [
@@ -1535,16 +1456,23 @@ class AnalysisWorkflowTests(unittest.TestCase):
 
         self.assertEqual({}, automation._load_automation_state())
 
-    def test_analysis_cache_signature_tracks_effective_model_and_search_config(self):
+    def test_analysis_cache_signature_tracks_only_effective_dependencies(self):
         first = orchestrator._analysis_config_signature(
-            {"name": "mock", "model_id": "v1", "temperature": 0.2}
+            {"name": "mock", "model_id": "v1", "temperature": 0.2},
+            "weekly",
         )
         second = orchestrator._analysis_config_signature(
-            {"name": "mock", "model_id": "v2", "temperature": 0.8}
+            {"name": "mock", "model_id": "v2", "temperature": 0.8},
+            "weekly",
         )
 
         self.assertNotEqual(first, second)
         self.assertNotIn("api_key", json.dumps(first))
+
+        monthly = orchestrator._analysis_config_signature(
+            {"name": "mock", "model_id": "v1"}, "monthly"
+        )
+        self.assertNotIn("third_search", monthly)
 
     def test_retry_command_launches_detached_process(self):
         settings.ANALYSIS_DIR.mkdir()

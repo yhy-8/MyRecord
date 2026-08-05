@@ -7,7 +7,7 @@ AgentRecord 是一个本地优先的个人记录、整理回顾与领域研究�
 1. **周报**包含“整理与回顾”和“领域探索与研究”两个独立板块；探索主题只从本周记录引出，并联网查证、分析和推演。
 2. **月报**只做整理与回顾，可参考完整落在当月内的周报，不重复进行领域探索。
 
-原始 Markdown 日记是唯一事实源。SQLite 只保存可重建的报告运行审计、来源索引、Agent 遥测和阶段缓存。旧版本留下的 `AnalysisReports/Profile.md` 与 `AnalysisReports/Information/` 不会被删除，但新版不再读取或更新。更完整的产品与实现约束见 [Docs](./Docs/README.md)。
+原始 Markdown 日记是唯一事实源。SQLite 只保存可丢弃的报告运行状态和失败重试阶段缓存；报告正文已经包含来源索引、使用模型、生成耗时和 Token 用量，阅读不依赖数据库。更完整的产品与实现约束见 [Docs](./Docs/README.md)。
 
 ## 启动
 
@@ -67,7 +67,7 @@ Windows 交互终端使用按键事件等待和批量 Unicode 回显，不再通
 
 ## 配置
 
-配置项、默认值和注释见应用目录中的 [`config.yaml`](./config.yaml)。初次使用需填写模型密钥并确认 `current_model`；启用周报时还必须配置 `third_search`，因为探索流程需要中控对每条查询和来源进行审计。月报不联网，不依赖搜索配置。相对目录以配置文件所在目录为基准。配置模板带 `config_version`；旧版 DeepSeek 官方配置缺少 `json_mode` 或 `max_tokens` 时程序会应用窄兼容默认值并明确警告，但更新时仍应把新模板字段合并进实际运行目录，而不是只替换源码目录中的示例。
+配置项、默认值和注释见应用目录中的 [`config.yaml`](./config.yaml)。初次使用需填写模型密钥并确认 `current_model`；启用周报时还必须配置 `third_search`，因为探索流程需要中控对每条查询和来源进行审计。月报不联网，不依赖搜索配置。相对目录以配置文件所在目录为基准。配置版本为 4；模型 `search` 与 `third_search.max_rounds` 已删除，因为模型不再自行调用搜索。旧版 DeepSeek 官方配置缺少 `json_mode` 或 `max_tokens` 时程序会应用窄默认值并明确警告。更新实际运行目录时应合并新模板字段并保留真实密钥。
 
 ## 自动任务
 
@@ -105,9 +105,9 @@ AgentRecord.exe --uninstall-automation
 
 ### 更新或迁移
 
-更新运行目录前，先用旧目录中的程序卸载自动任务，确认当前报告任务已经结束，再替换代码；保留 `Records/`、分析数据库、已有报告和含真实密钥的 `config.yaml`，并把新版配置模板合并到实际配置。旧 `Profile.md` 与 `Information/` 可作为历史资料保留。替换完成后，从新目录重新安装自动任务。不要在自动任务仍启用时直接覆盖正在使用的源码目录。
+更新运行目录前，先用旧目录中的程序卸载自动任务，确认当前报告任务已经结束，再替换代码；保留 `Records/`、已有报告和含真实密钥的 `config.yaml`，并把新版配置模板合并到实际配置。替换完成后，从新目录重新安装自动任务。不要在自动任务仍启用时直接覆盖正在使用的源码目录。
 
-若数据库仍是更早版本、包含旧画像表，首次启动仍会先备份并导出为 `Profile.md` 后再移除旧表，避免升级时丢失历史数据；导出的文件仅供查阅，不再进入新版分析。
+本次数据库已缩减为两张可重建表，不提供旧结构迁移。升级时删除 `AnalysisReports/.analysis.sqlite3` 及同名 `-wal`、`-shm` 文件；这只清除旧审计和缓存，不影响日记或已生成报告。旧 `Profile.md` 与 `Information/` 若不再需要也可直接删除。
 
 ## 数据与文件
 
@@ -115,7 +115,6 @@ AgentRecord.exe --uninstall-automation
 Records/YYYY-MM-DD.md
 AnalysisReports/
   .analysis.sqlite3
-  .analysis.pre-profile-markdown.sqlite3  # 仅旧画像数据库迁移时生成
   .automation-state.json
   Weekly/YYYY-MM-DD_to_YYYY-MM-DD_manual.md
   Weekly/YYYY-MM-DD_to_YYYY-MM-DD_auto.md
@@ -124,7 +123,7 @@ AnalysisReports/
 Log/AgentRecord.log
 ```
 
-旧版本生成的 `Profile.md` 和 `Information/*.md` 可以继续留在目录中，新版会忽略它们。
+周报和月报文件头会直接显示模型、生成耗时及输入、输出、缓存命中和总 Token。旧版本生成的 `Profile.md` 和 `Information/*.md` 不再使用，可自行删除。
 
 ## 构建 Windows EXE
 

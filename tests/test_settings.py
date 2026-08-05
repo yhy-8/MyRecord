@@ -76,7 +76,7 @@ class ModelSettingsTests(unittest.TestCase):
             warnings = settings.configuration_warnings()
 
         message = " ".join(warnings)
-        self.assertIn("当前版本为 3", message)
+        self.assertIn("当前版本为 4", message)
         self.assertIn("json_mode, max_tokens", message)
         self.assertIn("有效上限 10", message)
 

@@ -222,24 +222,23 @@ def _content_failure_key(
                 "name",
                 "model_id",
                 "api_url",
-                "search",
                 "json_mode",
                 "max_tokens",
                 "temperature",
             )
-        }
-        third_search = settings.CONFIG.get("third_search", {})
-        search_signature = {
-            key: third_search.get(key)
-            for key in ("enabled", "api_url", "count", "timeout", "max_rounds")
         }
         target = target or _default_task_target(task, now)
         payload: dict = {
             "policy_version": _CONTENT_FAILURE_POLICY_VERSION,
             "task": task,
             "model": model_signature,
-            "third_search": search_signature,
         }
+        if task == "weekly_report":
+            third_search = settings.CONFIG.get("third_search", {})
+            payload["third_search"] = {
+                key: third_search.get(key)
+                for key in ("enabled", "api_url", "count", "timeout")
+            }
         if task == "daily_summary":
             date = datetime.date.fromisoformat(target["start"])
             path = settings.DIARY_DIR / f"{date.isoformat()}.md"

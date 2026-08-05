@@ -1,14 +1,12 @@
 # ================= AgentRecord 配置文件 =================
-config_version: 3
+config_version: 4
 
 # 模型列表
 #   name:     显示名称（人看的）
 #   model_id: 请求时的具体模型标识（不填则使用 name）
-#   search:   是否启用该模型接口提供的原生联网搜索（前提是有原生联网是搜索）
 models:
   - name: deepseek-v4-pro
     model_id: deepseek-v4-pro
-    search: false         # 通用 AI 调用是否开放模型原生搜索
     json_mode: true       # DeepSeek 官方接口支持 JSON Output
     max_tokens: 32768     # 长报告输出上限
     api_url: https://api.deepseek.com/chat/completions
@@ -24,7 +22,6 @@ third_search:
   api_key: ""
   count: 10                    # 单次搜索最多返回 10 条，避免低相关结果挤占上下文
   timeout: 30                  # 请求超时时间（秒）
-  max_rounds: 3                # 最大搜索轮数（只能执行中控已授权的原样查询）
 
 # 日记存储目录
 diary_dir: "./Records"

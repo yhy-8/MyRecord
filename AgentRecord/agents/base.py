@@ -2,7 +2,6 @@
 
 import json
 import re
-import inspect
 from dataclasses import dataclass
 from typing import Callable
 
@@ -12,10 +11,6 @@ class AgentSpec:
     name: str
     purpose: str
     can_read_raw: bool
-    readable_node_types: frozenset[str]
-    writable_node_types: frozenset[str]
-    writable_relation_types: frozenset[str]
-    allowed_tools: frozenset[str]
     instructions: str
 
 
@@ -110,18 +105,15 @@ def _prompt(
     revision_context: dict | None = None,
 ) -> str:
     permission_text = (
-        f"可读原始记录：{'是' if spec.can_read_raw else '否'}；"
-        f"可见节点：{', '.join(sorted(spec.readable_node_types)) or '无'}；"
-        f"可创建节点：{', '.join(sorted(spec.writable_node_types)) or '无'}；"
-        f"可创建关系：{', '.join(sorted(spec.writable_relation_types)) or '无'}；"
-        f"可用工具：{', '.join(sorted(spec.allowed_tools)) or '无'}。"
+        f"中控是否提供原始记录：{'是' if spec.can_read_raw else '否'}。"
+        "只能使用本次输入 JSON，不能读写文件、数据库或调用工具。"
     )
     prompt = f"""[程序 Agent 任务:{spec.name}]
 你是 AgentRecord 的 {spec.name} Agent。{spec.purpose}。
 
 【中控权限】
 {permission_text}
-未声明的读取、写入、关系和工具权限一律禁止。你只返回候选 JSON；中控负责数据库和文件写入。
+你只返回候选 JSON；中控负责搜索、数据库和文件写入。
 
 【职责和输出契约】
 {spec.instructions}
@@ -150,43 +142,17 @@ def invoke_agent(
     call_model: Callable,
     *,
     revision_context: dict | None = None,
-    allowed_search_queries: list[str] | None = None,
 ) -> dict:
-    """Invoke one Agent with centrally supplied model access and tool permissions."""
-    optional_kwargs = {
-        "allowed_search_queries": allowed_search_queries,
-        "structured_output": True,
-    }
-    try:
-        parameters = inspect.signature(call_model).parameters.values()
-        accepts_kwargs = any(
-            parameter.kind == inspect.Parameter.VAR_KEYWORD
-            for parameter in parameters
-        )
-        if not accepts_kwargs:
-            accepted_names = {parameter.name for parameter in parameters}
-            optional_kwargs = {
-                key: value
-                for key, value in optional_kwargs.items()
-                if key in accepted_names
-            }
-    except (TypeError, ValueError):
-        pass
+    """Invoke one Agent with controller-supplied input and no tool access."""
     response = call_model(
         _prompt(spec, task, input_data, revision_context),
         model_config,
-        allowed_tools=spec.allowed_tools,
-        **optional_kwargs,
+        structured_output=True,
     )
-    text, success, web_count, tool_counts, result_count = response
+    text, success = response
     from ..ai_client import response_telemetry
 
-    telemetry = {
-        "web_citations": web_count,
-        "tool_calls": tool_counts,
-        "search_results": result_count,
-        **response_telemetry(response),
-    }
+    telemetry = response_telemetry(response)
     if not success:
         from ..ai_client import OUTPUT_FILTERED_MARKER, OUTPUT_TRUNCATED_MARKER
 
@@ -206,13 +172,3 @@ def invoke_agent(
         raise
     payload["_telemetry"] = telemetry
     return payload
-
-
-def confidence(value: object, field: str) -> float:
-    try:
-        number = float(value)
-    except (TypeError, ValueError) as error:
-        raise AgentPipelineError(f"{field} 必须是 0 到 1 的数字") from error
-    if not 0 <= number <= 1:
-        raise AgentPipelineError(f"{field} 超出 0 到 1")
-    return number

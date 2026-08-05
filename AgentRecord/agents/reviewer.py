@@ -7,10 +7,6 @@ SPEC = AgentSpec(
     name="reviewer",
     purpose="分别审查整理回顾和领域研究",
     can_read_raw=True,
-    readable_node_types=frozenset(),
-    writable_node_types=frozenset(),
-    writable_relation_types=frozenset(),
-    allowed_tools=frozenset(),
     instructions="""严格但只按实质问题检查事实、时期、身份、来源覆盖、因果越界、心理诊断、套话和行为教练倾向，不因措辞偏好或可选润色否决板块。
 retrospective_review 模式必须把正文与 review_context 中的最小记录集合逐项对照，不能因为存在 [R-*] 格式就假定来源支持判断；topic_decisions 返回空数组。
 research_review 模式逐项检查每个 research_topics：外部来源是否真正支持正文，是否包含反例或边界，是否把探索性推断明确标为推断，以及是否避免替用户做最终判断。对每个输入 topic_id 返回 accepted 或 rejected；证据薄弱或正文越界时拒绝该主题，不要为了整份报告凑齐主题。

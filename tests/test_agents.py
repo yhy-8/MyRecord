@@ -41,12 +41,8 @@ class AgentModuleTests(unittest.TestCase):
             {"retrospective", "research_planner", "researcher", "reviewer"},
             set(AGENTS),
         )
-        self.assertEqual(frozenset(), AGENTS["researcher"].allowed_tools)
-        self.assertEqual(
-            frozenset({"web_search"}), researcher.NATIVE_SEARCH_SPEC.allowed_tools
-        )
-        self.assertEqual(frozenset(), AGENTS["retrospective"].allowed_tools)
         self.assertTrue(AGENTS["reviewer"].can_read_raw)
+        self.assertFalse(AGENTS["researcher"].can_read_raw)
 
     def test_retrospective_requires_structured_sources_for_each_paragraph(self):
         with self.assertRaisesRegex(AgentPipelineError, "每段必须选择"):
@@ -208,47 +204,6 @@ class AgentModuleTests(unittest.TestCase):
         self.assertIn("### 记录与研究", rendered)
         self.assertIn("https://example.com/article_%28one%29", rendered)
         self.assertEqual(["https://example.com/article_(one)"], [s["url"] for s in sources])
-
-    def test_native_researcher_maps_audited_urls_to_controller_ids(self):
-        topics = [
-            {
-                "topic_id": "Q001",
-                "title": "公开主题",
-                "origin": "news",
-                "source_refs": [],
-            }
-        ]
-        drafts, evidence = researcher.validate_native(
-            {
-                "topics": [
-                    {
-                        "status": "supported",
-                        "reason": "",
-                        "paragraphs": [
-                            {
-                                "kind": "evidence",
-                                "text": "搜索材料支持这一边界。",
-                                "record_refs": [],
-                                "source_urls": ["https://example.com/a?utm_source=x"],
-                            }
-                        ],
-                    }
-                ]
-            },
-            topics,
-            [
-                {
-                    "title": "实际搜索结果",
-                    "url": "https://example.com/a",
-                    "snippet": "证据摘要",
-                }
-            ],
-            set(),
-        )
-
-        self.assertEqual("Q001", drafts[0]["topic_id"])
-        self.assertEqual(["W-Q001-001"], drafts[0]["paragraphs"][0]["evidence_refs"])
-        self.assertEqual("https://example.com/a", evidence[0]["url"])
 
     def test_grounded_researcher_rejects_model_written_url(self):
         with self.assertRaisesRegex(AgentPipelineError, "不得自行输出 URL"):

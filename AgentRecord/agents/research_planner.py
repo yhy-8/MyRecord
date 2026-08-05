@@ -9,10 +9,6 @@ SPEC = AgentSpec(
     name="research_planner",
     purpose="从周期记录中选择少量值得研究的公开领域问题",
     can_read_raw=True,
-    readable_node_types=frozenset(),
-    writable_node_types=frozenset(),
-    writable_relation_types=frozenset(),
-    allowed_tools=frozenset(),
     instructions="""为周报第二板块自主选择一至五个研究主题，主题数量由实际材料和研究价值决定，不要为了凑数拆分或补写。主题来自记录中的观点、问题或兴趣；目标是拓宽视野，而不是给用户下行为指令。
 只选择能够通过公开资料实质研究的领域问题。查询必须抽象化，不包含姓名、联系方式、长数字、本地路径或可识别私人细节。source_refs 必须引用促成该主题的记录，origin 固定为 records。
 不要生成 topic_id，中控会按最终顺序分配稳定 ID。

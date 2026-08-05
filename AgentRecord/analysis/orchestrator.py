@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import re
+import time
 from pathlib import Path
 
 from .. import journal, settings
@@ -43,10 +44,12 @@ _MAX_CONTENT_REVISIONS = 1
 _MAX_GENERATOR_ATTEMPTS = 1 + _MAX_STRUCTURE_REPAIRS + _MAX_CONTENT_REVISIONS
 _MAX_AGENT_INPUT_CHARACTERS = 120000
 _MAX_RECORD_CHUNK_CHARACTERS = 30000
-_PIPELINE_VERSION = 8
+_PIPELINE_VERSION = 9
 
 
-def _analysis_config_signature(model_config: settings.ModelDict) -> dict:
+def _analysis_config_signature(
+    model_config: settings.ModelDict, kind: str
+) -> dict:
     """Return the non-secret effective configuration used by stage caches."""
     model = {
         key: model_config.get(key)
@@ -54,18 +57,19 @@ def _analysis_config_signature(model_config: settings.ModelDict) -> dict:
             "name",
             "model_id",
             "api_url",
-            "search",
             "json_mode",
             "max_tokens",
             "temperature",
         )
     }
-    third_search = settings.CONFIG.get("third_search", {})
-    search = {
-        key: third_search.get(key)
-        for key in ("enabled", "api_url", "count", "timeout", "max_rounds")
-    }
-    return {"model": model, "third_search": search}
+    signature = {"model": model}
+    if kind == "weekly":
+        third_search = settings.CONFIG.get("third_search", {})
+        signature["third_search"] = {
+            key: third_search.get(key)
+            for key in ("enabled", "api_url", "count", "timeout")
+        }
+    return signature
 
 
 def summarize_diary(date: str, model_config: settings.ModelDict) -> tuple[str, bool]:
@@ -87,9 +91,7 @@ def summarize_diary(date: str, model_config: settings.ModelDict) -> tuple[str, b
     current_prompt = prompt
     summary = ""
     for attempt in range(1, _MAX_AGENT_ATTEMPTS + 1):
-        summary, success, _, _, _ = call_ai(
-            current_prompt, model_config, allowed_tools=()
-        )
+        summary, success = call_ai(current_prompt, model_config)
         if not success:
             return summary, False
         summary = summary.strip()
@@ -130,7 +132,6 @@ def _call_agent(
     run_id: str,
     *,
     revision_context: dict | None = None,
-    allowed_search_queries: list[str] | None = None,
 ) -> dict:
     logger.info("agent_start run=%s agent=%s", run_id, spec.name)
     try:
@@ -152,9 +153,9 @@ def _call_agent(
             model_config,
             call_ai,
             revision_context=revision_context,
-            allowed_search_queries=allowed_search_queries,
         )
     except AgentPipelineError as error:
+        store.observe_telemetry(error.telemetry)
         store.save_artifact(
             run_id,
             spec.name,
@@ -170,6 +171,7 @@ def _call_agent(
         )
         raise
     telemetry = payload.get("_telemetry", {})
+    store.observe_telemetry(telemetry)
     logger.info(
         "agent_completed run=%s agent=%s duration_ms=%s total_tokens=%s cached_tokens=%s search_results=%s",
         run_id,
@@ -251,47 +253,6 @@ def _review_search_telemetry(telemetry: dict, sources: list[dict]) -> dict:
         "search_queries": telemetry.get("search_queries", []),
         "search_evidence": evidence,
     }
-
-
-def _merge_search_evidence(
-    accumulated: dict[tuple, dict], telemetry: dict
-) -> None:
-    """Retain auditable search results across bounded revisions in one run."""
-    for item in telemetry.get("search_evidence", []):
-        if not isinstance(item, dict) or not item.get("url"):
-            continue
-        url_key = researcher.canonical_url(str(item["url"]))
-        if url_key[0] not in {"http", "https"} or not url_key[1]:
-            continue
-        accumulated.setdefault(url_key, item)
-
-
-def _verified_source_options(
-    topics: list[dict], evidence: list[dict], *, per_topic: int = 8
-) -> list[dict]:
-    """Return a compact exact-URL whitelist to guide a rejected revision."""
-    results = []
-    for topic in topics:
-        query_key = re.sub(r"\s+", " ", topic["query"].strip()).casefold()
-        options = []
-        seen = set()
-        for item in evidence:
-            item_query = re.sub(
-                r"\s+", " ", str(item.get("query", "")).strip()
-            ).casefold()
-            url = str(item.get("url", "")).strip()
-            url_key = researcher.canonical_url(url)
-            if not url or item_query != query_key or url_key in seen:
-                continue
-            # Only echo the exact URL.  Titles and snippets are untrusted web
-            # text and must not be promoted into the controller's revision
-            # instructions.
-            options.append({"url": url})
-            seen.add(url_key)
-            if len(options) >= per_topic:
-                break
-        results.append({"topic_id": topic["topic_id"], "sources": options})
-    return results
 
 
 def _validated_agent_call(
@@ -604,187 +565,6 @@ def _research_topics(
         {"topics": topics, "_telemetry": payload.get("_telemetry", {})},
     )
     return topics
-
-
-def _native_research_section(
-    topics: list[dict],
-    current_source_ids: set[str],
-    model_config: settings.ModelDict,
-    store: AnalysisStore,
-    run_id: str,
-) -> str:
-    research_input = {"research_topics": topics}
-    revision_context = None
-    last_feedback: list[str] = []
-    accumulated_evidence: dict[tuple, dict] = {}
-    attempt = 0
-    structure_repairs = 0
-    content_revisions = 0
-    while attempt < _MAX_GENERATOR_ATTEMPTS:
-        attempt += 1
-        try:
-            payload = _call_agent(
-                researcher.NATIVE_SEARCH_SPEC,
-                "逐项联网查证并返回语义段落；本次调用即使是修订稿也必须重新执行 web_search。",
-                research_input,
-                model_config,
-                store,
-                run_id,
-                revision_context=revision_context,
-                allowed_search_queries=[topic["query"] for topic in topics],
-            )
-        except AgentOutputError as error:
-            _merge_search_evidence(accumulated_evidence, error.telemetry)
-            if (
-                structure_repairs >= _MAX_STRUCTURE_REPAIRS
-                or attempt == _MAX_GENERATOR_ATTEMPTS
-            ):
-                raise
-            structure_repairs += 1
-            revision_context = _revision_context(
-                attempt + 1,
-                error.response,
-                {
-                    "validation_error": str(error),
-                    "verified_source_options": _verified_source_options(
-                        topics, list(accumulated_evidence.values())
-                    ),
-                },
-                source="中控 JSON 解析",
-                maximum_attempts=_MAX_GENERATOR_ATTEMPTS,
-            )
-            continue
-        telemetry = payload.get("_telemetry", {})
-        _merge_search_evidence(accumulated_evidence, telemetry)
-        try:
-            used_search = bool(
-                telemetry.get("web_citations", 0)
-                or telemetry.get("search_results", 0)
-                or telemetry.get("search_evidence", [])
-            )
-            if not used_search:
-                raise AgentPipelineError("领域研究没有实际执行联网搜索")
-            drafts, evidence = researcher.validate_native(
-                payload,
-                topics,
-                list(accumulated_evidence.values()),
-                current_source_ids,
-            )
-            supported_topic_ids = {
-                draft["topic_id"]
-                for draft in drafts
-                if draft["status"] == "supported"
-            }
-            supported_topics = [
-                topic
-                for topic in topics
-                if topic["topic_id"] in supported_topic_ids
-            ]
-            rendered_markdown, sources = researcher.render_grounded(
-                drafts, topics, evidence
-            )
-        except AgentPipelineError as error:
-            _save_validation_failure(
-                store, run_id, researcher.SPEC.name, payload, error
-            )
-            if (
-                structure_repairs >= _MAX_STRUCTURE_REPAIRS
-                or attempt == _MAX_GENERATOR_ATTEMPTS
-            ):
-                raise
-            structure_repairs += 1
-            revision_context = _revision_context(
-                attempt + 1,
-                payload,
-                {
-                    "validation_error": str(error),
-                    "verified_source_options": _verified_source_options(
-                        topics, list(accumulated_evidence.values())
-                    ),
-                },
-                source="中控确定性校验",
-                maximum_attempts=_MAX_GENERATOR_ATTEMPTS,
-            )
-            continue
-
-        telemetry = {
-            **telemetry,
-            "search_evidence": list(accumulated_evidence.values()),
-        }
-        normalized_payload = {
-            "markdown": rendered_markdown,
-            "sources": sources,
-            "structured_topics": drafts,
-        }
-        passed, topic_decisions, last_feedback, review_payload = _review(
-            "research_review",
-            normalized_payload,
-            {
-                "research_topics": supported_topics,
-                "search_telemetry": _review_search_telemetry(telemetry, sources),
-            },
-            model_config,
-            store,
-            run_id,
-            topic_ids=supported_topic_ids,
-        )
-        accepted_topic_ids = {
-            topic_id
-            for topic_id, status in topic_decisions.items()
-            if status == "accepted"
-        }
-        if accepted_topic_ids:
-            final_markdown, final_sources = researcher.render_grounded(
-                drafts,
-                topics,
-                evidence,
-                accepted_topic_ids=accepted_topic_ids,
-            )
-            store.save_artifact(
-                run_id,
-                researcher.SPEC.name,
-                {
-                    "markdown": final_markdown,
-                    "sources": final_sources,
-                    "structured_topics": drafts,
-                    "topic_decisions": topic_decisions,
-                    "dropped_topic_ids": [
-                        topic["topic_id"]
-                        for topic in topics
-                        if topic["topic_id"] not in accepted_topic_ids
-                    ],
-                    "_telemetry": telemetry,
-                },
-            )
-            if not passed:
-                logger.info(
-                    "research_topics_dropped run=%s accepted=%s dropped=%s",
-                    run_id,
-                    len(accepted_topic_ids),
-                    len(topics) - len(accepted_topic_ids),
-                )
-            return final_markdown
-
-        error = AgentPipelineError(
-            "领域研究没有主题通过审查: " + "; ".join(last_feedback)
-        )
-        _save_validation_failure(
-            store, run_id, researcher.SPEC.name, normalized_payload, error
-        )
-        if (
-            content_revisions >= _MAX_CONTENT_REVISIONS
-            or attempt == _MAX_GENERATOR_ATTEMPTS
-        ):
-            raise error
-        content_revisions += 1
-        revision_context = _revision_context(
-            attempt + 1,
-            {"topics": drafts},
-            _review_feedback(review_payload),
-            source="Reviewer 实质审查",
-            maximum_attempts=_MAX_GENERATOR_ATTEMPTS,
-        )
-    raise AgentPipelineError("领域研究修订次数耗尽: " + "; ".join(last_feedback))
 
 
 def _valid_cached_research_evidence(
@@ -1141,37 +921,59 @@ def _research_section(
     run_id: str,
     cached_search: tuple[str, dict] | None = None,
 ) -> str:
-    if third_party_search_available():
-        return _grounded_research_section(
-            topics,
-            current_source_ids,
-            model_config,
-            store,
-            run_id,
-            cached_search,
-        )
-    return _native_research_section(
+    return _grounded_research_section(
         topics,
         current_source_ids,
         model_config,
         store,
         run_id,
+        cached_search,
     )
 
 
-def _source_appendix(markdown: str, store: AnalysisStore) -> str:
+def _source_appendix(markdown: str, source_records: list[dict]) -> str:
     cited = sorted(cited_source_ids(markdown))
-    records = {record["source_id"]: record for record in store.source_records(cited)}
+    records = {record["source_id"]: record for record in source_records}
     lines = ["## 来源索引"]
     for source_id in cited:
         record = records.get(source_id)
         if not record:
             continue
         lines.append(
-            f"- [{source_id}] {record['source_date']} {record['source_time']} "
-            f"— `{record['relative_path']}` 第 {record['record_index']} 条记录"
+            f"- [{source_id}] {record['date']} {record['time']} "
+            f"— `{record['path']}` 第 {record['record_index']} 条记录"
         )
     return "\n".join(lines)
+
+
+def _model_label(model_config: settings.ModelDict) -> str:
+    name = str(model_config.get("name", "")).strip()
+    model_id = str(model_config.get("model_id", "")).strip()
+    if name and model_id and name.casefold() != model_id.casefold():
+        return f"{name}（{model_id}）"
+    return name or model_id or "未标明"
+
+
+def _duration_label(seconds: float) -> str:
+    if seconds < 60:
+        return f"{seconds:.1f} 秒"
+    total_seconds = round(seconds)
+    minutes, remaining = divmod(total_seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours} 小时 {minutes} 分 {remaining} 秒"
+    return f"{minutes} 分 {remaining} 秒"
+
+
+def _token_label(usage: dict[str, int]) -> str:
+    prompt = usage.get("prompt_tokens", 0)
+    completion = usage.get("completion_tokens", 0)
+    total = usage.get("total_tokens", 0) or prompt + completion
+    cached = usage.get("cached_tokens", 0)
+    return (
+        f"{total:,}（输入 {prompt:,}，输出 {completion:,}，"
+        f"缓存命中 {cached:,}）"
+    )
 
 
 def generate_analysis_report(
@@ -1216,6 +1018,7 @@ def generate_analysis_report(
     report_lock = FileLock.acquire(settings.ANALYSIS_DIR / ".report.lock")
     if report_lock is None:
         return "另一个分析报告正在生成，请稍后重试。", False, None
+    generation_started = time.perf_counter()
     store: AnalysisStore | None = None
     run_id: str | None = None
     try:
@@ -1235,7 +1038,7 @@ def generate_analysis_report(
         )
         snapshot = {
             "pipeline_version": _PIPELINE_VERSION,
-            "analysis_config": _analysis_config_signature(model_config),
+            "analysis_config": _analysis_config_signature(model_config, kind),
             "kind": kind,
             "records": records,
             "referenced_records": referenced_records,
@@ -1264,7 +1067,6 @@ def generate_analysis_report(
             start,
             end,
         )
-        store.save_sources(run_id, [*records, *referenced_records])
 
         cache_arguments = (
             input_hash,
@@ -1413,16 +1215,21 @@ def generate_analysis_report(
             "scheduled": "系统调度",
             "retry": "自动任务重试",
         }[trigger]
+        duration = _duration_label(time.perf_counter() - generation_started)
+        token_usage = _token_label(store.usage_totals())
         final_content = (
             f"# {report_name}\n\n"
             f"> 生成时间：{datetime.datetime.now():%Y-%m-%d %H:%M}\n"
+            f"> 使用模型：{_model_label(model_config)}\n"
+            f"> 生成耗时：{duration}\n"
+            f"> Token 用量：{token_usage}\n"
             f"> 报告来源：{origin_label}\n"
             f"> 触发方式：{trigger_label}\n"
             f"> 原始日记范围：{start:%Y-%m-%d} 至 {end:%Y-%m-%d}\n"
             f"> 分析运行：{run_id}\n\n"
             + body
             + "\n\n"
-            + _source_appendix(body, store)
+            + _source_appendix(body, [*records, *referenced_records])
             + "\n"
         )
         report_path.parent.mkdir(parents=True, exist_ok=True)

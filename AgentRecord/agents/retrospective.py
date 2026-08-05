@@ -9,10 +9,6 @@ SPEC = AgentSpec(
     name="retrospective",
     purpose="整理周期事实、观点变化与行为模式",
     can_read_raw=True,
-    readable_node_types=frozenset(),
-    writable_node_types=frozenset(),
-    writable_relation_types=frozenset(),
-    allowed_tools=frozenset(),
     instructions="""生成报告第一板块“整理与回顾”的语义内容。
 内容必须忠实回顾本周期做过什么、关注点如何分配，以及观点、理念、理想或行为模式出现了怎样的变化。行为分析属于事实整理的一部分，但不得把时间先后写成因果，不得心理诊断，不得给出行为教练式命令。
 不要生成 Markdown 标题、引用标点或来源索引。把正文拆成少量 section，每个 paragraph 只填写自然语言 text，并在 source_refs 数组中原样选择直接支持该段的输入来源 ID；中控负责标题、[R-*] 引用和排版。每段必须有来源，不能自行编造、缩写或扩展来源 ID。
