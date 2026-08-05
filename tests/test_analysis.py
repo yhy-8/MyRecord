@@ -84,15 +84,11 @@ class AnalysisWorkflowTests(unittest.TestCase):
             record = data["records"][0]
             source = record["source_id"]
             payload = {
-                "sections": [
+                "paragraphs": [
                     {
                         "title": "本期回顾",
-                        "paragraphs": [
-                            {
-                                "text": "本期完成了一次记录与思考。",
-                                "source_refs": [source],
-                            }
-                        ],
+                        "text": "本期完成了一次记录与思考。",
+                        "source_refs": [source],
                     }
                 ],
             }
@@ -330,15 +326,11 @@ class AnalysisWorkflowTests(unittest.TestCase):
             return AIResponse(
                 json.dumps(
                     {
-                        "sections": [
+                        "paragraphs": [
                             {
                                 "title": "",
-                                "paragraphs": [
-                                    {
-                                        "text": "引用记录中的事实",
-                                        "source_refs": [source],
-                                    }
-                                ],
+                                "text": "引用记录中的事实",
+                                "source_refs": [source],
                             }
                         ],
                     },
@@ -478,10 +470,11 @@ class AnalysisWorkflowTests(unittest.TestCase):
             "records": [{"source_id": source_id, "text": "记录"}],
         }
         invalid = {
-            "sections": [
+            "paragraphs": [
                 {
                     "title": "",
-                    "paragraphs": [{"text": "缺少来源", "source_refs": []}],
+                    "text": "缺少来源",
+                    "source_refs": [],
                 }
             ],
         }
@@ -517,30 +510,29 @@ class AnalysisWorkflowTests(unittest.TestCase):
             "records": [{"source_id": source_id, "text": "用户记录"}],
         }
         invalid = {
-            "sections": [
+            "paragraphs": [
                 {
                     "title": "",
-                    "paragraphs": [{"text": "缺少来源", "source_refs": []}],
+                    "text": "缺少来源",
+                    "source_refs": [],
                 }
             ],
         }
         valid = {
-            "sections": [
+            "paragraphs": [
                 {
                     "title": "",
-                    "paragraphs": [
-                        {"text": "有来源的判断。", "source_refs": [source_id]}
-                    ],
+                    "text": "有来源的判断。",
+                    "source_refs": [source_id],
                 }
             ],
         }
         revised = {
-            "sections": [
+            "paragraphs": [
                 {
                     "title": "",
-                    "paragraphs": [
-                        {"text": "审查后修订。", "source_refs": [source_id]}
-                    ],
+                    "text": "审查后修订。",
+                    "source_refs": [source_id],
                 }
             ],
         }
@@ -585,25 +577,20 @@ class AnalysisWorkflowTests(unittest.TestCase):
             "records": [{"source_id": source_id, "text": "用户记录"}],
         }
         first = {
-            "sections": [
+            "paragraphs": [
                 {
                     "title": "",
-                    "paragraphs": [
-                        {"text": "第一稿判断。", "source_refs": [source_id]}
-                    ],
+                    "text": "第一稿判断。",
+                    "source_refs": [source_id],
                 }
             ],
         }
         revised = {
-            "sections": [
+            "paragraphs": [
                 {
                     "title": "",
-                    "paragraphs": [
-                        {
-                            "text": "修订后仅保留有依据的判断。",
-                            "source_refs": [source_id],
-                        }
-                    ],
+                    "text": "修订后仅保留有依据的判断。",
+                    "source_refs": [source_id],
                 }
             ],
         }
@@ -638,8 +625,8 @@ class AnalysisWorkflowTests(unittest.TestCase):
         correction = call_agent.call_args_list[1].kwargs["revision_context"]
         self.assertEqual("Reviewer 实质审查", correction["feedback_source"])
         self.assertEqual(
-            first["sections"],
-            correction["rejected_previous_output"]["sections"],
+            first["paragraphs"],
+            correction["rejected_previous_output"]["paragraphs"],
         )
         self.assertIn(
             "删除无依据判断", correction["problems_to_fix"]["required_changes"]

@@ -48,10 +48,11 @@ class AgentModuleTests(unittest.TestCase):
         with self.assertRaisesRegex(AgentPipelineError, "每段必须选择"):
             retrospective.validate(
                 {
-                    "sections": [
+                    "paragraphs": [
                         {
                             "title": "回顾",
-                            "paragraphs": [{"text": "第一段没有来源", "source_refs": []}],
+                            "text": "第一段没有来源",
+                            "source_refs": [],
                         }
                     ],
                 },
@@ -61,17 +62,13 @@ class AgentModuleTests(unittest.TestCase):
     def test_controller_renders_grouped_record_citations(self):
         result = retrospective.validate(
             {
-                "sections": [
+                "paragraphs": [
                     {
                         "title": "回顾",
-                        "paragraphs": [
-                            {
-                                "text": "整理内容",
-                                "source_refs": [
-                                    "R-20260714-001",
-                                    "R-20260714-002",
-                                ],
-                            }
+                        "text": "整理内容",
+                        "source_refs": [
+                            "R-20260714-001",
+                            "R-20260714-002",
                         ],
                     }
                 ],

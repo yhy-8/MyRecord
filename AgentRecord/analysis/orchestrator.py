@@ -419,7 +419,7 @@ def _retrospective_section(
 
         normalized_payload = {
             "markdown": markdown,
-            "structured_sections": payload.get("sections", []),
+            "structured_paragraphs": payload.get("paragraphs", []),
         }
         cited_ids = cited_source_ids(markdown)
         reviewable_records = [
@@ -467,7 +467,7 @@ def _retrospective_section(
         content_revisions += 1
         revision_context = _revision_context(
             attempt + 1,
-            {"sections": payload.get("sections", [])},
+            {"paragraphs": payload.get("paragraphs", [])},
             _review_feedback(review_payload),
             source="Reviewer 实质审查",
             maximum_attempts=_MAX_GENERATOR_ATTEMPTS,
