@@ -865,21 +865,35 @@ def _research_section(
     )
 
 
-def _source_appendix(markdown: str, source_records: list[dict]) -> str:
-    cited = sorted(
-        set(re.findall(r"R-\d{8}-\d{3}(?:-[0-9a-f]{12})?", markdown))
+def _concise_source_id(source_id: str) -> str:
+    """把内部完整来源标识缩写成最终报告使用的日期级形式。"""
+    match = re.fullmatch(r"(R-\d{8})-\d{3}-[0-9a-f]{12}", source_id)
+    return match.group(1) if match else source_id
+
+
+def _concise_report_markdown(markdown: str) -> str:
+    """最终报告只显示日期级来源标识，并合并同一日期的重复来源。
+
+    完整指纹标识仍然保留在 Reviewer 输入和运行审计材料中，
+    只在最终报告输出时缩写。
+    """
+    markdown = re.sub(
+        r"R-\d{8}-\d{3}-[0-9a-f]{12}",
+        lambda match: _concise_source_id(match.group(0)),
+        markdown,
     )
-    records = {record["source_id"]: record for record in source_records}
-    lines = ["## 来源索引"]
-    for source_id in cited:
-        record = records.get(source_id)
-        if not record:
-            continue
-        lines.append(
-            f"- [{source_id}] {record['date']} {record['time']} "
-            f"— `{record['path']}` 第 {record['record_index']} 条记录"
-        )
-    return "\n".join(lines)
+    return re.sub(
+        r"> 记录依据：([^\n]*)",
+        lambda match: "> 记录依据："
+        + ", ".join(
+            dict.fromkeys(
+                item.strip()
+                for item in match.group(1).split(",")
+                if item.strip()
+            )
+        ),
+        markdown,
+    )
 
 
 def _model_label(model_config: settings.ModelDict) -> str:
@@ -1139,6 +1153,7 @@ def generate_analysis_report(
         }[trigger]
         duration = _duration_label(time.perf_counter() - generation_started)
         token_usage = _token_label(store.usage_totals())
+        concise_body = _concise_report_markdown(body)
         final_content = (
             f"# {report_name}\n\n"
             f"> 生成时间：{datetime.datetime.now():%Y-%m-%d %H:%M}\n"
@@ -1149,9 +1164,7 @@ def generate_analysis_report(
             f"> 触发方式：{trigger_label}\n"
             f"> 原始日记范围：{start:%Y-%m-%d} 至 {end:%Y-%m-%d}\n"
             f"> 分析运行：{run_id}\n\n"
-            + body
-            + "\n\n"
-            + _source_appendix(body, [*records, *referenced_records])
+            + concise_body
             + "\n"
         )
         report_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1170,7 +1183,7 @@ def generate_analysis_report(
                 restore.replace(report_path)
             raise
         logger.info("analysis_completed run=%s kind=%s", run_id, kind)
-        return body, True, report_path
+        return concise_body, True, report_path
     except Exception as error:
         message = str(error) or error.__class__.__name__
         if store is not None and run_id is not None:

@@ -145,6 +145,26 @@ class AnalysisWorkflowTests(unittest.TestCase):
         )
         self.assertIn("我开始重视记录是否可以验证", retrospective_review)
 
+    def test_weekly_report_uses_concise_source_ids_without_appendix(self):
+        day = datetime.date(2026, 7, 14)
+        self.write_diary(day.isoformat())
+        _, success, path = orchestrator.generate_analysis_report(
+            "weekly", day, {"name": "mock"}
+        )
+        self.assertTrue(success)
+        content = path.read_text(encoding="utf-8")
+        # 最终报告只显示日期级来源标识，不再保留长指纹标识和结尾索引列表。
+        self.assertIn("> 记录依据：R-20260714", content)
+        self.assertNotIn("R-20260714-001", content)
+        self.assertNotIn("## 来源索引", content)
+        # 内部审查仍然看到完整来源标识。
+        retrospective_review = next(
+            prompt
+            for prompt in self.ai_calls
+            if "任务:reviewer]" in prompt and '"mode": "retrospective_review"' in prompt
+        )
+        self.assertRegex(retrospective_review, r"R-20260714-001-[0-9a-f]{12}")
+
     def test_retry_reuses_reviewed_stages_from_equivalent_failed_run(self):
         day = datetime.date(2026, 7, 14)
         self.write_diary(day.isoformat())
