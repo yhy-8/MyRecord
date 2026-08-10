@@ -19,7 +19,6 @@ ModelDict = dict[str, Any]
 
 _RETRY_DEFAULTS = {
     "agent_revision_limit": 1,
-    "daily_summary_retry_limit": 2,
     "empty_response_retry_limit": 1,
     "transient_http_retry_limit": 2,
     "transient_http_backoff_seconds": 1,
@@ -32,6 +31,10 @@ _POSITIVE_RETRY_SETTINGS = {
     "automation_content_failure_limit",
     "automation_network_retry_minutes",
     "automation_content_retry_interval_minutes",
+}
+_MAXIMUM_RETRY_SETTINGS = {
+    "agent_revision_limit": 1,
+    "empty_response_retry_limit": 1,
 }
 
 
@@ -79,6 +82,11 @@ def retry_policy() -> dict[str, int]:
         if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
             comparator = "正整数" if minimum else "非负整数"
             raise RuntimeError(f"config.yaml 中 retry.{key} 必须是{comparator}")
+        maximum = _MAXIMUM_RETRY_SETTINGS.get(key)
+        if maximum is not None and value > maximum:
+            raise RuntimeError(
+                f"config.yaml 中 retry.{key} 不能大于 {maximum}"
+            )
         policy[key] = value
     return policy
 
@@ -97,7 +105,6 @@ class ModelConfig:
         hostname = urlsplit(str(effective.get("api_url", ""))).hostname or ""
         if hostname.casefold() == "api.deepseek.com":
             effective.setdefault("json_mode", True)
-            effective.setdefault("max_tokens", 100000)
         return effective
 
     @classmethod
@@ -164,14 +171,22 @@ def configuration_warnings() -> list[str]:
         hostname = urlsplit(str(raw_model.get("api_url", ""))).hostname or ""
         if hostname.casefold() != "api.deepseek.com":
             continue
-        missing = [
-            key for key in ("json_mode", "max_tokens") if key not in raw_model
-        ]
+        missing = [key for key in ("json_mode",) if key not in raw_model]
         if missing:
             warnings.append(
                 f"模型 {raw_model.get('name', '未命名')} 缺少 "
                 f"{', '.join(missing)}；本次已使用 DeepSeek 安全默认值，"
                 "请更新实际运行目录的 config.yaml。"
+            )
+    try:
+        active_model = ModelConfig.get_model()
+    except (KeyError, RuntimeError, TypeError) as error:
+        warnings.append(f"活动模型配置无效：{error}")
+    else:
+        if not str(active_model.get("api_key", "")).strip():
+            warnings.append(
+                f"活动模型 {active_model.get('name', '未命名')} 的 api_key 为空，"
+                "总结和报告暂时无法生成。"
             )
     third_search = CONFIG.get("third_search", {})
     try:
@@ -181,6 +196,23 @@ def configuration_warnings() -> list[str]:
     if count > 10:
         warnings.append(
             f"third_search.count={count} 超过有效上限 10；运行时会按 10 处理。"
+        )
+    automation = CONFIG.get("automation", {})
+    weekly_automatic = bool(
+        isinstance(automation, dict)
+        and automation.get("enabled", False)
+        and automation.get("weekly_report", False)
+    )
+    search_ready = bool(
+        isinstance(third_search, dict)
+        and third_search.get("enabled", False)
+        and third_search.get("api_url", "")
+        and third_search.get("api_key", "")
+    )
+    if weekly_automatic and not search_ready:
+        warnings.append(
+            "自动周报已启用，但 third_search 未启用或缺少 api_url/api_key；"
+            "周报会在配置检查阶段暂停。"
         )
     try:
         retry_policy()

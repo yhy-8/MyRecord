@@ -56,7 +56,7 @@ class ModelSettingsTests(unittest.TestCase):
             effective = settings.ModelConfig.get_model()
 
         self.assertTrue(effective["json_mode"])
-        self.assertEqual(100000, effective["max_tokens"])
+        self.assertNotIn("max_tokens", effective)
         self.assertNotIn("json_mode", raw_model)
 
     def test_config_warnings_explain_provider_defaults_and_search_cap(self):
@@ -77,18 +77,40 @@ class ModelSettingsTests(unittest.TestCase):
 
         message = " ".join(warnings)
         self.assertNotIn("版本", message)
-        self.assertIn("json_mode, max_tokens", message)
+        self.assertIn("json_mode", message)
         self.assertIn("有效上限 10", message)
+
+    def test_config_warnings_cover_active_key_and_automatic_weekly_search(self):
+        with patch.object(
+            settings,
+            "CONFIG",
+            {
+                "current_model": "deepseek",
+                "models": [
+                    {
+                        "name": "deepseek",
+                        "api_url": "https://api.deepseek.com/chat/completions",
+                        "api_key": "",
+                    }
+                ],
+                "automation": {"enabled": True, "weekly_report": True},
+                "third_search": {"enabled": False},
+            },
+        ):
+            message = " ".join(settings.configuration_warnings())
+
+        self.assertIn("api_key 为空", message)
+        self.assertIn("自动周报已启用", message)
 
     def test_retry_policy_uses_configured_values_and_defaults(self):
         with patch.object(
             settings,
             "CONFIG",
-            {"retry": {"agent_revision_limit": 3}},
+            {"retry": {"agent_revision_limit": 0}},
         ):
             policy = settings.retry_policy()
 
-        self.assertEqual(3, policy["agent_revision_limit"])
+        self.assertEqual(0, policy["agent_revision_limit"])
         self.assertEqual(2, policy["transient_http_retry_limit"])
         self.assertEqual(60, policy["automation_content_retry_interval_minutes"])
 
@@ -99,6 +121,14 @@ class ModelSettingsTests(unittest.TestCase):
             {"retry": {"automation_content_failure_limit": 0}},
         ):
             with self.assertRaisesRegex(RuntimeError, "必须是正整数"):
+                settings.retry_policy()
+
+        with patch.object(
+            settings,
+            "CONFIG",
+            {"retry": {"agent_revision_limit": 2}},
+        ):
+            with self.assertRaisesRegex(RuntimeError, "不能大于 1"):
                 settings.retry_policy()
 
 

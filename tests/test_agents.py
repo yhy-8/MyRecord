@@ -22,8 +22,8 @@ class AgentModuleTests(unittest.TestCase):
 
     def test_agent_prompt_requires_one_minimal_json_task(self):
         prompt = _prompt(
-            retrospective.SPEC,
-            "生成正文",
+            research_planner.SPEC,
+            "选择问题",
             {"records": ["内容"]},
         )
         self.assertIn("只负责当前这一项语义任务", prompt)
@@ -37,46 +37,99 @@ class AgentModuleTests(unittest.TestCase):
         def fake_call(prompt, model, **kwargs):
             calls.append(kwargs)
             return AIResponse(
-                '{"text":"纯文本正文"}',
+                '{"action":"skip","query":""}',
                 True,
                 {"usage": {"total_tokens": 3}},
             )
 
         payload, telemetry = invoke_agent(
-            retrospective.SPEC,
-            "生成正文",
+            research_planner.SPEC,
+            "选择问题",
             {"records": []},
             {"name": "mock"},
             fake_call,
         )
 
-        self.assertEqual({"text": "纯文本正文"}, payload)
+        self.assertEqual({"action": "skip", "query": ""}, payload)
         self.assertEqual(3, telemetry["usage"]["total_tokens"])
-        self.assertEqual([{"structured_output": True}], calls)
+        self.assertEqual(
+            [
+                {
+                    "structured_output": True,
+                    "thinking": False,
+                    "max_tokens": 1024,
+                }
+            ],
+            calls,
+        )
 
     def test_agent_invocation_unwraps_one_outer_json_fence(self):
         payload, _ = invoke_agent(
-            retrospective.SPEC,
-            "生成正文",
+            research_planner.SPEC,
+            "选择问题",
             {},
             {"name": "mock"},
             lambda *args, **kwargs: AIResponse(
-                '```json\n{"text":"正文"}\n```', True
+                '```json\n{"action":"skip","query":""}\n```', True
             ),
         )
-        self.assertEqual({"text": "正文"}, payload)
+        self.assertEqual({"action": "skip", "query": ""}, payload)
+
+    def test_json_protocol_error_gets_one_bounded_retry(self):
+        responses = iter(
+            [
+                AIResponse("not json", True, {"usage": {"total_tokens": 2}}),
+                AIResponse(
+                    '{"action":"skip","query":""}',
+                    True,
+                    {"usage": {"total_tokens": 3}},
+                ),
+            ]
+        )
+        prompts = []
+
+        def fake_call(prompt, model, **kwargs):
+            prompts.append(prompt)
+            return next(responses)
+
+        payload, telemetry = invoke_agent(
+            research_planner.SPEC, "选择问题", {}, {"name": "mock"}, fake_call
+        )
+
+        self.assertEqual({"action": "skip", "query": ""}, payload)
+        self.assertEqual(2, len(prompts))
+        self.assertIn("协议重试", prompts[1])
+        self.assertEqual(1, telemetry["protocol_retries"])
+        self.assertEqual(5, telemetry["usage"]["total_tokens"])
+
+    def test_retrospective_invocation_is_plain_text_with_thinking_budget(self):
+        calls = []
+
+        def fake_call(prompt, model, **kwargs):
+            calls.append(kwargs)
+            return AIResponse("纯文本正文", True)
+
+        body, _ = invoke_agent(
+            retrospective.SPEC, "生成正文", {}, {"name": "mock"}, fake_call
+        )
+
+        self.assertEqual("纯文本正文", body)
+        self.assertEqual(
+            [{"structured_output": False, "thinking": True, "max_tokens": 65536}],
+            calls,
+        )
 
     def test_retrospective_accepts_only_unstructured_text(self):
         self.assertEqual(
             "正文第一段\n\n正文第二段",
-            retrospective.validate({"text": "正文第一段\n\n正文第二段"}),
+            retrospective.validate("正文第一段\n\n正文第二段"),
         )
         with self.assertRaisesRegex(AgentPipelineError, "不得自行输出标题"):
-            retrospective.validate({"text": "### 模型自拟标题\n正文"})
-        with self.assertRaisesRegex(AgentPipelineError, "字符串 text"):
-            retrospective.validate({"text": ["第一段", "第二段"]})
+            retrospective.validate("### 模型自拟标题\n正文")
+        with self.assertRaisesRegex(AgentPipelineError, "纯文本"):
+            retrospective.validate(["第一段", "第二段"])
         with self.assertRaisesRegex(AgentPipelineError, "不得自行输出 URL"):
-            retrospective.validate({"text": "正文 https://example.com"})
+            retrospective.validate("正文 https://example.com")
 
     def test_planner_returns_one_query_or_skip_and_sanitizes_private_data(self):
         self.assertIsNone(
@@ -100,7 +153,7 @@ class AgentModuleTests(unittest.TestCase):
 
         self.assertEqual(
             retrospective_text,
-            retrospective.validate({"text": retrospective_text}),
+            retrospective.validate(retrospective_text),
         )
         self.assertEqual(
             ("supported", research_text),
@@ -121,7 +174,7 @@ class AgentModuleTests(unittest.TestCase):
         topic = {
             "topic_id": "Q001",
             "title": "记录方法的研究边界",
-            "source_refs": ["R-20260714-001-aaaaaaaaaaaa"],
+            "record_dates": ["2026-07-14"],
         }
         evidence = [
             {
@@ -135,7 +188,8 @@ class AgentModuleTests(unittest.TestCase):
         markdown, sources = researcher.render_topic("分析正文。", topic, evidence)
         self.assertIn("### 记录方法的研究边界", markdown)
         self.assertIn("分析正文。", markdown)
-        self.assertIn("R-20260714-001-aaaaaaaaaaaa", markdown)
+        self.assertIn("记录依据：2026-07-14", markdown)
+        self.assertNotIn("R-20260714", markdown)
         self.assertIn("https://example.com/source", markdown)
         self.assertEqual("W-Q001-001", sources[0]["source_id"])
 

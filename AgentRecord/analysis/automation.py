@@ -227,7 +227,6 @@ def _content_failure_key(
                 "model_id",
                 "api_url",
                 "json_mode",
-                "max_tokens",
                 "temperature",
             )
         }

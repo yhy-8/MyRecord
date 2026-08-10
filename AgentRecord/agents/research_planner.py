@@ -13,6 +13,9 @@ SPEC = AgentSpec(
 如果存在值得通过公开资料研究、能够拓宽视野且不属于行为指导的问题，只返回一个简洁、清晰、适合直接搜索的公开问题。问题必须抽象化，不含姓名、联系方式、长数字、本地路径或可识别私人细节。
 如果没有合适问题，action 使用 skip 且 query 为空；否则 action 使用 search 且 query 只包含一个问题。不要同时给出多个候选，不要补充标题、理由、编号或来源。
 只返回 {"action":"search|skip","query":"一个问题或空字符串"}。""",
+    structured_output=True,
+    thinking=False,
+    max_tokens=1024,
 )
 
 

@@ -1,4 +1,4 @@
-"""Shared minimal-JSON Agent invocation without persistence access."""
+"""Shared single-task Agent invocation without persistence access."""
 
 import json
 import re
@@ -12,6 +12,9 @@ class AgentSpec:
     purpose: str
     can_read_raw: bool
     instructions: str
+    structured_output: bool
+    thinking: bool
+    max_tokens: int
 
 
 class AgentPipelineError(RuntimeError):
@@ -86,9 +89,42 @@ def _prompt(
 【中控修订请求】
 这是同一项正文的本次有限修订。只根据反馈改写正文，不要解释修改过程。
 {json.dumps(revision_context, ensure_ascii=False)}"""
-    return prompt + """
+    if spec.structured_output:
+        return prompt + """
 
 只输出职责约束中指定的一个最小 JSON 对象，不要输出代码围栏、来源 ID、链接、完成提示或额外说明。JSON 中不得自行增加数组、嵌套对象或未指定字段。"""
+    return prompt + """
+
+只输出职责约束中指定的连续正文，不要输出 JSON、代码围栏、来源 ID、链接、标题、列表、完成提示或额外说明。"""
+
+
+def _merge_telemetry(items: list[dict]) -> dict:
+    """Merge the small subset of telemetry used by report metadata."""
+    merged = {
+        "duration_ms": 0,
+        "http_attempts": 0,
+        "finish_reasons": [],
+        "empty_content_retries": 0,
+        "protocol_retries": max(0, len(items) - 1),
+        "usage": {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "cached_tokens": 0,
+            "cache_miss_tokens": 0,
+        },
+    }
+    for item in items:
+        merged["duration_ms"] += int(item.get("duration_ms", 0) or 0)
+        merged["http_attempts"] += int(item.get("http_attempts", 0) or 0)
+        merged["empty_content_retries"] += int(
+            item.get("empty_content_retries", 0) or 0
+        )
+        merged["finish_reasons"].extend(item.get("finish_reasons", []))
+        usage = item.get("usage", {})
+        for key in merged["usage"]:
+            merged["usage"][key] += int(usage.get(key, 0) or 0)
+    return merged
 
 
 def invoke_agent(
@@ -99,31 +135,48 @@ def invoke_agent(
     call_model: Callable,
     *,
     revision_context: dict | None = None,
-) -> tuple[dict, dict]:
-    """Invoke one Agent for one minimal JSON object."""
-    response = call_model(
-        _prompt(spec, task, input_data, revision_context),
-        model_config,
-        structured_output=True,
-    )
-    text, success = response
+) -> tuple[dict | str, dict]:
+    """Invoke one Agent, with one bounded JSON protocol retry when applicable."""
     from ..ai_client import response_telemetry
 
-    telemetry = response_telemetry(response)
-    if not success:
-        from ..ai_client import OUTPUT_FILTERED_MARKER, OUTPUT_TRUNCATED_MARKER
-
-        if OUTPUT_TRUNCATED_MARKER in text or OUTPUT_FILTERED_MARKER in text:
-            raise AgentOutputError(
-                f"{spec.name} 输出未完整交付",
-                response=text,
-                telemetry=telemetry,
-            )
-        raise AgentPipelineError(
-            f"{spec.name} 调用失败: {text}", response=text, telemetry=telemetry
+    base_prompt = _prompt(spec, task, input_data, revision_context)
+    prompt = base_prompt
+    telemetry_items = []
+    protocol_attempts = 2 if spec.structured_output else 1
+    for attempt in range(protocol_attempts):
+        response = call_model(
+            prompt,
+            model_config,
+            structured_output=spec.structured_output,
+            thinking=spec.thinking,
+            max_tokens=spec.max_tokens,
         )
-    try:
-        return _parse_json(text), telemetry
-    except AgentPipelineError as error:
-        error.telemetry = telemetry
-        raise
+        text, success = response
+        telemetry_items.append(response_telemetry(response))
+        telemetry = _merge_telemetry(telemetry_items)
+        if not success:
+            from ..ai_client import OUTPUT_FILTERED_MARKER, OUTPUT_TRUNCATED_MARKER
+
+            if OUTPUT_TRUNCATED_MARKER in text or OUTPUT_FILTERED_MARKER in text:
+                raise AgentOutputError(
+                    f"{spec.name} 输出未完整交付",
+                    response=text,
+                    telemetry=telemetry,
+                )
+            raise AgentPipelineError(
+                f"{spec.name} 调用失败: {text}", response=text, telemetry=telemetry
+            )
+        if not spec.structured_output:
+            return text.strip(), telemetry
+        try:
+            return _parse_json(text), telemetry
+        except AgentOutputError as error:
+            if attempt + 1 == protocol_attempts:
+                error.telemetry = telemetry
+                raise
+            prompt = (
+                base_prompt
+                + "\n\n【协议重试】上一响应不是可解析的目标 JSON 对象。"
+                "请重新执行原任务，并严格只返回指定 JSON。"
+            )
+    raise RuntimeError("unreachable")

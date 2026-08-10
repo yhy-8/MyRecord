@@ -160,7 +160,7 @@ def analysis_report_path(
 def _monthly_supporting_reports(
     start: datetime.date, end: datetime.date, max_characters: int = 30000
 ) -> str:
-    """只读取完整位于该月内的周报，且同周只保留一份。"""
+    """Read only retrospective sections from complete in-month weekly reports."""
     candidates: dict[tuple[datetime.date, datetime.date], Path] = {}
     weekly_dir = settings.ANALYSIS_DIR / "Weekly"
     for path in sorted(weekly_dir.glob("*.md")):
@@ -189,7 +189,17 @@ def _monthly_supporting_reports(
             content = path.read_text(encoding="utf-8")
         except OSError:
             continue
-        section = f"### {path.name}\n{content[:12000]}"
+        retrospective_match = re.search(
+            r"^## 一、整理与回顾\s*\n(.*?)(?=^## 二、领域探索与研究\s*$|\Z)",
+            content,
+            re.MULTILINE | re.DOTALL,
+        )
+        if not retrospective_match:
+            continue
+        retrospective_text = retrospective_match.group(1).strip()
+        if not retrospective_text:
+            continue
+        section = f"### {path.name}\n{retrospective_text[:12000]}"
         if size + len(section) > max_characters:
             break
         sections.append(section)

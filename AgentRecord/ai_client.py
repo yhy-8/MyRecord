@@ -5,6 +5,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlsplit
 
 import requests
 
@@ -17,6 +18,10 @@ CONFIG_ERROR_MARKER = "配置异常:"
 OUTPUT_TRUNCATED_MARKER = "输出截断:"
 OUTPUT_FILTERED_MARKER = "输出过滤:"
 _MAX_WEB_RESULTS_PER_QUERY = 10
+
+
+class SearchProtocolError(RuntimeError):
+    """The configured search service returned a malformed success response."""
 
 
 @dataclass
@@ -34,13 +39,8 @@ class AIResponse:
 
 @dataclass
 class ToolResult:
-    content: str
     result_count: int = 0
     evidence: list[dict[str, str]] = field(default_factory=list)
-
-    def __iter__(self):
-        yield self.content
-        yield self.result_count
 
 
 def is_network_failure(message: str) -> bool:
@@ -125,7 +125,7 @@ def bocha_search(query: str, include: str = "", exclude: str = "") -> ToolResult
     """Call the configured search API and return bounded evidence."""
     config = settings.CONFIG.get("third_search", {})
     if not config.get("enabled") or not config.get("api_key") or not query:
-        return ToolResult("")
+        return ToolResult()
 
     headers = {
         "Content-Type": "application/json",
@@ -154,43 +154,36 @@ def bocha_search(query: str, include: str = "", exclude: str = "") -> ToolResult
             json=body,
             timeout=config.get("timeout", 30),
         )
-        if (
-            response.status_code in (401, 403, 408, 429)
-            or 500 <= response.status_code < 600
-        ):
-            response.raise_for_status()
         if response.status_code != 200:
-            return ToolResult("")
-        data = response.json()
-        if data.get("code") != 200:
-            return ToolResult("")
-        results = data.get("data", {}).get("webPages", {}).get("value", [])[
-            :requested_count
-        ]
+            response.raise_for_status()
+        try:
+            data = response.json()
+        except (TypeError, ValueError) as error:
+            raise SearchProtocolError("响应不是有效 JSON") from error
+        if not isinstance(data, dict) or data.get("code") != 200:
+            raise SearchProtocolError("响应缺少成功状态 code=200")
+        payload = data.get("data")
+        if not isinstance(payload, dict):
+            raise SearchProtocolError("响应中的 data 不是对象")
+        web_pages = payload.get("webPages")
+        if not isinstance(web_pages, dict):
+            raise SearchProtocolError("响应中的 webPages 不是对象")
+        results = web_pages.get("value")
+        if not isinstance(results, list):
+            raise SearchProtocolError("响应中的 webPages.value 不是数组")
+        results = results[:requested_count]
         if not results:
-            return ToolResult("")
+            return ToolResult()
 
-        lines = [
-            "[网络搜索结果]",
-            "[来源约束] 仅各条“链接：”字段中的完整 URL 可用于正文链接和 sources；摘要中的网址不可使用。",
-        ]
         evidence = []
-        for index, item in enumerate(results, 1):
+        for item in results:
+            if not isinstance(item, dict):
+                raise SearchProtocolError("搜索结果条目不是对象")
             title = _search_excerpt(item.get("name", ""), 300)
             url = str(item.get("url", "") or "").strip()
             snippet = _search_excerpt(item.get("snippet", ""), 500)
             summary = _search_excerpt(item.get("summary", ""), 800)
-            site_name = _search_excerpt(item.get("siteName", ""), 120)
             published = _search_excerpt(item.get("datePublished", ""), 80)
-            lines.extend((f"{index}. 标题：{title}", f"   链接：{url}"))
-            if site_name:
-                lines.append(f"   来源：{site_name}")
-            if published:
-                lines.append(f"   时间：{published}")
-            if snippet:
-                lines.append(f"   摘要：{snippet}")
-            if summary and summary != snippet:
-                lines.append(f"   全文概要：{summary}")
             evidence.append(
                 {
                     "query": query,
@@ -200,18 +193,11 @@ def bocha_search(query: str, include: str = "", exclude: str = "") -> ToolResult
                     "published": published,
                 }
             )
-        return ToolResult("\n".join(lines), len(results), evidence)
+        return ToolResult(len(results), evidence)
     except (requests.ConnectionError, requests.Timeout):
         raise
-    except requests.HTTPError as error:
-        if _transient_http_error(error) or (
-            error.response is not None
-            and error.response.status_code in (401, 403)
-        ):
-            raise
-        return ToolResult("")
-    except Exception:
-        return ToolResult("")
+    except requests.HTTPError:
+        raise
 
 
 def search_web_once(query: str) -> tuple[ToolResult, str]:
@@ -219,7 +205,7 @@ def search_web_once(query: str) -> tuple[ToolResult, str]:
     try:
         return bocha_search(query), ""
     except (requests.ConnectionError, requests.Timeout) as error:
-        return ToolResult(""), f"{NETWORK_ERROR_MARKER} 第三方搜索失败: {error}"
+        return ToolResult(), f"{NETWORK_ERROR_MARKER} 第三方搜索失败: {error}"
     except requests.HTTPError as error:
         status = error.response.status_code if error.response is not None else None
         if status == 429:
@@ -228,9 +214,11 @@ def search_web_once(query: str) -> tuple[ToolResult, str]:
             marker = CONFIG_ERROR_MARKER
         else:
             marker = NETWORK_ERROR_MARKER if _transient_http_error(error) else "接口异常:"
-        return ToolResult(""), f"{marker} 第三方搜索失败: {error}"
+        return ToolResult(), f"{marker} 第三方搜索失败: {error}"
     except requests.RequestException as error:
-        return ToolResult(""), f"接口异常: 第三方搜索失败: {error}"
+        return ToolResult(), f"接口异常: 第三方搜索失败: {error}"
+    except SearchProtocolError as error:
+        return ToolResult(), f"接口异常: 第三方搜索协议错误: {error}"
 
 
 def _usage_values(data: dict) -> dict[str, int]:
@@ -266,6 +254,8 @@ def call_ai(
     model_config: settings.ModelDict,
     *,
     structured_output: bool = False,
+    thinking: bool | None = None,
+    max_tokens: int | None = None,
 ) -> AIResponse:
     """Call one text/JSON model; tools and web search stay in the controller."""
     messages = [
@@ -276,10 +266,20 @@ def call_ai(
         "model": model_config.get("model_id") or model_config["name"],
         "messages": messages,
     }
-    if "temperature" in model_config:
+    is_deepseek = (
+        urlsplit(str(model_config.get("api_url", ""))).hostname or ""
+    ).casefold() == "api.deepseek.com"
+    if "temperature" in model_config and not (is_deepseek and thinking is True):
         payload["temperature"] = model_config["temperature"]
-    if "max_tokens" in model_config:
-        payload["max_tokens"] = model_config["max_tokens"]
+    effective_max_tokens = (
+        max_tokens if max_tokens is not None else model_config.get("max_tokens")
+    )
+    if effective_max_tokens is not None:
+        payload["max_tokens"] = effective_max_tokens
+    if is_deepseek and thinking is not None:
+        payload["thinking"] = {"type": "enabled" if thinking else "disabled"}
+        if thinking:
+            payload["reasoning_effort"] = "high"
     if structured_output and model_config.get("json_mode", False):
         payload["response_format"] = {"type": "json_object"}
 

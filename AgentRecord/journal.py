@@ -5,6 +5,7 @@
 """
 
 import datetime
+import hashlib
 import os
 import re
 import uuid
@@ -67,65 +68,6 @@ def resolve_date(arg: str) -> str:
 def extract_summary(text: str) -> str:
     match = re.search(r"<summary>(.*?)</summary>", text, re.DOTALL)
     return match.group(1).strip() if match else "(无总结)"
-
-
-def read_daily_log(
-    date: str = "",
-    start_date: str = "",
-    end_date: str = "",
-    summary_only: bool = False,
-) -> str:
-    if date:
-        try:
-            datetime.date.fromisoformat(date)
-        except (TypeError, ValueError):
-            return "本地系统提示：日期必须为 YYYY-MM-DD。"
-        file_path = settings.DIARY_DIR / f"{date}.md"
-        if not file_path.exists():
-            return f"本地系统提示：找不到 {date} 的记录。"
-        content = file_path.read_text(encoding="utf-8")
-        return extract_summary(content) if summary_only else content
-
-    if start_date and end_date:
-        results = []
-        for file in sorted(settings.DIARY_DIR.glob("*.md")):
-            if start_date <= file.stem <= end_date:
-                content = file.read_text(encoding="utf-8")
-                if summary_only:
-                    results.append(f"## {file.stem}\n{extract_summary(content)}")
-                else:
-                    results.append(f"# {file.stem}\n{content}")
-        return (
-            "\n\n---\n\n".join(results)
-            if results
-            else f"本地系统提示：{start_date} 到 {end_date} 之间无记录。"
-        )
-
-    today = datetime.datetime.now().strftime("%Y-%m-%d")
-    file_path = settings.DIARY_DIR / f"{today}.md"
-    if not file_path.exists():
-        return f"本地系统提示：找不到 {today} 的记录。"
-    content = file_path.read_text(encoding="utf-8")
-    return extract_summary(content) if summary_only else content
-
-
-def search_history(keyword: str, days_limit: int = 0, summary_only: bool = False) -> str:
-    files = sorted(settings.DIARY_DIR.glob("*.md"), reverse=True)
-    if days_limit > 0:
-        files = files[:days_limit]
-
-    results = []
-    for file in files:
-        content = file.read_text(encoding="utf-8")
-        search_target = extract_summary(content) if summary_only else content
-        if keyword in search_target:
-            matched = [line for line in search_target.split("\n") if keyword in line]
-            results.append(f"[{file.stem}] 匹配到:\n" + "\n".join(matched))
-    return (
-        "\n\n".join(results)
-        if results
-        else f"本地系统提示：未找到关于 '{keyword}' 的记录。"
-    )
 
 
 def _diary_file_for(submitted_at: datetime.datetime) -> Path:
@@ -219,19 +161,28 @@ def append_reference(
     append_log(content, "[引用]", submitted_at=submitted_at)
 
 
-def update_summary_for_date(date: str, summary_text: str) -> str:
+def update_summary_for_date(
+    date: str,
+    summary_text: str,
+    *,
+    expected_content_hash: str | None = None,
+) -> str:
     file_path = settings.DIARY_DIR / f"{date}.md"
     lock = _acquire_journal_lock()
     try:
         if not file_path.exists():
             return f"找不到 {date} 的记录。"
         content = file_path.read_text(encoding="utf-8")
+        if expected_content_hash is not None:
+            actual_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+            if actual_hash != expected_content_hash:
+                return f"{date} 的记录在总结生成期间发生变化，未写入过时总结。"
         if not re.search(r"<summary>.*?</summary>", content, re.DOTALL):
             return f"{date} 的记录缺少 <summary> 区域。"
 
         new_content = re.sub(
             r"<summary>.*?</summary>",
-            f"<summary>\n{summary_text}\n</summary>",
+            lambda _match: f"<summary>\n{summary_text}\n</summary>",
             content,
             count=1,
             flags=re.DOTALL,

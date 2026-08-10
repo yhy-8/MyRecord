@@ -125,6 +125,38 @@ class JournalAITests(unittest.TestCase):
         self.assertEqual(10, len(result.evidence))
         self.assertEqual(10, request.call_args.kwargs["json"]["count"])
 
+    @patch("AgentRecord.ai_client._post_with_transient_retry")
+    def test_malformed_search_response_is_a_protocol_error(self, request):
+        settings.CONFIG["third_search"] = {
+            "enabled": True,
+            "api_key": "search-key",
+            "api_url": "https://search.example.test",
+        }
+        request.return_value = FakeResponse(
+            {"code": 200, "data": {"webPages": {"value": {}}}}
+        )
+
+        result, error = ai_client.search_web_once("公开查询")
+
+        self.assertEqual(0, result.result_count)
+        self.assertIn("搜索协议错误", error)
+
+    @patch("AgentRecord.ai_client._post_with_transient_retry")
+    def test_non_success_search_status_is_not_an_empty_result(self, request):
+        settings.CONFIG["third_search"] = {
+            "enabled": True,
+            "api_key": "search-key",
+            "api_url": "https://search.example.test",
+        }
+        response = FakeResponse({"message": "bad request"})
+        response.status_code = 400
+        request.return_value = response
+
+        result, error = ai_client.search_web_once("公开查询")
+
+        self.assertEqual(0, result.result_count)
+        self.assertIn("接口异常", error)
+
     @patch("AgentRecord.ai_client.requests.post")
     def test_structured_output_uses_configured_json_mode(self, post):
         post.return_value = FakeResponse(
@@ -138,6 +170,44 @@ class JournalAITests(unittest.TestCase):
         payload = post.call_args.kwargs["json"]
         self.assertEqual({"type": "json_object"}, payload["response_format"])
         self.assertEqual(100000, payload["max_tokens"])
+
+    @patch("AgentRecord.ai_client.requests.post")
+    def test_deepseek_task_controls_thinking_effort_and_budget(self, post):
+        post.return_value = FakeResponse(
+            {"choices": [{"message": {"role": "assistant", "content": "正文"}}]}
+        )
+        model = {
+            **self.model,
+            "api_url": "https://api.deepseek.com/chat/completions",
+            "temperature": 0.7,
+        }
+
+        ai_client.call_ai("回顾", model, thinking=True, max_tokens=65536)
+
+        payload = post.call_args.kwargs["json"]
+        self.assertEqual({"type": "enabled"}, payload["thinking"])
+        self.assertEqual("high", payload["reasoning_effort"])
+        self.assertEqual(65536, payload["max_tokens"])
+        self.assertNotIn("temperature", payload)
+
+    @patch("AgentRecord.ai_client.requests.post")
+    def test_deepseek_non_thinking_task_is_explicit(self, post):
+        post.return_value = FakeResponse(
+            {"choices": [{"message": {"role": "assistant", "content": "正文"}}]}
+        )
+        model = {
+            **self.model,
+            "api_url": "https://api.deepseek.com/chat/completions",
+            "temperature": 0.2,
+        }
+
+        ai_client.call_ai("总结", model, thinking=False, max_tokens=4096)
+
+        payload = post.call_args.kwargs["json"]
+        self.assertEqual({"type": "disabled"}, payload["thinking"])
+        self.assertNotIn("reasoning_effort", payload)
+        self.assertEqual(0.2, payload["temperature"])
+        self.assertEqual(4096, payload["max_tokens"])
 
     @patch("AgentRecord.ai_client.requests.post")
     def test_output_length_stop_is_classified_as_truncation(self, post):

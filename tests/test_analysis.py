@@ -8,7 +8,6 @@ from unittest.mock import Mock, patch
 from AgentRecord import settings
 from AgentRecord.ai_client import AIResponse, ToolResult
 from AgentRecord.analysis import automation, context, orchestrator
-from AgentRecord.analysis.store import AnalysisStore
 from AgentRecord.agents.base import AgentPipelineError
 
 
@@ -59,7 +58,6 @@ class AnalysisWorkflowTests(unittest.TestCase):
     def fake_search_web_once(query):
         return (
             ToolResult(
-                "搜索结果",
                 1,
                 [
                     {
@@ -81,7 +79,19 @@ class AnalysisWorkflowTests(unittest.TestCase):
         input_text = prompt.split("【中控提供的输入】\n", 1)[1]
         data, _ = json.JSONDecoder().raw_decode(input_text)
         if "任务:retrospective]" in prompt:
-            payload = {"text": "本期完成了一次记录与思考。"}
+            return AIResponse(
+                "本期完成了一次记录与思考。",
+                True,
+                {
+                    "usage": {
+                        "prompt_tokens": 7,
+                        "completion_tokens": 3,
+                        "total_tokens": 10,
+                        "cached_tokens": 2,
+                        "cache_miss_tokens": 5,
+                    }
+                },
+            )
         elif "任务:research_planner]" in prompt:
             payload = {
                 "action": "search",
@@ -103,6 +113,7 @@ class AnalysisWorkflowTests(unittest.TestCase):
                     "completion_tokens": 3,
                     "total_tokens": 10,
                     "cached_tokens": 2,
+                    "cache_miss_tokens": 5,
                 }
             },
         )
@@ -123,6 +134,25 @@ class AnalysisWorkflowTests(unittest.TestCase):
         content = diary.read_text(encoding="utf-8")
         self.assertIn("<summary>\n测试总结\n</summary>", content)
         self.assertIn("我开始重视记录是否可以验证", content)
+
+    def test_summary_does_not_write_when_diary_changes_during_model_call(self):
+        diary = self.write_diary("2026-07-14")
+
+        def mutate_then_reply(*args, **kwargs):
+            diary.write_text(
+                diary.read_text(encoding="utf-8") + "**10:00:** 模型调用期间新增\n",
+                encoding="utf-8",
+            )
+            return AIResponse("过时总结", True)
+
+        with patch.object(orchestrator, "call_ai", side_effect=mutate_then_reply):
+            message, success = orchestrator.summarize_diary(
+                "2026-07-14", {"name": "mock"}
+            )
+
+        self.assertFalse(success)
+        self.assertIn("发生变化", message)
+        self.assertNotIn("过时总结", diary.read_text(encoding="utf-8"))
 
     def test_weekly_report_has_two_independently_generated_sections(self):
         day = datetime.date(2026, 7, 14)
@@ -145,7 +175,78 @@ class AnalysisWorkflowTests(unittest.TestCase):
         )
         self.assertIn("我开始重视记录是否可以验证", retrospective_review)
 
-    def test_weekly_report_uses_concise_source_ids_without_appendix(self):
+    def test_weekly_all_planner_groups_skip_is_a_valid_report(self):
+        day = datetime.date(2026, 7, 14)
+        self.write_diary(day.isoformat())
+        default_fake = self.fake_call_ai
+
+        def skip_planner(prompt, model_cfg, **kwargs):
+            if "任务:research_planner]" in prompt:
+                self.ai_calls.append(prompt)
+                return AIResponse('{"action":"skip","query":""}', True)
+            return default_fake(prompt, model_cfg, **kwargs)
+
+        with patch.object(orchestrator, "call_ai", side_effect=skip_planner), patch.object(
+            orchestrator, "search_web_once"
+        ) as search:
+            message, success, path = orchestrator.generate_analysis_report(
+                "weekly", day, {"name": "mock"}
+            )
+
+        self.assertTrue(success, message)
+        search.assert_not_called()
+        self.assertIn(
+            "没有产生适合公开检索且不泄露隐私的探索主题",
+            path.read_text(encoding="utf-8"),
+        )
+
+    def test_weekly_no_valid_search_results_is_a_valid_report(self):
+        day = datetime.date(2026, 7, 14)
+        self.write_diary(day.isoformat())
+        with patch.object(
+            orchestrator, "search_web_once", return_value=(ToolResult(), "")
+        ):
+            message, success, path = orchestrator.generate_analysis_report(
+                "weekly", day, {"name": "mock"}
+            )
+
+        self.assertTrue(success, message)
+        self.assertIn(
+            "候选主题未获得足够公开证据", path.read_text(encoding="utf-8")
+        )
+
+    def test_weekly_search_service_error_still_fails(self):
+        day = datetime.date(2026, 7, 14)
+        self.write_diary(day.isoformat())
+        with patch.object(
+            orchestrator,
+            "search_web_once",
+            return_value=(ToolResult(), "网络异常: 搜索超时"),
+        ):
+            message, success, path = orchestrator.generate_analysis_report(
+                "weekly", day, {"name": "mock"}
+            )
+
+        self.assertFalse(success)
+        self.assertIsNone(path)
+        self.assertIn("搜索超时", message)
+
+    def test_report_generation_ignores_existing_corrupt_sqlite_file(self):
+        day = datetime.date(2026, 7, 14)
+        self.write_diary(day.isoformat())
+        settings.ANALYSIS_DIR.mkdir()
+        database = settings.ANALYSIS_DIR / ".analysis.sqlite3"
+        database.write_bytes(b"not a sqlite database")
+
+        message, success, path = orchestrator.generate_analysis_report(
+            "monthly", day, {"name": "mock"}
+        )
+
+        self.assertTrue(success, message)
+        self.assertTrue(path.is_file())
+        self.assertEqual(b"not a sqlite database", database.read_bytes())
+
+    def test_weekly_report_uses_readable_dates_without_internal_ids(self):
         day = datetime.date(2026, 7, 14)
         self.write_diary(day.isoformat())
         _, success, path = orchestrator.generate_analysis_report(
@@ -153,24 +254,22 @@ class AnalysisWorkflowTests(unittest.TestCase):
         )
         self.assertTrue(success)
         content = path.read_text(encoding="utf-8")
-        # 最终报告只显示日期级来源标识，不再保留长指纹标识和结尾索引列表。
-        self.assertIn("> 记录依据：R-20260714", content)
-        self.assertNotIn("R-20260714-001", content)
+        self.assertIn("> 记录依据：2026-07-14", content)
+        self.assertNotIn("R-20260714", content)
         self.assertNotIn("## 来源索引", content)
-        # 内部审查仍然看到完整来源标识。
         retrospective_review = next(
             prompt
             for prompt in self.ai_calls
             if "任务:reviewer]" in prompt and '"mode": "retrospective_review"' in prompt
         )
-        self.assertRegex(retrospective_review, r"R-20260714-001-[0-9a-f]{12}")
+        self.assertNotIn("R-20260714", retrospective_review)
 
-    def test_retry_reuses_reviewed_stages_from_equivalent_failed_run(self):
+    def test_retry_regenerates_all_semantic_stages_without_cross_run_cache(self):
         day = datetime.date(2026, 7, 14)
         self.write_diary(day.isoformat())
         with patch.object(
             orchestrator,
-            "_research_section",
+            "_grounded_research_section",
             side_effect=AgentPipelineError("模拟 Researcher 失败"),
         ):
             _, first_success, _ = orchestrator.generate_analysis_report(
@@ -184,12 +283,8 @@ class AnalysisWorkflowTests(unittest.TestCase):
         )
 
         self.assertTrue(second_success)
-        self.assertFalse(
-            any("任务:retrospective]" in prompt for prompt in self.ai_calls)
-        )
-        self.assertFalse(
-            any("任务:research_planner]" in prompt for prompt in self.ai_calls)
-        )
+        self.assertTrue(any("任务:retrospective]" in prompt for prompt in self.ai_calls))
+        self.assertTrue(any("任务:research_planner]" in prompt for prompt in self.ai_calls))
         self.assertTrue(any("任务:researcher]" in prompt for prompt in self.ai_calls))
 
     def test_daily_analysis_is_removed(self):
@@ -219,6 +314,41 @@ class AnalysisWorkflowTests(unittest.TestCase):
         )
         self.assertFalse(any("任务:researcher]" in prompt for prompt in self.ai_calls))
 
+    def test_monthly_generator_and_reviewer_receive_same_derived_context(self):
+        day = datetime.date(2026, 7, 14)
+        self.write_diary(day.isoformat())
+        (settings.DIARY_DIR / "2026-06-30.md").write_text(
+            "# 2026-06-30\n\n<summary>\n历史辅助总结\n</summary>\n",
+            encoding="utf-8",
+        )
+        weekly = settings.ANALYSIS_DIR / "Weekly"
+        weekly.mkdir(parents=True)
+        (weekly / "2026-07-06_to_2026-07-12_manual.md").write_text(
+            "## 一、整理与回顾\n\n周报回顾材料\n\n"
+            "## 二、领域探索与研究\n\n不应进入月报的研究材料",
+            encoding="utf-8",
+        )
+
+        message, success, _ = orchestrator.generate_analysis_report(
+            "monthly", day, {"name": "mock"}
+        )
+
+        self.assertTrue(success, message)
+        retrospective_prompt = next(
+            prompt for prompt in self.ai_calls if "任务:retrospective]" in prompt
+        )
+        review_prompt = next(
+            prompt
+            for prompt in self.ai_calls
+            if "任务:reviewer]" in prompt
+            and '"mode": "retrospective_review"' in prompt
+        )
+        for expected in ("历史辅助总结", "周报回顾材料"):
+            self.assertIn(expected, retrospective_prompt)
+            self.assertIn(expected, review_prompt)
+        self.assertNotIn("不应进入月报的研究材料", retrospective_prompt)
+        self.assertNotIn("不应进入月报的研究材料", review_prompt)
+
     def test_report_header_shows_model_duration_and_token_usage(self):
         day = datetime.date(2026, 7, 14)
         self.write_diary(day.isoformat())
@@ -238,7 +368,8 @@ class AnalysisWorkflowTests(unittest.TestCase):
         self.assertNotIn("测试模型（", content)
         self.assertIn("> 生成耗时：1 分 5 秒", content)
         self.assertIn(
-            "> Token 用量：20（输入 14，输出 6，缓存命中 4）", content
+            "> Token 用量：20（输入 14，输出 6，缓存命中 4，缓存未命中 10）",
+            content,
         )
 
     def test_manual_and_automatic_reports_remain_separate(self):
@@ -293,10 +424,7 @@ class AnalysisWorkflowTests(unittest.TestCase):
             if "任务:retrospective]" not in prompt:
                 return default_fake(prompt, model_cfg, **kwargs)
             self.ai_calls.append(prompt)
-            return AIResponse(
-                json.dumps({"text": "引用记录中的事实"}, ensure_ascii=False),
-                True,
-            )
+            return AIResponse("引用记录中的事实", True)
 
         orchestrator.call_ai = reference_fake
         message, success, _ = orchestrator.generate_analysis_report(
@@ -311,7 +439,8 @@ class AnalysisWorkflowTests(unittest.TestCase):
             and '"mode": "retrospective_review"' in prompt
         )
         self.assertIn("被引用的旧记录", review_prompt)
-        self.assertIn("R-20260713-001", review_prompt)
+        self.assertNotIn("R-20260713", review_prompt)
+        self.assertIn("facts", review_prompt)
 
     def test_legacy_information_briefing_does_not_reach_research_planner(self):
         day = datetime.date(2026, 7, 14)
@@ -424,51 +553,43 @@ class AnalysisWorkflowTests(unittest.TestCase):
 
     def test_retrospective_plain_text_validation_uses_one_revision(self):
         source_id = "R-20260714-001"
-        base_input = {
-            "period": {"kind": "weekly", "start": "2026-07-13", "end": "2026-07-19"},
-            "records": [{"source_id": source_id, "text": "记录"}],
-        }
-        store = Mock()
+        base_input = {"period": {"kind": "weekly"}, "facts": {}}
+        source_records = [{"source_id": source_id, "date": "2026-07-14"}]
+        usage = orchestrator.UsageAccumulator()
 
         with patch.object(
             orchestrator,
             "_call_agent",
-            return_value=({"text": "正文 https://model.example"}, {}),
+            return_value=("正文 https://model.example", {}),
         ) as call_agent, patch.object(
             orchestrator, "_review_body"
         ) as review, self.assertRaises(AgentPipelineError):
             orchestrator._retrospective_section(
                 base_input,
-                {source_id},
+                source_records,
                 {"name": "mock"},
-                store,
+                usage,
                 "run-id",
             )
 
         self.assertEqual(2, call_agent.call_count)
         correction = call_agent.call_args.kwargs["revision_context"]
         self.assertEqual("中控确定性校验", correction["feedback_source"])
-        self.assertIn("不得自行输出 URL", correction["problems_to_fix"][0])
+        self.assertIn("不得自行输出 URL", correction["problems_to_fix"])
         review.assert_not_called()
 
     def test_retrospective_reviewer_can_request_one_content_revision(self):
         source_id = "R-20260714-001"
-        base_input = {
-            "period": {
-                "kind": "weekly",
-                "start": "2026-07-13",
-                "end": "2026-07-19",
-            },
-            "records": [{"source_id": source_id, "text": "用户记录"}],
-        }
-        store = Mock()
+        base_input = {"period": {"kind": "weekly"}, "facts": {}}
+        source_records = [{"source_id": source_id, "date": "2026-07-14"}]
+        usage = orchestrator.UsageAccumulator()
 
         with patch.object(
             orchestrator,
             "_call_agent",
             side_effect=[
-                ({"text": "第一稿判断。"}, {}),
-                ({"text": "审查后修订。"}, {}),
+                ("第一稿判断。", {}),
+                ("审查后修订。", {}),
             ],
         ) as call_agent, patch.object(
             orchestrator,
@@ -480,9 +601,9 @@ class AnalysisWorkflowTests(unittest.TestCase):
         ):
             markdown = orchestrator._retrospective_section(
                 base_input,
-                {source_id},
+                source_records,
                 {"name": "mock"},
-                store,
+                usage,
                 "run-id",
             )
 
@@ -493,67 +614,46 @@ class AnalysisWorkflowTests(unittest.TestCase):
             call_agent.call_args.kwargs["revision_context"]["maximum_attempts"],
         )
 
-    def test_agent_revision_limit_is_configurable(self):
+    def test_agent_revision_can_be_disabled(self):
         source_id = "R-20260714-001"
-        base_input = {
-            "period": {
-                "kind": "weekly",
-                "start": "2026-07-13",
-                "end": "2026-07-19",
-            },
-            "records": [{"source_id": source_id, "text": "用户记录"}],
-        }
-        store = Mock()
+        base_input = {"period": {"kind": "weekly"}, "facts": {}}
+        source_records = [{"source_id": source_id, "date": "2026-07-14"}]
+        usage = orchestrator.UsageAccumulator()
 
         with patch.dict(
             settings.CONFIG,
-            {"retry": {"agent_revision_limit": 2}},
+            {"retry": {"agent_revision_limit": 0}},
         ), patch.object(
             orchestrator,
             "_call_agent",
-            side_effect=[
-                ({"text": "第一稿。"}, {}),
-                ({"text": "第二稿。"}, {}),
-                ({"text": "第三稿。"}, {}),
-            ],
+            return_value=("第一稿。", {}),
         ) as call_agent, patch.object(
             orchestrator,
             "_review_body",
-            side_effect=[
-                (False, "继续修改", {"approved": False}),
-                (False, "仍需修改", {"approved": False}),
-                (True, "", {"approved": True}),
-            ],
-        ):
-            markdown = orchestrator._retrospective_section(
+            return_value=(False, "不能交付", {"approved": False}),
+        ), self.assertRaises(AgentPipelineError):
+            orchestrator._retrospective_section(
                 base_input,
-                {source_id},
+                source_records,
                 {"name": "mock"},
-                store,
+                usage,
                 "run-id",
             )
 
-        self.assertIn("第三稿", markdown)
-        self.assertEqual(3, call_agent.call_count)
-        self.assertEqual(
-            3,
-            call_agent.call_args.kwargs["revision_context"]["maximum_attempts"],
-        )
+        self.assertEqual(1, call_agent.call_count)
 
     def test_reviewer_feedback_is_returned_to_original_agent(self):
         source_id = "R-20260714-001"
-        base_input = {
-            "period": {"kind": "weekly", "start": "2026-07-13", "end": "2026-07-19"},
-            "records": [{"source_id": source_id, "text": "用户记录"}],
-        }
+        base_input = {"period": {"kind": "weekly"}, "facts": {}}
+        source_records = [{"source_id": source_id, "date": "2026-07-14"}]
         first = "第一稿判断。"
         revised = "修订后仅保留有依据的判断。"
-        store = Mock()
+        usage = orchestrator.UsageAccumulator()
 
         with patch.object(
             orchestrator,
             "_call_agent",
-            side_effect=[({"text": first}, {}), ({"text": revised}, {})],
+            side_effect=[(first, {}), (revised, {})],
         ) as call_agent, patch.object(
             orchestrator,
             "_review_body",
@@ -564,9 +664,9 @@ class AnalysisWorkflowTests(unittest.TestCase):
         ):
             markdown = orchestrator._retrospective_section(
                 base_input,
-                {source_id},
+                source_records,
                 {"name": "mock"},
-                store,
+                usage,
                 "run-id",
             )
 
@@ -596,7 +696,7 @@ class AnalysisWorkflowTests(unittest.TestCase):
             "topic_id": "Q001",
             "title": "公开主题",
             "query": "公开查询",
-            "source_refs": ["R-20260714-001"],
+            "record_dates": ["2026-07-14"],
         }
         evidence = [
             {
@@ -609,7 +709,7 @@ class AnalysisWorkflowTests(unittest.TestCase):
             }
             for index in (1, 2)
         ]
-        store = Mock()
+        usage = orchestrator.UsageAccumulator()
 
         with patch.object(
             orchestrator,
@@ -621,11 +721,41 @@ class AnalysisWorkflowTests(unittest.TestCase):
             return_value=(True, "", {"approved": True}),
         ) as review:
             result = orchestrator._research_one_topic(
-                topic, evidence, {"name": "mock"}, store, "run-id"
+                topic, evidence, {"name": "mock"}, usage, "run-id"
             )
 
         self.assertTrue(result["accepted"])
-        self.assertEqual(2, len(review.call_args.args[2]["evidence_sources"]))
+        self.assertEqual(
+            2,
+            len(review.call_args.args[2]["evidence"]["search_results"]),
+        )
+
+    def test_reviewer_schema_error_retries_only_reviewer_once(self):
+        usage = orchestrator.UsageAccumulator()
+        with patch.object(
+            orchestrator,
+            "_call_agent",
+            side_effect=[
+                ({"approved": "yes", "feedback": ""}, {"protocol_retries": 0}),
+                ({"approved": True, "feedback": ""}, {"protocol_retries": 0}),
+            ],
+        ) as call_agent:
+            passed, feedback, _ = orchestrator._review_body(
+                "retrospective_review",
+                "正文",
+                {"facts": {"current_records": []}},
+                {"name": "mock"},
+                usage,
+                "run-id",
+            )
+
+        self.assertTrue(passed)
+        self.assertEqual("", feedback)
+        self.assertEqual(2, call_agent.call_count)
+        self.assertEqual(
+            "Reviewer 协议校验",
+            call_agent.call_args.kwargs["revision_context"]["feedback_source"],
+        )
 
     def test_grounded_research_searches_once_and_controller_renders_url(self):
         topics = [
@@ -633,14 +763,11 @@ class AnalysisWorkflowTests(unittest.TestCase):
                 "topic_id": "Q001",
                 "title": "公开主题",
                 "query": "公开查询",
-                "reason": "研究",
-                "origin": "news",
-                "source_refs": [],
+                "record_dates": ["2026-07-14"],
             }
         ]
-        store = Mock()
+        usage = orchestrator.UsageAccumulator()
         result = ToolResult(
-            "搜索结果",
             1,
             [
                 {
@@ -665,15 +792,15 @@ class AnalysisWorkflowTests(unittest.TestCase):
             "_review_body",
             return_value=(True, "", {"approved": True}),
         ):
-            markdown = orchestrator._research_section(
-                topics, set(), {"name": "mock"}, store, "run-id"
+            markdown = orchestrator._grounded_research_section(
+                topics, {"name": "mock"}, usage, "run-id"
             )
 
         self.assertEqual(1, search.call_count)
         self.assertIn("https://example.com/real", markdown)
         input_data = call_agent.call_args.args[2]
         self.assertNotIn("information_leads", input_data)
-        self.assertNotIn("url", input_data["evidence_sources"][0])
+        self.assertNotIn("url", input_data["evidence"]["search_results"][0])
 
     def test_grounded_research_revision_does_not_repeat_search(self):
         topics = [
@@ -681,13 +808,10 @@ class AnalysisWorkflowTests(unittest.TestCase):
                 "topic_id": "Q001",
                 "title": "公开主题",
                 "query": "公开查询",
-                "reason": "研究",
-                "origin": "news",
-                "source_refs": [],
+                "record_dates": ["2026-07-14"],
             }
         ]
         result = ToolResult(
-            "搜索结果",
             1,
             [
                 {
@@ -703,7 +827,7 @@ class AnalysisWorkflowTests(unittest.TestCase):
             ({"status": "supported", "text": "第一稿正文。"}, {}),
             ({"status": "supported", "text": "修订后正文。"}, {}),
         ]
-        store = Mock()
+        usage = orchestrator.UsageAccumulator()
 
         with patch.object(
             orchestrator, "search_web_once", return_value=(result, "")
@@ -718,7 +842,7 @@ class AnalysisWorkflowTests(unittest.TestCase):
             ],
         ):
             markdown = orchestrator._grounded_research_section(
-                topics, set(), {"name": "mock"}, store, "run-id"
+                topics, {"name": "mock"}, usage, "run-id"
             )
 
         self.assertIn("https://example.com/real", markdown)
@@ -731,9 +855,7 @@ class AnalysisWorkflowTests(unittest.TestCase):
                 "topic_id": f"Q{index:03d}",
                 "title": title,
                 "query": f"查询{index}",
-                "reason": "研究",
-                "origin": "news",
-                "source_refs": [],
+                "record_dates": ["2026-07-14"],
             }
             for index, title in ((1, "可交付主题"), (2, "应丢弃主题"))
         ]
@@ -749,12 +871,12 @@ class AnalysisWorkflowTests(unittest.TestCase):
             }
             for index in (1, 2)
         ]
-        store = Mock()
+        usage = orchestrator.UsageAccumulator()
 
         with patch.object(
             orchestrator,
             "_collect_research_evidence",
-            return_value=(topics, evidence, {"search_evidence": evidence}),
+            return_value=(topics, evidence),
         ), patch.object(
             orchestrator,
             "_research_one_topic",
@@ -773,106 +895,14 @@ class AnalysisWorkflowTests(unittest.TestCase):
             ],
         ) as research_one:
             markdown = orchestrator._grounded_research_section(
-                topics, set(), {"name": "mock"}, store, "run-id"
+                topics, {"name": "mock"}, usage, "run-id"
             )
 
         self.assertIn("### 可交付主题", markdown)
         self.assertNotIn("### 应丢弃主题", markdown)
         self.assertEqual(2, research_one.call_count)
 
-    def test_grounded_search_cache_avoids_searching_again_on_report_retry(self):
-        topics = [
-            {
-                "topic_id": "Q001",
-                "title": "公开主题",
-                "query": "公开查询",
-                "reason": "研究",
-                "origin": "news",
-                "source_refs": [],
-            }
-        ]
-        evidence = [
-            {
-                "source_id": "W-Q001-001",
-                "topic_id": "Q001",
-                "query": "公开查询",
-                "title": "真实来源",
-                "url": "https://example.com/real",
-                "snippet": "支持材料",
-                "published": "",
-            }
-        ]
-        telemetry = {
-            "tool_calls": {"web_search": 1},
-            "search_queries": ["公开查询"],
-            "search_results": 1,
-            "search_evidence": evidence,
-        }
-        cached = (
-            "previous-run",
-            {
-                "topics": topics,
-                "usable_topics": topics,
-                "evidence": evidence,
-                "_telemetry": telemetry,
-            },
-        )
-        store = Mock()
-
-        with patch.object(orchestrator, "search_web_once") as search:
-            usable, restored, restored_telemetry = (
-                orchestrator._collect_research_evidence(
-                    topics, store, "run-id", cached
-                )
-            )
-
-        search.assert_not_called()
-        self.assertEqual(topics, usable)
-        self.assertEqual(evidence, restored)
-        self.assertEqual(telemetry, restored_telemetry)
-        saved = store.save_artifact.call_args.args[2]
-        self.assertTrue(saved["_cache"]["hit"])
-
-    def test_grounded_search_cache_requires_safe_evidence_for_every_topic(self):
-        topics = [
-            {
-                "topic_id": "Q001",
-                "title": "主题一",
-                "query": "查询一",
-                "reason": "研究",
-                "origin": "news",
-                "source_refs": [],
-            },
-            {
-                "topic_id": "Q002",
-                "title": "主题二",
-                "query": "查询二",
-                "reason": "研究",
-                "origin": "news",
-                "source_refs": [],
-            },
-        ]
-        payload = {
-            "topics": topics,
-            "usable_topics": topics,
-            "evidence": [
-                {
-                    "source_id": "W-Q001-001",
-                    "topic_id": "Q001",
-                    "title": "来源",
-                    "url": "https://example.com/unsafe\nlink",
-                    "snippet": "材料",
-                    "published": "",
-                }
-            ],
-            "_telemetry": {},
-        }
-
-        self.assertIsNone(
-            orchestrator._valid_cached_research_evidence(payload, topics)
-        )
-
-    def test_invalid_agent_json_fails_without_a_repair_call(self):
+    def test_invalid_agent_json_fails_without_content_revision(self):
         parse_error = AgentPipelineError(
             "Agent JSON 无法解析: test",
             response="invalid",
@@ -882,7 +912,7 @@ class AnalysisWorkflowTests(unittest.TestCase):
                 "search_results": 12,
             },
         )
-        store = Mock()
+        usage = orchestrator.UsageAccumulator()
 
         with patch.object(
             orchestrator, "invoke_agent", side_effect=parse_error
@@ -892,17 +922,14 @@ class AnalysisWorkflowTests(unittest.TestCase):
                 "研究",
                 {},
                 {"name": "mock"},
-                store,
+                usage,
                 "run-id",
             )
 
         self.assertEqual(1, invoke.call_count)
-        saved_payload = store.save_artifact.call_args.args[2]
-        self.assertEqual(1, saved_payload["_telemetry"]["tool_calls"]["web_search"])
-        self.assertEqual(12, saved_payload["_telemetry"]["search_results"])
 
     def test_api_failure_does_not_enter_content_revision_loop(self):
-        store = Mock()
+        usage = orchestrator.UsageAccumulator()
         failure = AgentPipelineError(
             "research_planner 调用失败: 网络异常: timeout"
         )
@@ -911,23 +938,51 @@ class AnalysisWorkflowTests(unittest.TestCase):
             orchestrator, "_call_agent", side_effect=failure
         ) as call_agent, self.assertRaises(AgentPipelineError):
             orchestrator._research_topics(
-                {
-                    "period": {"kind": "weekly"},
-                    "records": [
-                        {
-                            "date": "2026-07-14",
-                            "source_id": "R-20260714-001",
-                            "text": "记录",
-                        }
-                    ],
-                },
-                {"R-20260714-001"},
+                {"kind": "weekly"},
+                [
+                    {
+                        "date": "2026-07-14",
+                        "source_id": "R-20260714-001",
+                        "text": "记录",
+                    }
+                ],
                 {"name": "mock"},
-                store,
+                usage,
                 "run-id",
             )
 
         self.assertEqual(1, call_agent.call_count)
+
+    def test_planner_field_error_gets_exactly_one_content_revision(self):
+        usage = orchestrator.UsageAccumulator()
+        records = [
+            {
+                "date": "2026-07-14",
+                "source_id": "R-20260714-001",
+                "text": "记录",
+            }
+        ]
+        with patch.object(
+            orchestrator,
+            "_call_agent",
+            side_effect=[
+                ({"action": "search", "query": "问题一？\n问题二？"}, {}),
+                ({"action": "skip", "query": ""}, {}),
+            ],
+        ) as call_agent:
+            topics = orchestrator._research_topics(
+                {"kind": "weekly"},
+                records,
+                {"name": "mock"},
+                usage,
+                "run-id",
+            )
+
+        self.assertEqual([], topics)
+        self.assertEqual(2, call_agent.call_count)
+        correction = call_agent.call_args.kwargs["revision_context"]
+        self.assertEqual("中控确定性校验", correction["feedback_source"])
+        self.assertEqual(2, correction["maximum_attempts"])
 
     def test_planner_dispatches_all_seven_days_in_at_most_five_groups(self):
         records = [
@@ -942,34 +997,54 @@ class AnalysisWorkflowTests(unittest.TestCase):
             ({"action": "search", "query": f"公开研究问题 {index}"}, {})
             for index in range(1, 6)
         ]
-        store = Mock()
+        usage = orchestrator.UsageAccumulator()
 
         with patch.object(
             orchestrator, "_call_agent", side_effect=responses
         ) as call_agent:
             topics = orchestrator._research_topics(
-                {"period": {"kind": "weekly"}, "records": records},
-                {record["source_id"] for record in records},
+                {"kind": "weekly"},
+                records,
                 {"name": "mock"},
-                store,
+                usage,
                 "run-id",
             )
 
         self.assertEqual(5, call_agent.call_count)
         groups = [call.args[2]["record_group"] for call in call_agent.call_args_list]
-        dispatched_ids = [
-            record["source_id"]
+        dispatched_text = [
+            record["text"]
             for group in groups
             for record in group["records"]
         ]
         self.assertCountEqual(
-            [record["source_id"] for record in records], dispatched_ids
+            [record["text"] for record in records], dispatched_text
         )
-        self.assertEqual(len(dispatched_ids), len(set(dispatched_ids)))
+        self.assertEqual(len(dispatched_text), len(set(dispatched_text)))
         self.assertCountEqual(
-            dispatched_ids,
-            [source_id for topic in topics for source_id in topic["source_refs"]],
+            [record["date"] for record in records],
+            [date for topic in topics for date in topic["record_dates"]],
         )
+
+    def test_extremely_long_day_is_split_below_planner_input_boundary(self):
+        records_by_date = {
+            "2026-07-14": [
+                {
+                    "date": "2026-07-14",
+                    "source_id": "R-20260714-001",
+                    "text": "长记录" * 1200,
+                }
+            ]
+        }
+        with patch.object(orchestrator, "_MAX_PLANNER_RECORD_CHARACTERS", 1200):
+            groups = orchestrator._planner_record_groups(records_by_date)
+
+        self.assertGreater(len(groups), 1)
+        self.assertLessEqual(len(groups), 5)
+        rebuilt = "".join(
+            record["text"] for group in groups for record in group["records"]
+        )
+        self.assertEqual(records_by_date["2026-07-14"][0]["text"], rebuilt)
 
     def test_retry_runs_all_failed_tasks(self):
         settings.ANALYSIS_DIR.mkdir()
@@ -1224,30 +1299,41 @@ class AnalysisWorkflowTests(unittest.TestCase):
     def test_oversized_retrospective_records_are_processed_in_ordered_chunks(self):
         text = "内容" * 1800
         source_id = "R-20260714-001-123456789abc"
-        base_input = {
-            "period": {"kind": "weekly", "start": "2026-07-13", "end": "2026-07-19"},
-            "records": [{"source_id": source_id, "text": text}],
-            "referenced_records": [],
-        }
+        records = [
+            {
+                "source_id": source_id,
+                "date": "2026-07-14",
+                "time": "09:00",
+                "tag": "",
+                "speaker": "user",
+                "text": text,
+            }
+        ]
         seen_parts = []
 
         def process_chunk(chunk_input, *args, **kwargs):
-            seen_parts.extend(record["text"] for record in chunk_input["records"])
+            seen_parts.extend(
+                record["text"]
+                for record in chunk_input["facts"]["current_records"]
+            )
             return f"分块 {chunk_input['chunk']['index']} [{source_id}]"
 
-        store = Mock()
+        usage = orchestrator.UsageAccumulator()
         with patch.object(
-            orchestrator, "_MAX_AGENT_INPUT_CHARACTERS", 1000
+            orchestrator, "_MAX_AGENT_INPUT_CHARACTERS", 2000
         ), patch.object(
             orchestrator, "_MAX_RECORD_CHUNK_CHARACTERS", 1000
         ), patch.object(
             orchestrator, "_retrospective_section", side_effect=process_chunk
         ) as section:
             markdown = orchestrator._retrospective_with_input_budget(
-                base_input,
-                {source_id},
+                {"kind": "weekly", "start": "2026-07-13", "end": "2026-07-19"},
+                records,
+                [],
+                "（无历史总结）",
+                "（周报无支撑报告）",
                 {"name": "mock"},
-                store,
+                usage,
                 "run-id",
             )
 
@@ -1387,13 +1473,16 @@ class AnalysisWorkflowTests(unittest.TestCase):
         weekly = settings.ANALYSIS_DIR / "Weekly"
         weekly.mkdir(parents=True)
         (weekly / "2026-06-29_to_2026-07-05_auto.md").write_text(
-            "跨月内容", encoding="utf-8"
+            "## 一、整理与回顾\n\n跨月内容\n\n## 二、领域探索与研究\n\n跨月研究",
+            encoding="utf-8",
         )
         (weekly / "2026-07-06_to_2026-07-12_auto.md").write_text(
-            "自动版", encoding="utf-8"
+            "## 一、整理与回顾\n\n自动版\n\n## 二、领域探索与研究\n\n自动研究",
+            encoding="utf-8",
         )
         (weekly / "2026-07-06_to_2026-07-12_manual.md").write_text(
-            "手动版", encoding="utf-8"
+            "## 一、整理与回顾\n\n手动版\n\n## 二、领域探索与研究\n\n绝不进入月报的研究段",
+            encoding="utf-8",
         )
 
         value = context._monthly_supporting_reports(
@@ -1403,6 +1492,7 @@ class AnalysisWorkflowTests(unittest.TestCase):
         self.assertNotIn("跨月内容", value)
         self.assertNotIn("自动版", value)
         self.assertIn("手动版", value)
+        self.assertNotIn("绝不进入月报的研究段", value)
 
     def test_legacy_completion_cursors_are_removed(self):
         state = {
@@ -1426,24 +1516,6 @@ class AnalysisWorkflowTests(unittest.TestCase):
         )
 
         self.assertEqual({}, automation._load_automation_state())
-
-    def test_analysis_cache_signature_tracks_only_effective_dependencies(self):
-        first = orchestrator._analysis_config_signature(
-            {"name": "mock", "model_id": "v1", "temperature": 0.2},
-            "weekly",
-        )
-        second = orchestrator._analysis_config_signature(
-            {"name": "mock", "model_id": "v2", "temperature": 0.8},
-            "weekly",
-        )
-
-        self.assertNotEqual(first, second)
-        self.assertNotIn("api_key", json.dumps(first))
-
-        monthly = orchestrator._analysis_config_signature(
-            {"name": "mock", "model_id": "v1"}, "monthly"
-        )
-        self.assertNotIn("third_search", monthly)
 
     def test_retry_command_launches_detached_process(self):
         settings.ANALYSIS_DIR.mkdir()

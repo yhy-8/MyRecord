@@ -7,27 +7,24 @@ models:
   - name: deepseek-v4-pro
     model_id: deepseek-v4-pro
     json_mode: true       # DeepSeek 官方接口支持 JSON Output
-    max_tokens: 100000    # 接口生成安全预算；不是目标长度或事后字数校验
     api_url: https://api.deepseek.com/chat/completions
     api_key:
 
   - name: deepseek-v4-flash
     model_id: deepseek-v4-flash
     json_mode: true       # DeepSeek 官方接口支持 JSON Output
-    max_tokens: 100000    # 接口生成安全预算；不是目标长度或事后字数校验
     api_url: https://api.deepseek.com/chat/completions
     api_key:
 
 # 总结、手动报告和自动报告统一使用此模型；/m 会永久更新该项
-current_model: "deepseek-v4-pro"
+current_model: "deepseek-v4-flash"
 
 # 失败重试策略
 # *_retry_limit 都表示首次调用失败后还能重试多少次，不含首次调用。
 # Agent 修订由确定性校验失败和 Reviewer 拒绝共享；JSON 无法解析或 API 失败不修订。
 retry:
-  agent_revision_limit: 1                    # 同一报告正文最多修订次数
-  daily_summary_retry_limit: 2               # 日记总结为空时最多补写次数
-  empty_response_retry_limit: 1              # 接口 stop 但正文为空时最多补答次数
+  agent_revision_limit: 1                    # 只能为 0 或 1；同一语义项最多修订一次
+  empty_response_retry_limit: 1              # 只能为 0 或 1；stop 但正文为空时最多补答一次
   transient_http_retry_limit: 2              # 连接、超时、HTTP 408/5xx 最多重试次数
   transient_http_backoff_seconds: 1          # HTTP 重试的初始等待秒数，后续指数增加
   automation_content_failure_limit: 2        # 同一输入累计失败多少次后暂停自动重试

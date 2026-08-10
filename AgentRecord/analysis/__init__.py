@@ -1,8 +1,6 @@
 """Public analysis API used by the CLI and automation entry points."""
 
 from .automation import (
-    _run_monthly_reports,
-    _run_weekly_reports,
     automation_status_snapshot,
     failed_automatic_tasks,
     install_system_automation,

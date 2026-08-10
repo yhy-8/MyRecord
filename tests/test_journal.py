@@ -145,10 +145,32 @@ class JournalTests(unittest.TestCase):
         self.assertNotEqual(first["source_id"], changed["source_id"])
         self.assertRegex(first["source_id"], r"^R-20260715-001-[0-9a-f]{12}$")
 
-    def test_tool_date_cannot_escape_diary_directory(self):
-        message = journal.read_daily_log(date="../Docs/设计原则与系统架构")
+    def test_summary_replacement_preserves_backslashes_literally(self):
+        path = settings.DIARY_DIR / "2026-07-15.md"
+        path.write_text(
+            "# 2026-07-15\n\n<summary>\n旧总结\n</summary>\n\n**09:00:** 内容\n",
+            encoding="utf-8",
+        )
+        summary = r"路径 C:\Users\name；引用 \1；正则 \d+"
 
-        self.assertIn("YYYY-MM-DD", message)
+        message = journal.update_summary_for_date("2026-07-15", summary)
+
+        self.assertIn("已写入", message)
+        self.assertIn(summary, path.read_text(encoding="utf-8"))
+
+    def test_summary_rejects_stale_source_hash(self):
+        path = settings.DIARY_DIR / "2026-07-15.md"
+        path.write_text(
+            "# 2026-07-15\n\n<summary>\n旧总结\n</summary>\n",
+            encoding="utf-8",
+        )
+
+        message = journal.update_summary_for_date(
+            "2026-07-15", "新总结", expected_content_hash="stale"
+        )
+
+        self.assertIn("发生变化", message)
+        self.assertNotIn("新总结", path.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":
