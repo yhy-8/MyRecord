@@ -19,6 +19,19 @@ RECORD_MARKER = "<!-- agentrecord-record -->"
 ESCAPED_RECORD_MARKER = "<!-- agentrecord-record-text -->"
 
 
+def _dated_diary_files() -> list[Path]:
+    """Return only canonical ``YYYY-MM-DD.md`` diary files."""
+    files = []
+    for path in settings.DIARY_DIR.glob("*.md"):
+        try:
+            parsed = datetime.date.fromisoformat(path.stem)
+        except ValueError:
+            continue
+        if parsed.isoformat() == path.stem:
+            files.append(path)
+    return files
+
+
 def _acquire_journal_lock() -> FileLock:
     lock = FileLock.acquire(settings.DIARY_DIR / ".journal.lock", blocking=True)
     if lock is None:
@@ -43,7 +56,7 @@ def resolve_date(arg: str) -> str:
         return (today - datetime.timedelta(days=aliases[arg.lower()])).strftime("%Y-%m-%d")
 
     if arg.lower() in ("last", "prev", "上一个", "最近"):
-        files = sorted(settings.DIARY_DIR.glob("*.md"), reverse=True)
+        files = sorted(_dated_diary_files(), reverse=True)
         today_text = today.strftime("%Y-%m-%d")
         for file in files:
             if file.stem < today_text:
@@ -56,12 +69,18 @@ def resolve_date(arg: str) -> str:
         except ValueError:
             continue
 
-    for date_format in ("%m-%d", "%m%d"):
+    short_date = re.fullmatch(r"(\d{1,2})-(\d{1,2})", arg)
+    if short_date is None:
+        short_date = re.fullmatch(r"(\d{2})(\d{2})", arg)
+    if short_date:
         try:
-            date = datetime.datetime.strptime(arg, date_format)
-            return date.replace(year=today.year).strftime("%Y-%m-%d")
+            return datetime.date(
+                today.year,
+                int(short_date.group(1)),
+                int(short_date.group(2)),
+            ).isoformat()
         except ValueError:
-            continue
+            return ""
     return ""
 
 
@@ -131,7 +150,7 @@ def list_reference_sources(
     date_filter: str = "", limit: int = 20
 ) -> list[tuple[str, Path]]:
     """列出可引用的日记，按文件名倒序返回。"""
-    files = sorted(settings.DIARY_DIR.glob("*.md"), reverse=True)
+    files = sorted(_dated_diary_files(), reverse=True)
     if date_filter:
         files = [path for path in files if path.stem.startswith(date_filter)]
     if limit > 0:
@@ -190,8 +209,14 @@ def update_summary_for_date(
         temp_path = file_path.with_suffix(
             file_path.suffix + f".{uuid.uuid4().hex}.tmp"
         )
-        temp_path.write_text(new_content, encoding="utf-8")
-        temp_path.replace(file_path)
+        try:
+            temp_path.write_text(new_content, encoding="utf-8")
+            temp_path.replace(file_path)
+        finally:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
         return f"{date} 的总结已写入文档顶部。"
     finally:
         lock.release()
@@ -227,8 +252,16 @@ def delete_last_record() -> bool:
         temp_path = file_path.with_suffix(
             file_path.suffix + f".{uuid.uuid4().hex}.tmp"
         )
-        temp_path.write_text(content[:start].rstrip() + "\n\n", encoding="utf-8")
-        temp_path.replace(file_path)
+        try:
+            temp_path.write_text(
+                content[:start].rstrip() + "\n\n", encoding="utf-8"
+            )
+            temp_path.replace(file_path)
+        finally:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
         return True
     finally:
         lock.release()

@@ -63,12 +63,12 @@ def _parse_analysis_arguments(user_input: str) -> tuple[str, str]:
     first = arguments[0].lower()
     if first in ("weekly", "week", "周报"):
         kind = "weekly"
-        date_argument = arguments[1] if len(arguments) > 1 else ""
+        date_argument = " ".join(arguments[1:])
     elif first in ("monthly", "month", "月报"):
         kind = "monthly"
-        date_argument = arguments[1] if len(arguments) > 1 else ""
+        date_argument = " ".join(arguments[1:])
     else:
-        date_argument = arguments[0]
+        date_argument = " ".join(arguments)
     return kind, date_argument
 
 
@@ -233,13 +233,19 @@ def _handle_status() -> None:
             lines.append(f"    - {task}: {'、'.join(labels)}")
     errors = status["errors"]
     if errors:
-        lines.append("  [yellow]当前失败（/retry 可立即按依赖顺序重试）：[/yellow]")
+        lines.append("  [yellow]当前失败：[/yellow]")
         retry_after = status.get("retry_after", {})
         retry_kind = status.get("retry_kind", {})
         failure_counts = status.get("failure_counts", {})
         for task, message in errors.items():
             deadline = retry_after.get(task, "")
             kind = retry_kind.get(task)
+            if task == "scheduler":
+                lines.append(
+                    f"    - scheduler [调度器错误]: {message}；"
+                    "下一分钟自动重新检查"
+                )
+                continue
             failure_type = {
                 "network": "网络错误",
                 "rate_limit": "接口限流",
@@ -249,10 +255,12 @@ def _handle_status() -> None:
             retry_policy = {
                 "network": f"{network_retry_minutes} 分钟后重试",
                 "rate_limit": f"{network_retry_minutes} 分钟后重试",
-                "blocked": "修正配置后用 /retry 重试",
+                "blocked": "修正配置后自动解锁，也可用 /retry 重试",
                 "content_blocked": "输入或模型变化后自动解锁，也可用 /retry 重试",
             }.get(kind, f"到下一个 {content_retry_interval} 分钟边界重试")
-            suffix = f"；{retry_policy}不早于 {deadline}" if deadline else ""
+            suffix = (
+                f"；{retry_policy}（不早于 {deadline}）" if deadline else ""
+            )
             if kind in {"blocked", "content_blocked"}:
                 suffix = f"；{retry_policy}"
             if kind == "content_blocked":

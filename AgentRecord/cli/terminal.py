@@ -10,7 +10,6 @@ import time
 
 from rich.cells import cell_len
 from rich.console import Console
-from rich.markdown import Markdown
 from rich.panel import Panel
 
 

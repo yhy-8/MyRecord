@@ -77,9 +77,18 @@ def _show_automation_status() -> None:
             f"{task}（{failure_labels.get(retry_kind.get(task), '内容或格式错误')}）"
             for task in status["errors"]
         )
+        has_retryable_task = any(
+            task in {"daily_summary", "weekly_report", "monthly_report"}
+            for task in status["errors"]
+        )
+        recovery = (
+            "；可执行 /retry 立即按依赖顺序重试"
+            if has_retryable_task
+            else "；调度器会在下一分钟自动重新检查"
+        )
         console.print(
             f"[yellow][!] 自动任务存在未恢复失败：{tasks}；"
-            "请切换到报告模式用 /status 查看实际重试时间，或执行 /retry 立即按依赖顺序重试。[/yellow]"
+            f"请切换到报告模式用 /status 查看详情{recovery}。[/yellow]"
         )
 
 

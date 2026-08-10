@@ -107,8 +107,6 @@ AgentRecord.exe --uninstall-automation
 
 更新前先卸载自动任务并确认报告进程已经结束。替换代码时保留 `Records/`、`AnalysisReports/`、`Log/` 和含真实密钥的 `config.yaml`；完成验证后再安装自动任务。
 
-旧版本留下的 `.analysis.sqlite3` 及同名 `-wal`、`-shm` 不再被程序访问；确认没有旧版本报告进程后可自行删除。
-
 ## 数据与文件
 
 ```text

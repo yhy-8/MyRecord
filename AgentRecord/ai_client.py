@@ -64,9 +64,11 @@ def response_telemetry(response: object) -> dict[str, Any]:
 def third_party_search_available() -> bool:
     third = settings.CONFIG.get("third_search", {})
     return bool(
-        third.get("enabled", False)
-        and third.get("api_url", "")
-        and third.get("api_key", "")
+        isinstance(third, dict)
+        and third.get("enabled") is True
+        and settings.is_valid_http_url(third.get("api_url", ""))
+        and str(third.get("api_key") or "").strip()
+        and settings.is_positive_number(third.get("timeout", 30))
     )
 
 
@@ -124,12 +126,20 @@ def _search_excerpt(value: object, limit: int) -> str:
 def bocha_search(query: str, include: str = "", exclude: str = "") -> ToolResult:
     """Call the configured search API and return bounded evidence."""
     config = settings.CONFIG.get("third_search", {})
-    if not config.get("enabled") or not config.get("api_key") or not query:
+    if (
+        not isinstance(config, dict)
+        or config.get("enabled") is not True
+        or not str(config.get("api_key") or "").strip()
+        or not settings.is_valid_http_url(config.get("api_url", ""))
+        or not settings.is_positive_number(config.get("timeout", 30))
+        or not query
+    ):
         return ToolResult()
 
+    api_key = str(config.get("api_key") or "").strip()
     headers = {
         "Content-Type": "application/json",
-        "Authorization": f"Bearer {config['api_key']}",
+        "Authorization": f"Bearer {api_key}",
     }
     try:
         requested_count = int(config.get("count", _MAX_WEB_RESULTS_PER_QUERY))
@@ -219,31 +229,42 @@ def search_web_once(query: str) -> tuple[ToolResult, str]:
         return ToolResult(), f"接口异常: 第三方搜索失败: {error}"
     except SearchProtocolError as error:
         return ToolResult(), f"接口异常: 第三方搜索协议错误: {error}"
+    except RuntimeError as error:
+        return ToolResult(), f"{CONFIG_ERROR_MARKER} {error}"
+
+
+def _usage_integer(value: object) -> int:
+    if isinstance(value, bool):
+        return 0
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError, OverflowError):
+        return 0
 
 
 def _usage_values(data: dict) -> dict[str, int]:
     usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
-    details = (
-        usage.get("prompt_tokens_details")
-        or usage.get("input_tokens_details")
-        or {}
-    )
+    details = usage.get("prompt_tokens_details")
+    if not isinstance(details, dict):
+        details = usage.get("input_tokens_details")
+    if not isinstance(details, dict):
+        details = {}
     return {
-        "prompt_tokens": int(
+        "prompt_tokens": _usage_integer(
             usage.get("prompt_tokens", usage.get("input_tokens", 0)) or 0
         ),
-        "completion_tokens": int(
+        "completion_tokens": _usage_integer(
             usage.get("completion_tokens", usage.get("output_tokens", 0)) or 0
         ),
-        "total_tokens": int(usage.get("total_tokens", 0) or 0),
-        "cached_tokens": int(
+        "total_tokens": _usage_integer(usage.get("total_tokens", 0) or 0),
+        "cached_tokens": _usage_integer(
             usage.get(
                 "prompt_cache_hit_tokens",
                 details.get("cached_tokens", 0),
             )
             or 0
         ),
-        "cache_miss_tokens": int(
+        "cache_miss_tokens": _usage_integer(
             usage.get("prompt_cache_miss_tokens", 0) or 0
         ),
     }
@@ -258,16 +279,34 @@ def call_ai(
     max_tokens: int | None = None,
 ) -> AIResponse:
     """Call one text/JSON model; tools and web search stay in the controller."""
+    if not isinstance(model_config, dict):
+        return AIResponse(f"{CONFIG_ERROR_MARKER} 模型配置必须是对象。", False)
+    model_name = str(
+        model_config.get("model_id") or model_config.get("name") or ""
+    ).strip()
+    api_url = str(model_config.get("api_url") or "").strip()
+    api_key = str(model_config.get("api_key") or "").strip()
+    if not model_name:
+        return AIResponse(f"{CONFIG_ERROR_MARKER} 模型标识为空。", False)
+    if not settings.is_valid_http_url(api_url):
+        return AIResponse(f"{CONFIG_ERROR_MARKER} 模型 api_url 无效。", False)
+    if not api_key:
+        return AIResponse(f"{CONFIG_ERROR_MARKER} 模型 api_key 为空。", False)
+    try:
+        retry = settings.retry_policy()
+    except RuntimeError as error:
+        return AIResponse(f"{CONFIG_ERROR_MARKER} {error}", False)
+
     messages = [
         {"role": "system", "content": _build_system_prompt()},
         {"role": "user", "content": prompt},
     ]
     payload: dict[str, Any] = {
-        "model": model_config.get("model_id") or model_config["name"],
+        "model": model_name,
         "messages": messages,
     }
     is_deepseek = (
-        urlsplit(str(model_config.get("api_url", ""))).hostname or ""
+        urlsplit(api_url).hostname or ""
     ).casefold() == "api.deepseek.com"
     if "temperature" in model_config and not (is_deepseek and thinking is True):
         payload["temperature"] = model_config["temperature"]
@@ -284,7 +323,7 @@ def call_ai(
         payload["response_format"] = {"type": "json_object"}
 
     headers = {
-        "Authorization": f"Bearer {model_config['api_key']}",
+        "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
     started_at = time.perf_counter()
@@ -298,9 +337,7 @@ def call_ai(
     }
     finish_reasons: list[str] = []
     empty_content_retries = 0
-    empty_response_retry_limit = settings.retry_policy()[
-        "empty_response_retry_limit"
-    ]
+    empty_response_retry_limit = retry["empty_response_retry_limit"]
 
     def observe_attempt(_attempt: int) -> None:
         nonlocal http_attempts
@@ -322,7 +359,7 @@ def call_ai(
     try:
         for _ in range(empty_response_retry_limit + 1):
             response = _post_with_transient_retry(
-                model_config["api_url"],
+                api_url,
                 headers=headers,
                 json=payload,
                 timeout=60,

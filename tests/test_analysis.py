@@ -215,6 +215,29 @@ class AnalysisWorkflowTests(unittest.TestCase):
             "候选主题未获得足够公开证据", path.read_text(encoding="utf-8")
         )
 
+    def test_malformed_search_url_is_discarded_without_failing_report(self):
+        topic = {"topic_id": "Q001", "query": "公开问题"}
+        malformed = ToolResult(
+            1,
+            [
+                {
+                    "title": "坏链接",
+                    "url": "http://[",
+                    "snippet": "摘要",
+                    "published": "",
+                }
+            ],
+        )
+        with patch.object(
+            orchestrator, "search_web_once", return_value=(malformed, "")
+        ):
+            topics, evidence = orchestrator._collect_research_evidence(
+                [topic], "run-id"
+            )
+
+        self.assertEqual([], topics)
+        self.assertEqual([], evidence)
+
     def test_weekly_search_service_error_still_fails(self):
         day = datetime.date(2026, 7, 14)
         self.write_diary(day.isoformat())
@@ -230,21 +253,6 @@ class AnalysisWorkflowTests(unittest.TestCase):
         self.assertFalse(success)
         self.assertIsNone(path)
         self.assertIn("搜索超时", message)
-
-    def test_report_generation_ignores_existing_corrupt_sqlite_file(self):
-        day = datetime.date(2026, 7, 14)
-        self.write_diary(day.isoformat())
-        settings.ANALYSIS_DIR.mkdir()
-        database = settings.ANALYSIS_DIR / ".analysis.sqlite3"
-        database.write_bytes(b"not a sqlite database")
-
-        message, success, path = orchestrator.generate_analysis_report(
-            "monthly", day, {"name": "mock"}
-        )
-
-        self.assertTrue(success, message)
-        self.assertTrue(path.is_file())
-        self.assertEqual(b"not a sqlite database", database.read_bytes())
 
     def test_weekly_report_uses_readable_dates_without_internal_ids(self):
         day = datetime.date(2026, 7, 14)
@@ -402,9 +410,10 @@ class AnalysisWorkflowTests(unittest.TestCase):
                 "**10:00 [引用]:** [日记](<2026-07-13.md>)\n\n",
             )
         ]
-        loaded = context._referenced_source_context(logs)
-        self.assertIn("可以读取的日记内容", loaded)
-        self.assertNotIn("不应读取的报告内容", loaded)
+        loaded = context._referenced_source_records(logs)
+        loaded_text = "\n".join(record["text"] for record in loaded)
+        self.assertIn("可以读取的日记内容", loaded_text)
+        self.assertNotIn("不应读取的报告内容", loaded_text)
 
     def test_referenced_diary_records_are_addressable_and_reach_reviewer(self):
         old = settings.DIARY_DIR / "2026-07-13.md"
@@ -442,7 +451,7 @@ class AnalysisWorkflowTests(unittest.TestCase):
         self.assertNotIn("R-20260713", review_prompt)
         self.assertIn("facts", review_prompt)
 
-    def test_legacy_information_briefing_does_not_reach_research_planner(self):
+    def test_unrelated_information_file_does_not_reach_research_planner(self):
         day = datetime.date(2026, 7, 14)
         self.write_diary(day.isoformat())
         info = settings.ANALYSIS_DIR / "Information" / day.isoformat()
@@ -1053,7 +1062,6 @@ class AnalysisWorkflowTests(unittest.TestCase):
                 {
                     "errors": {
                         "daily_summary": "失败",
-                        "daily_information": "失败",
                         "weekly_report": "失败",
                         "monthly_report": "失败",
                     }
@@ -1076,9 +1084,6 @@ class AnalysisWorkflowTests(unittest.TestCase):
         self.assertTrue(success)
         self.assertEqual(
             ["daily_summary", "weekly_report", "monthly_report"], calls
-        )
-        self.assertNotIn(
-            "daily_information", automation._load_automation_state().get("errors", {})
         )
 
     def test_retry_stops_after_any_predecessor_failure(self):
@@ -1132,7 +1137,8 @@ class AnalysisWorkflowTests(unittest.TestCase):
         ), patch.object(
             automation,
             "_task_missing",
-            side_effect=lambda task, now: task in {"daily_summary", "weekly_report"},
+            side_effect=lambda task, now, **_kwargs: task
+            in {"daily_summary", "weekly_report"},
         ), patch.object(automation, "_run_weekly_reports") as run_weekly:
             automation.run_due_automatic_tasks()
 
@@ -1191,7 +1197,7 @@ class AnalysisWorkflowTests(unittest.TestCase):
         ), patch.object(
             automation,
             "_task_missing",
-            side_effect=lambda task, now: task == "weekly_report",
+            side_effect=lambda task, now, **_kwargs: task == "weekly_report",
         ), patch.object(
             automation, "_automation_model", return_value={"name": "mock"}
         ), patch.object(automation, "_run_weekly_reports") as run_weekly:
@@ -1429,13 +1435,17 @@ class AnalysisWorkflowTests(unittest.TestCase):
         )
         self.assertEqual("network", state["retry_kind"]["weekly_report"])
 
-    def test_auth_failure_waits_for_manual_retry_after_configuration_fix(self):
+    def test_auth_failure_waits_while_configuration_is_unchanged(self):
         state = {}
-        automation._set_task_error(
-            state, "weekly_report", "配置异常: HTTP 401"
-        )
+        with patch.object(
+            automation, "_content_failure_key", return_value="same-config"
+        ):
+            automation._set_task_error(
+                state, "weekly_report", "配置异常: HTTP 401"
+            )
 
         self.assertEqual("blocked", state["retry_kind"]["weekly_report"])
+        self.assertEqual("same-config", state["failure_keys"]["weekly_report"])
         self.assertNotIn("weekly_report", state.get("retry_after", {}))
         self.assertFalse(
             automation._failure_retry_is_due(
@@ -1443,12 +1453,91 @@ class AnalysisWorkflowTests(unittest.TestCase):
             )
         )
 
+    def test_configuration_change_unlocks_blocked_task(self):
+        state = {
+            "errors": {"weekly_report": "配置异常: HTTP 401"},
+            "retry_kind": {"weekly_report": "blocked"},
+            "failure_keys": {"weekly_report": "old-config"},
+        }
+        now = datetime.datetime(2026, 7, 17, 12, 0)
+        with patch.object(
+            automation, "_content_failure_key", return_value="new-config"
+        ), patch.object(automation, "_task_missing", return_value=True):
+            should_run = automation._task_should_run(
+                state,
+                "weekly_report",
+                now,
+                initial_detection_due=True,
+            )
+
+        self.assertTrue(should_run)
+        self.assertNotIn("errors", state)
+
+    def test_invalid_model_configuration_blocks_task_without_reloading_each_minute(self):
+        target = {"start": "2026-07-06", "end": "2026-07-12"}
+        state = {"pending_targets": {"weekly_report": [target]}}
+        now = datetime.datetime(2026, 7, 17, 12, 0)
+        with patch.object(
+            automation, "_task_missing", return_value=True
+        ), patch.object(
+            automation,
+            "_automation_model",
+            side_effect=RuntimeError("未配置模型"),
+        ):
+            automation._process_pending_targets(now, state, None)
+
+        self.assertEqual("blocked", state["retry_kind"]["weekly_report"])
+
+        with patch.object(
+            automation, "_task_missing", return_value=True
+        ), patch.object(
+            automation, "_content_failure_key", return_value=""
+        ), patch.object(automation, "_automation_model") as load_model:
+            automation._process_pending_targets(now, state, None)
+
+        load_model.assert_not_called()
+
+    def test_failure_signature_changes_when_model_key_changes(self):
+        now = datetime.datetime(2026, 7, 17, 12, 0)
+        target = {"start": "2026-07-16", "end": "2026-07-16"}
+        first_model = {
+            "name": "mock",
+            "api_url": "https://example.test/v1",
+            "api_key": "first",
+        }
+        second_model = {**first_model, "api_key": "second"}
+        with patch.object(automation, "_automation_model", return_value=first_model):
+            first = automation._content_failure_key(
+                "daily_summary", now, target=target
+            )
+        with patch.object(automation, "_automation_model", return_value=second_model):
+            second = automation._content_failure_key(
+                "daily_summary", now, target=target
+            )
+
+        self.assertNotEqual(first, second)
+
+    def test_existing_artifact_clears_stale_blocked_error(self):
+        state = {
+            "errors": {"weekly_report": "配置异常: HTTP 401"},
+            "retry_kind": {"weekly_report": "blocked"},
+        }
+        with patch.object(automation, "_task_missing", return_value=False):
+            should_run = automation._task_should_run(
+                state,
+                "weekly_report",
+                datetime.datetime(2026, 7, 17, 12, 0),
+                initial_detection_due=True,
+            )
+
+        self.assertFalse(should_run)
+        self.assertNotIn("errors", state)
+
     def test_retry_stops_after_global_provider_failure(self):
         settings.ANALYSIS_DIR.mkdir()
         automation._save_automation_state(
             {
                 "errors": {
-                    "daily_information": "失败",
                     "weekly_report": "失败",
                     "monthly_report": "失败",
                 }
@@ -1484,6 +1573,10 @@ class AnalysisWorkflowTests(unittest.TestCase):
             "## 一、整理与回顾\n\n手动版\n\n## 二、领域探索与研究\n\n绝不进入月报的研究段",
             encoding="utf-8",
         )
+        (weekly / "2026-07-08_to_2026-07-09_manual.md").write_text(
+            "## 一、整理与回顾\n\n伪造的非自然周内容",
+            encoding="utf-8",
+        )
 
         value = context._monthly_supporting_reports(
             datetime.date(2026, 7, 1), datetime.date(2026, 7, 31)
@@ -1492,22 +1585,9 @@ class AnalysisWorkflowTests(unittest.TestCase):
         self.assertNotIn("跨月内容", value)
         self.assertNotIn("自动版", value)
         self.assertIn("手动版", value)
+        self.assertNotIn("伪造的非自然周内容", value)
         self.assertNotIn("绝不进入月报的研究段", value)
-
-    def test_legacy_completion_cursors_are_removed(self):
-        state = {
-            "last_daily_date": "2026-07-16",
-            "last_information_date": "2026-07-17",
-            "last_week_end": "2026-07-12",
-            "last_month_end": "2026-06-30",
-            "last_deferred_at": "old",
-            "deferred_reason": "old",
-            "errors": {"weekly_report": "失败"},
-        }
-
-        automation._remove_legacy_progress(state)
-
-        self.assertEqual({"errors": {"weekly_report": "失败"}}, state)
+        self.assertNotIn("_manual.md", value)
 
     def test_non_object_automation_state_is_ignored(self):
         settings.ANALYSIS_DIR.mkdir()
@@ -1516,6 +1596,21 @@ class AnalysisWorkflowTests(unittest.TestCase):
         )
 
         self.assertEqual({}, automation._load_automation_state())
+
+    def test_pending_targets_reject_wrong_period_shapes(self):
+        valid = {"start": "2026-07-06", "end": "2026-07-12"}
+        state = {
+            "pending_targets": {
+                "weekly_report": [
+                    {"start": "2026-07-08", "end": "2026-07-09"},
+                    valid,
+                ]
+            }
+        }
+
+        self.assertEqual(
+            [valid], automation._pending_task_targets(state, "weekly_report")
+        )
 
     def test_retry_command_launches_detached_process(self):
         settings.ANALYSIS_DIR.mkdir()

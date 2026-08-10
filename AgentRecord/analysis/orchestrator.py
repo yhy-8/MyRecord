@@ -553,7 +553,6 @@ def _research_topics(
         topics.append(
             {
                 "topic_id": topic_id,
-                "title": query,
                 "query": query,
                 "record_dates": group["dates"],
             }
@@ -578,9 +577,13 @@ def _collect_research_evidence(
         seen_urls = set()
         for item in result.evidence:
             url = str(item.get("url", "")).strip()
-            url_key = researcher.canonical_url(url)
+            try:
+                url_key = researcher.canonical_url(url)
+            except ValueError:
+                continue
             if (
-                re.search(r"[\x00-\x20\x7f]", url)
+                len(url) > 4096
+                or re.search(r"[\x00-\x20\x7f]", url)
                 or url_key[0] not in {"http", "https"}
                 or not url_key[1]
                 or url_key in seen_urls
@@ -658,7 +661,7 @@ def _research_one_topic(
             status, body = researcher.validate(payload)
             if status == "insufficient":
                 return {"topic": topic, "accepted": False, "feedback": body}
-            markdown, sources = researcher.render_topic(body, topic, topic_evidence)
+            markdown = researcher.render_topic(body, topic, topic_evidence)
         except AgentPipelineError as error:
             logger.warning(
                 "agent_validation_failed run=%s agent=%s reason=%s",
@@ -690,7 +693,6 @@ def _research_one_topic(
                 "topic": topic,
                 "accepted": True,
                 "markdown": markdown,
-                "sources": sources,
             }
         if attempt > revision_limit:
             return {
@@ -798,13 +800,6 @@ def generate_analysis_report(
             None,
         )
 
-    logs = _existing_logs(start, end)
-    if not logs:
-        return f"{start:%Y-%m-%d} 至 {end:%Y-%m-%d} 没有日记记录。", False, None
-    records = _period_records(logs)
-    if not records:
-        return "日记中没有可识别的标准记录。", False, None
-
     report_path = _analysis_report_path(kind, start, end, origin)
     report_lock = FileLock.acquire(settings.ANALYSIS_DIR / ".report.lock")
     if report_lock is None:
@@ -814,13 +809,6 @@ def generate_analysis_report(
     temp_path: Path | None = None
     usage = UsageAccumulator()
     try:
-        referenced_records = _referenced_source_records(logs)
-        recent_summaries = _recent_summary_context(start)
-        weekly_retrospectives = (
-            _monthly_supporting_reports(start, end)
-            if kind == "monthly"
-            else "（周报不读取下级周期报告）"
-        )
         period = {
             "kind": kind,
             "start": start.isoformat(),
@@ -834,6 +822,23 @@ def generate_analysis_report(
             trigger,
             start,
             end,
+        )
+        logs = _existing_logs(start, end)
+        if not logs:
+            return (
+                f"{start:%Y-%m-%d} 至 {end:%Y-%m-%d} 没有日记记录。",
+                False,
+                None,
+            )
+        records = _period_records(logs)
+        if not records:
+            return "日记中没有可识别的标准记录。", False, None
+        referenced_records = _referenced_source_records(logs)
+        recent_summaries = _recent_summary_context(start)
+        weekly_retrospectives = (
+            _monthly_supporting_reports(start, end)
+            if kind == "monthly"
+            else "（周报不读取下级周期报告）"
         )
         retrospective_markdown = _retrospective_with_input_budget(
             period,
@@ -895,5 +900,8 @@ def generate_analysis_report(
         return f"分析失败: {message}", False, None
     finally:
         if temp_path is not None:
-            temp_path.unlink(missing_ok=True)
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                logger.warning("analysis_temp_cleanup_failed run=%s", run_id)
         report_lock.release()

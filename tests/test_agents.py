@@ -173,7 +173,7 @@ class AgentModuleTests(unittest.TestCase):
     def test_researcher_renders_controller_owned_heading_and_sources(self):
         topic = {
             "topic_id": "Q001",
-            "title": "记录方法的研究边界",
+            "query": "记录方法的研究边界",
             "record_dates": ["2026-07-14"],
         }
         evidence = [
@@ -185,19 +185,24 @@ class AgentModuleTests(unittest.TestCase):
                 "published": "2026-07-14",
             }
         ]
-        markdown, sources = researcher.render_topic("分析正文。", topic, evidence)
+        markdown = researcher.render_topic("分析正文。", topic, evidence)
         self.assertIn("### 记录方法的研究边界", markdown)
         self.assertIn("分析正文。", markdown)
         self.assertIn("记录依据：2026-07-14", markdown)
         self.assertNotIn("R-20260714", markdown)
         self.assertIn("https://example.com/source", markdown)
-        self.assertEqual("W-Q001-001", sources[0]["source_id"])
 
     def test_researcher_rejects_model_written_url(self):
         with self.assertRaisesRegex(AgentPipelineError, "不得自行输出 URL"):
             researcher.validate(
                 {"status": "supported", "text": "请看 https://model.example"}
             )
+
+    def test_url_comparison_does_not_merge_encoded_reserved_paths(self):
+        encoded = researcher.canonical_url("https://example.com/a%2fb")
+        literal = researcher.canonical_url("https://example.com/a/b")
+
+        self.assertNotEqual(encoded, literal)
 
     def test_all_agent_contracts_reject_model_owned_arrays(self):
         with self.assertRaises(AgentPipelineError):

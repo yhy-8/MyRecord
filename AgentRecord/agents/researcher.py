@@ -1,7 +1,7 @@
 """Minimal JSON research for one controller-selected topic."""
 
 import re
-from urllib.parse import parse_qsl, unquote, urlsplit
+from urllib.parse import parse_qsl, urlsplit
 
 from .base import AgentPipelineError, AgentSpec
 
@@ -27,14 +27,16 @@ def canonical_url(url: str) -> tuple[str, str, str, tuple[tuple[str, str], ...]]
     """Return a comparison key while preserving the delivered URL verbatim."""
     parts = urlsplit(url.strip())
     query = tuple(
-        sorted(
-            (key, value)
-            for key, value in parse_qsl(parts.query, keep_blank_values=True)
-            if not key.casefold().startswith("utm_")
-            and key.casefold() not in _TRACKING_QUERY_KEYS
-        )
+        (key, value)
+        for key, value in parse_qsl(parts.query, keep_blank_values=True)
+        if not key.casefold().startswith("utm_")
+        and key.casefold() not in _TRACKING_QUERY_KEYS
     )
-    path = unquote(parts.path).rstrip("/") or "/"
+    path = re.sub(
+        r"%[0-9a-fA-F]{2}",
+        lambda match: match.group(0).upper(),
+        parts.path,
+    ).rstrip("/") or "/"
     return parts.scheme.casefold(), parts.netloc.casefold(), path, query
 
 
@@ -76,9 +78,7 @@ def _safe_link(item: dict) -> str:
     return f"[{title}]({url})"
 
 
-def render_topic(
-    body: str, topic: dict, evidence: list[dict]
-) -> tuple[str, list[dict]]:
+def render_topic(body: str, topic: dict, evidence: list[dict]) -> str:
     """Render one fixed heading and bind all controller-provided sources."""
     topic_evidence = [
         item for item in evidence if item.get("topic_id") == topic["topic_id"]
@@ -87,21 +87,10 @@ def render_topic(
         raise AgentPipelineError(f"主题 {topic['topic_id']} 没有检索资料")
     record_refs = ", ".join(dict.fromkeys(topic.get("record_dates", [])))
     links = " · ".join(_safe_link(item) for item in topic_evidence)
-    markdown = (
-        f"### {topic['title']}\n\n"
+    return (
+        f"### {topic['query']}\n\n"
         "> 以下正文是基于本次检索摘要的 AI 分析，不代表用户结论。\n\n"
         f"{body}\n\n"
         f"> 记录依据：{record_refs}\n"
         f"> 检索资料：{links}"
     )
-    sources = [
-        {
-            "source_id": item["source_id"],
-            "topic_id": item["topic_id"],
-            "title": item.get("title", ""),
-            "url": item["url"],
-            "published": item.get("published", ""),
-        }
-        for item in topic_evidence
-    ]
-    return markdown, sources

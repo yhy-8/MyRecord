@@ -13,6 +13,15 @@ class ModelSettingsTests(unittest.TestCase):
             settings._get_config_path(),
         )
 
+    def test_config_loader_rejects_non_object_root(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.yaml"
+            config_path.write_text("[]\n", encoding="utf-8")
+            with patch.object(
+                settings, "_get_config_path", return_value=config_path
+            ), self.assertRaisesRegex(RuntimeError, "顶层必须是对象"):
+                settings._load_config()
+
     def test_log_directory_uses_config_relative_default(self):
         self.assertEqual(settings.CONFIG_DIR / "Log", settings.LOG_DIR)
 
@@ -43,7 +52,7 @@ class ModelSettingsTests(unittest.TestCase):
             self.assertIn("# 保留这条注释", content)
             self.assertIn("current_model: \"second\"", content)
 
-    def test_deepseek_legacy_config_receives_narrow_structured_defaults(self):
+    def test_deepseek_json_mode_must_be_explicit(self):
         raw_model = {
             "name": "deepseek",
             "api_url": "https://api.deepseek.com/chat/completions",
@@ -55,7 +64,7 @@ class ModelSettingsTests(unittest.TestCase):
         ):
             effective = settings.ModelConfig.get_model()
 
-        self.assertTrue(effective["json_mode"])
+        self.assertNotIn("json_mode", effective)
         self.assertNotIn("max_tokens", effective)
         self.assertNotIn("json_mode", raw_model)
 
@@ -78,7 +87,7 @@ class ModelSettingsTests(unittest.TestCase):
         message = " ".join(warnings)
         self.assertNotIn("版本", message)
         self.assertIn("json_mode", message)
-        self.assertIn("有效上限 10", message)
+        self.assertIn("有效范围 1..10", message)
 
     def test_config_warnings_cover_active_key_and_automatic_weekly_search(self):
         with patch.object(
@@ -90,7 +99,7 @@ class ModelSettingsTests(unittest.TestCase):
                     {
                         "name": "deepseek",
                         "api_url": "https://api.deepseek.com/chat/completions",
-                        "api_key": "",
+                        "api_key": None,
                     }
                 ],
                 "automation": {"enabled": True, "weekly_report": True},
@@ -130,6 +139,38 @@ class ModelSettingsTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(RuntimeError, "不能大于 1"):
                 settings.retry_policy()
+
+    def test_configuration_warnings_handle_malformed_sections(self):
+        with patch.object(
+            settings,
+            "CONFIG",
+            {"models": "bad", "third_search": "bad"},
+        ):
+            message = " ".join(settings.configuration_warnings())
+
+        self.assertIn("models 必须是数组", message)
+        self.assertIn("third_search 必须是对象", message)
+
+    def test_configuration_warnings_reject_invalid_urls_and_timeout(self):
+        with patch.object(
+            settings,
+            "CONFIG",
+            {
+                "current_model": "bad-url",
+                "models": [
+                    {
+                        "name": "bad-url",
+                        "api_url": "http://[",
+                        "api_key": "configured",
+                    }
+                ],
+                "third_search": {"timeout": "slow"},
+            },
+        ):
+            message = " ".join(settings.configuration_warnings())
+
+        self.assertIn("api_url 无效", message)
+        self.assertIn("third_search.timeout 必须是正数", message)
 
 
 if __name__ == "__main__":

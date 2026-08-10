@@ -62,6 +62,14 @@ class MainCommandTests(unittest.TestCase):
             commands._parse_analysis_arguments("/a monthly 2026-07-15"),
         )
 
+    def test_analysis_parser_does_not_silently_drop_extra_arguments(self):
+        self.assertEqual(
+            ("weekly", "2026-07-15 unexpected"),
+            commands._parse_analysis_arguments(
+                "/a weekly 2026-07-15 unexpected"
+            ),
+        )
+
     @patch(
         "AgentRecord.cli.commands.generate_analysis_report",
         return_value=("月报", True, Path("report.md")),
@@ -174,6 +182,7 @@ class MainCommandTests(unittest.TestCase):
         self.assertIn("weekly_report: 2026-07-06 至 2026-07-12", output)
         self.assertIn("weekly_report", output)
         self.assertIn("非网络错误", output)
+        self.assertIn("（不早于 2026-07-15T21:00:00）", output)
         self.assertNotIn("weekly_report [网络错误]", output)
 
     def test_help_commands_are_separated_by_mode(self):

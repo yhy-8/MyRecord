@@ -93,6 +93,26 @@ class JournalAITests(unittest.TestCase):
         self.assertEqual(70, response.telemetry["usage"]["cached_tokens"])
         self.assertEqual(30, response.telemetry["usage"]["cache_miss_tokens"])
 
+    @patch("AgentRecord.ai_client.requests.post")
+    def test_malformed_usage_does_not_discard_valid_content(self, post):
+        post.return_value = FakeResponse(
+            {
+                "choices": [
+                    {"message": {"role": "assistant", "content": "最终回答"}}
+                ],
+                "usage": {
+                    "prompt_tokens": "invalid",
+                    "total_tokens": None,
+                    "prompt_tokens_details": "invalid",
+                },
+            }
+        )
+
+        response = ai_client.call_ai("问题", self.model)
+
+        self.assertTrue(response.success)
+        self.assertEqual(0, response.telemetry["usage"]["prompt_tokens"])
+
     @patch("AgentRecord.ai_client._post_with_transient_retry")
     def test_third_party_search_caps_noisy_result_count(self, request):
         settings.CONFIG["third_search"] = {
@@ -337,6 +357,43 @@ class JournalAITests(unittest.TestCase):
         }
 
         self.assertFalse(ai_client.third_party_search_available())
+
+        settings.CONFIG["third_search"] = {
+            "enabled": True,
+            "api_key": None,
+            "api_url": "https://search.example.test",
+        }
+        self.assertFalse(ai_client.third_party_search_available())
+
+        settings.CONFIG["third_search"] = {
+            "enabled": True,
+            "api_key": "search-key",
+            "api_url": "https://search.example.test",
+            "timeout": 0,
+        }
+        self.assertFalse(ai_client.third_party_search_available())
+
+    def test_missing_model_key_is_a_configuration_failure(self):
+        model = {
+            "name": "test",
+            "api_url": "https://example.test/v1",
+            "api_key": None,
+        }
+
+        response = ai_client.call_ai("问题", model)
+
+        self.assertFalse(response.success)
+        self.assertTrue(ai_client.is_config_failure(response.text))
+
+    def test_invalid_retry_policy_is_a_configuration_failure(self):
+        with patch.dict(
+            settings.CONFIG,
+            {"retry": {"empty_response_retry_limit": 2}},
+        ):
+            response = ai_client.call_ai("问题", self.model)
+
+        self.assertFalse(response.success)
+        self.assertTrue(ai_client.is_config_failure(response.text))
 
     @patch("AgentRecord.ai_client.time.sleep")
     @patch("AgentRecord.ai_client.requests.post")

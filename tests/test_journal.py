@@ -25,13 +25,25 @@ class JournalTests(unittest.TestCase):
     def test_lists_only_diaries_as_reference_sources(self):
         old = settings.DIARY_DIR / "2026-07-13.md"
         latest = settings.DIARY_DIR / "2026-07-14.md"
+        unrelated = settings.DIARY_DIR / "notes.md"
         old.write_text("旧日记", encoding="utf-8")
         latest.write_text("新日记", encoding="utf-8")
+        unrelated.write_text("不是日期日记", encoding="utf-8")
         sources = journal.list_reference_sources()
         filtered = journal.list_reference_sources("2026-07-13")
         self.assertEqual(("日记 | 2026-07-14", latest), sources[0])
         self.assertEqual([("日记 | 2026-07-13", old)], filtered)
         self.assertEqual([], journal.list_reference_sources("2026-06"))
+        self.assertNotIn(unrelated, [path for _, path in sources])
+
+    def test_short_leap_day_resolves_in_a_leap_year(self):
+        class LeapDate(datetime.date):
+            @classmethod
+            def today(cls):
+                return cls(2028, 2, 1)
+
+        with patch.object(journal.datetime, "date", LeapDate):
+            self.assertEqual("2028-02-29", journal.resolve_date("02-29"))
 
     def test_appends_portable_reference_with_note_and_timestamp(self):
         report = settings.DIARY_DIR / "2026-07-14.md"

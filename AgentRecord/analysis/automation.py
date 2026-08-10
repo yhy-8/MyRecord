@@ -6,7 +6,6 @@ import json
 import logging
 import ntpath
 import os
-import re
 import shlex
 import subprocess
 import sys
@@ -16,16 +15,18 @@ from pathlib import Path
 
 from .. import journal, settings
 from ..ai_client import (
+    CONFIG_ERROR_MARKER,
     is_config_failure,
     is_network_failure,
     is_rate_limit_failure,
 )
+from ..file_lock import FileLock
 from .context import (
     _analysis_report_path,
     _existing_logs,
     _monthly_supporting_reports,
     _recent_summary_context,
-    _referenced_source_context,
+    _referenced_source_records,
 )
 from .orchestrator import (
     generate_analysis_report,
@@ -41,55 +42,6 @@ _AUTOMATION_TASK_ORDER = (
     "weekly_report",
     "monthly_report",
 )
-_RETIRED_AUTOMATION_TASKS = {"daily_profile", "daily_information"}
-
-
-class _AutomationLock:
-    """A kernel-held cross-process lock released automatically on process death."""
-
-    def __init__(self, path: Path, file_object):
-        self.path = path
-        self._file = file_object
-
-    @classmethod
-    def acquire(cls) -> "_AutomationLock | None":
-        settings.ANALYSIS_DIR.mkdir(parents=True, exist_ok=True)
-        path = settings.ANALYSIS_DIR / ".automation.lock"
-        file_object = path.open("a+b")
-        try:
-            file_object.seek(0, os.SEEK_END)
-            if file_object.tell() == 0:
-                file_object.write(b"0")
-                file_object.flush()
-            file_object.seek(0)
-            if os.name == "nt":
-                import msvcrt
-
-                msvcrt.locking(file_object.fileno(), msvcrt.LK_NBLCK, 1)
-            else:
-                import fcntl
-
-                fcntl.flock(file_object.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except (OSError, IOError):
-            file_object.close()
-            return None
-        return cls(path, file_object)
-
-    def release(self) -> None:
-        if self._file.closed:
-            return
-        try:
-            self._file.seek(0)
-            if os.name == "nt":
-                import msvcrt
-
-                msvcrt.locking(self._file.fileno(), msvcrt.LK_UNLCK, 1)
-            else:
-                import fcntl
-
-                fcntl.flock(self._file.fileno(), fcntl.LOCK_UN)
-        finally:
-            self._file.close()
 
 
 def _load_automation_state() -> dict:
@@ -99,7 +51,7 @@ def _load_automation_state() -> dict:
     try:
         value = json.loads(state_path.read_text(encoding="utf-8"))
         return value if isinstance(value, dict) else {}
-    except (OSError, json.JSONDecodeError):
+    except (OSError, UnicodeError, json.JSONDecodeError):
         return {}
 
 
@@ -107,10 +59,16 @@ def _save_automation_state(state: dict) -> None:
     settings.ANALYSIS_DIR.mkdir(parents=True, exist_ok=True)
     state_path = settings.ANALYSIS_DIR / ".automation-state.json"
     temp_path = settings.ANALYSIS_DIR / f".automation-state.{uuid.uuid4().hex}.tmp"
-    temp_path.write_text(
-        json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-    temp_path.replace(state_path)
+    try:
+        temp_path.write_text(
+            json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        temp_path.replace(state_path)
+    finally:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def _automation_model() -> settings.ModelDict:
@@ -143,13 +101,36 @@ def _default_task_target(task: str, now: datetime.datetime) -> dict[str, str]:
     return {}
 
 
+def _normalized_task_target(
+    task: str, value: object
+) -> dict[str, str] | None:
+    if not isinstance(value, dict) or not value.get("start") or not value.get("end"):
+        return None
+    target = {"start": str(value["start"]), "end": str(value["end"])}
+    try:
+        start = datetime.date.fromisoformat(target["start"])
+        end = datetime.date.fromisoformat(target["end"])
+    except ValueError:
+        return None
+    if task == "daily_summary":
+        valid = start == end
+    elif task == "weekly_report":
+        valid = start.weekday() == 0 and end == start + datetime.timedelta(days=6)
+    elif task == "monthly_report":
+        next_month = (start.replace(day=28) + datetime.timedelta(days=4)).replace(day=1)
+        valid = start.day == 1 and end == next_month - datetime.timedelta(days=1)
+    else:
+        valid = False
+    return target if valid else None
+
+
 def _stored_task_target(
     state: dict, task: str, now: datetime.datetime
 ) -> dict[str, str]:
-    value = state.get("failure_targets", {}).get(task)
-    if isinstance(value, dict) and value.get("start") and value.get("end"):
-        return {"start": str(value["start"]), "end": str(value["end"])}
-    return _default_task_target(task, now)
+    target = _normalized_task_target(
+        task, state.get("failure_targets", {}).get(task)
+    )
+    return target or _default_task_target(task, now)
 
 
 def _pending_task_targets(state: dict, task: str) -> list[dict[str, str]]:
@@ -160,15 +141,8 @@ def _pending_task_targets(state: dict, task: str) -> list[dict[str, str]]:
     targets = []
     seen = set()
     for value in raw_targets:
-        if not isinstance(value, dict) or not value.get("start") or not value.get("end"):
-            continue
-        target = {"start": str(value["start"]), "end": str(value["end"])}
-        try:
-            start = datetime.date.fromisoformat(target["start"])
-            end = datetime.date.fromisoformat(target["end"])
-        except ValueError:
-            continue
-        if start > end:
+        target = _normalized_task_target(task, value)
+        if target is None:
             continue
         key = (target["start"], target["end"])
         if key in seen:
@@ -180,7 +154,9 @@ def _pending_task_targets(state: dict, task: str) -> list[dict[str, str]]:
 
 def _enqueue_task_target(state: dict, task: str, target: dict[str, str]) -> None:
     targets = _pending_task_targets(state, task)
-    normalized = {"start": str(target["start"]), "end": str(target["end"])}
+    normalized = _normalized_task_target(task, target)
+    if normalized is None:
+        raise ValueError(f"{task} 自动任务目标无效")
     if normalized not in targets:
         targets.append(normalized)
         targets.sort(key=lambda item: (item["start"], item["end"]))
@@ -211,6 +187,11 @@ def _has_pending_targets(state: dict) -> bool:
     return any(_pending_task_targets(state, task) for task in _AUTOMATION_TASK_ORDER)
 
 
+def _secret_digest(value: object) -> str:
+    secret = str(value or "").strip()
+    return hashlib.sha256(secret.encode("utf-8")).hexdigest() if secret else ""
+
+
 def _content_failure_key(
     task: str,
     now: datetime.datetime,
@@ -230,6 +211,7 @@ def _content_failure_key(
                 "temperature",
             )
         }
+        model_signature["api_key_digest"] = _secret_digest(model.get("api_key"))
         target = target or _default_task_target(task, now)
         payload: dict = {
             "task": task,
@@ -238,10 +220,15 @@ def _content_failure_key(
         }
         if task == "weekly_report":
             third_search = settings.CONFIG.get("third_search", {})
+            if not isinstance(third_search, dict):
+                third_search = {}
             payload["third_search"] = {
                 key: third_search.get(key)
                 for key in ("enabled", "api_url", "count", "timeout")
             }
+            payload["third_search"]["api_key_digest"] = _secret_digest(
+                third_search.get("api_key")
+            )
         if task == "daily_summary":
             date = datetime.date.fromisoformat(target["start"])
             path = settings.DIARY_DIR / f"{date.isoformat()}.md"
@@ -260,7 +247,7 @@ def _content_failure_key(
             payload.update(
                 period={"start": start.isoformat(), "end": end.isoformat()},
                 logs=logs,
-                referenced_sources=_referenced_source_context(logs),
+                referenced_sources=_referenced_source_records(logs),
                 recent_summaries=_recent_summary_context(start),
                 supporting_reports=supporting_reports,
             )
@@ -286,6 +273,9 @@ def _set_task_error(
         _enqueue_task_target(state, task, target)
         if is_config_failure(message):
             state.setdefault("retry_kind", {})[task] = "blocked"
+            failure_key = _content_failure_key(task, now, target=target)
+            if failure_key:
+                state.setdefault("failure_keys", {})[task] = failure_key
             retry_after = state.get("retry_after", {})
             retry_after.pop(task, None)
             if not retry_after:
@@ -365,40 +355,8 @@ def _clear_task_error(state: dict, task: str) -> None:
         state.pop("failure_targets", None)
 
 
-def _acquire_automation_lock() -> _AutomationLock | None:
-    return _AutomationLock.acquire()
-
-
-def _remove_legacy_progress(state: dict) -> None:
-    for key in (
-        "last_daily_date",
-        "last_information_date",
-        "last_week_end",
-        "last_month_end",
-        "last_deferred_at",
-        "deferred_reason",
-    ):
-        state.pop(key, None)
-    for key in (
-        "errors",
-        "retry_after",
-        "retry_kind",
-        "failure_counts",
-        "failure_keys",
-        "failure_targets",
-        "pending_targets",
-    ):
-        values = state.get(key)
-        if not isinstance(values, dict):
-            continue
-        for task in _RETIRED_AUTOMATION_TASKS:
-            values.pop(task, None)
-        if not values:
-            state.pop(key, None)
-    if state.get("current_task") in _RETIRED_AUTOMATION_TASKS:
-        state.pop("current_task", None)
-        state.pop("current_task_detail", None)
-        state.pop("current_task_started_at", None)
+def _acquire_automation_lock() -> FileLock | None:
+    return FileLock.acquire(settings.ANALYSIS_DIR / ".automation.lock")
 
 
 def _diary_summary_needs_generation(path: Path) -> bool:
@@ -460,7 +418,6 @@ def _task_missing(
     *,
     target: dict[str, str] | None = None,
 ) -> bool:
-    today = now.date()
     target = target or _default_task_target(task, now)
     if task == "daily_summary":
         date = datetime.date.fromisoformat(target["start"])
@@ -477,14 +434,6 @@ def _task_missing(
         path = _analysis_report_path("monthly", start, end, "auto")
         return bool(_existing_logs(start, end)) and not path.exists()
     return False
-
-
-def _task_missing_for_target(
-    task: str, now: datetime.datetime, target: dict[str, str]
-) -> bool:
-    if target == _default_task_target(task, now):
-        return _task_missing(task, now)
-    return _task_missing(task, now, target=target)
 
 
 def _task_artifact_status(task: str, now: datetime.datetime) -> str:
@@ -521,8 +470,13 @@ def _task_should_run(
         stored_target, dict
     ):
         target = _stored_task_target(state, task, now)
+    missing = _task_missing(task, now, target=target)
+    if not missing:
+        _clear_task_error(state, task)
+        return False
     if task in state.get("errors", {}):
-        if state.get("retry_kind", {}).get(task) == "content_blocked":
+        retry_kind = state.get("retry_kind", {}).get(task)
+        if retry_kind in {"blocked", "content_blocked"}:
             previous_key = str(state.get("failure_keys", {}).get(task, ""))
             current_key = _content_failure_key(task, now, target=target)
             if not current_key or current_key == previous_key:
@@ -534,15 +488,7 @@ def _task_should_run(
             return False
     elif not initial_detection_due:
         return False
-    missing = (
-        _task_missing(task, now)
-        if target is None
-        else _task_missing_for_target(task, now, target)
-    )
-    if missing:
-        return True
-    _clear_task_error(state, task)
-    return False
+    return True
 
 
 def _run_daily_summaries(
@@ -585,17 +531,12 @@ def _scan_missing_targets(
     hourly_detection_due: bool,
 ) -> None:
     """Persist exact targets before a predecessor can block their execution."""
-    initial_due = {
-        "daily_summary": hourly_detection_due,
-        "weekly_report": hourly_detection_due,
-        "monthly_report": hourly_detection_due,
-    }
     for task in _AUTOMATION_TASK_ORDER:
-        if not automation.get(task, True):
+        if automation.get(task, True) is not True:
             _clear_task_error(state, task)
             _clear_pending_task(state, task)
             continue
-        if initial_due[task]:
+        if hourly_detection_due:
             target = _default_task_target(task, now)
             if _task_missing(task, now):
                 _enqueue_task_target(state, task, target)
@@ -603,35 +544,6 @@ def _scan_missing_targets(
                 _dequeue_task_target(state, task, target)
         if task in state.get("errors", {}):
             _enqueue_task_target(state, task, _stored_task_target(state, task, now))
-
-
-def _failure_batch_date(task: str, target: dict[str, str]) -> datetime.date:
-    if task == "daily_summary":
-        return datetime.date.fromisoformat(target["start"]) + datetime.timedelta(days=1)
-    return datetime.date.fromisoformat(target["end"]) + datetime.timedelta(days=1)
-
-
-def _enqueue_legacy_failure_followups(
-    state: dict, now: datetime.datetime, automation: dict
-) -> None:
-    """Upgrade pre-queue failure state without losing its blocked downstream work."""
-    errors = state.get("errors", {})
-    for index, task in enumerate(_AUTOMATION_TASK_ORDER):
-        if task not in errors:
-            continue
-        target = _stored_task_target(state, task, now)
-        try:
-            batch_date = _failure_batch_date(task, target)
-        except (KeyError, ValueError):
-            continue
-        batch_now = datetime.datetime.combine(batch_date, datetime.time(12, 0))
-        for downstream in _AUTOMATION_TASK_ORDER[index + 1 :]:
-            if not automation.get(downstream, True):
-                continue
-            downstream_target = _default_task_target(downstream, batch_now)
-            if _task_missing_for_target(downstream, now, downstream_target):
-                _enqueue_task_target(state, downstream, downstream_target)
-        break
 
 
 def _run_pending_task(
@@ -666,7 +578,7 @@ def _run_pending_task(
 def _process_pending_targets(
     now: datetime.datetime,
     state: dict,
-    model: settings.ModelDict,
+    model: settings.ModelDict | None,
     *,
     manual_retry: bool = False,
     process_all: bool = False,
@@ -701,6 +613,18 @@ def _process_pending_targets(
                     break
                 continue
 
+            if model is None:
+                try:
+                    model = _automation_model()
+                except (KeyError, RuntimeError, TypeError) as error:
+                    _set_task_error(
+                        state,
+                        task,
+                        f"{CONFIG_ERROR_MARKER} 活动模型配置无效: {error}",
+                        target=target,
+                    )
+                    _save_automation_state(state)
+                    return
             _run_pending_task(
                 task,
                 target,
@@ -727,14 +651,16 @@ def _process_pending_targets(
 def run_due_automatic_tasks() -> None:
     """执行到期的日总结和闭合周期报告。"""
     automation = settings.CONFIG.get("automation", {})
-    if not automation.get("enabled", True):
+    if not isinstance(automation, dict):
+        logger.error("automation_configuration_invalid")
+        return
+    if automation.get("enabled", True) is not True:
         return
     automation_lock = _acquire_automation_lock()
     if automation_lock is None:
         return
     try:
         state = _load_automation_state()
-        _remove_legacy_progress(state)
         now = datetime.datetime.now()
         state["last_check_started_at"] = now.isoformat(timespec="seconds")
         _save_automation_state(state)
@@ -753,12 +679,10 @@ def run_due_automatic_tasks() -> None:
             automation,
             hourly_detection_due=hourly_detection_due,
         )
-        _enqueue_legacy_failure_followups(state, now, automation)
         _save_automation_state(state)
 
         if _has_pending_targets(state):
-            model_config = _automation_model()
-            _process_pending_targets(now, state, model_config)
+            _process_pending_targets(now, state, None)
         if hourly_detection_due:
             # This is only a scheduler watermark. Writing it after the work means
             # a killed process is detected again on the next minute invocation.
@@ -900,7 +824,6 @@ def retry_failed_automatic_tasks() -> tuple[str, bool]:
     tasks: list[str] = []
     try:
         state = _load_automation_state()
-        _remove_legacy_progress(state)
         _save_automation_state(state)
         tasks = [
             task
@@ -910,18 +833,15 @@ def retry_failed_automatic_tasks() -> tuple[str, bool]:
         if not tasks:
             return "当前没有失败的自动任务可重试。", True
         now = datetime.datetime.now()
-        automation = settings.CONFIG.get("automation", {})
         for task in tasks:
             _enqueue_task_target(state, task, _stored_task_target(state, task, now))
-        _enqueue_legacy_failure_followups(state, now, automation)
         state["last_retry_started_at"] = now.isoformat(timespec="seconds")
         _save_automation_state(state)
         logger.info("automation_retry_started tasks=%s", ",".join(tasks))
-        model = _automation_model()
         _process_pending_targets(
             now,
             state,
-            model,
+            None,
             manual_retry=True,
             process_all=True,
         )
@@ -1103,7 +1023,6 @@ def automation_status_snapshot() -> dict:
     """汇总安装状态、真实产物状态、调度时间和当前失败。"""
     installed, install_message = system_automation_status()
     state = _load_automation_state()
-    _remove_legacy_progress(state)
     now = datetime.datetime.now()
     return {
         "installed": installed,

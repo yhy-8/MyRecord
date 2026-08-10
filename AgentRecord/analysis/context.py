@@ -66,7 +66,7 @@ def _referenced_source_records(
                 continue
             try:
                 source_content = source_path.read_text(encoding="utf-8")
-            except OSError:
+            except (OSError, UnicodeError):
                 continue
             parsed = _period_records(
                 [(source_date, _log_without_summary(source_content)[:12000])]
@@ -84,24 +84,6 @@ def _referenced_source_records(
             if len(seen_paths) == 10:
                 return records
     return records
-
-
-def _referenced_records_context(records: list[dict]) -> str:
-    if not records:
-        return "（本周期没有可读取的显式引用来源）"
-    return "\n\n".join(
-        f"[{record['source_id']}] {record['date']} {record['time']}\n{record['text']}"
-        for record in records
-    )
-
-
-def _referenced_source_context(
-    logs: list[tuple[str, str]], max_characters: int = 30000
-) -> str:
-    """读取本周期标准引用指向的日记；拒绝日记目录以外的路径。"""
-    return _referenced_records_context(
-        _referenced_source_records(logs, max_characters=max_characters)
-    )
 
 
 def _recent_summary_context(
@@ -175,7 +157,12 @@ def _monthly_supporting_reports(
             report_end = datetime.date.fromisoformat(match.group(2))
         except ValueError:
             continue
-        if report_start < start or report_end > end:
+        if (
+            report_start.weekday() != 0
+            or report_end != report_start + datetime.timedelta(days=6)
+            or report_start < start
+            or report_end > end
+        ):
             continue
         period = (report_start, report_end)
         previous = candidates.get(period)
@@ -184,10 +171,12 @@ def _monthly_supporting_reports(
 
     sections = []
     size = 0
-    for path in (candidates[period] for period in sorted(candidates)):
+    for period in sorted(candidates):
+        report_start, report_end = period
+        path = candidates[period]
         try:
             content = path.read_text(encoding="utf-8")
-        except OSError:
+        except (OSError, UnicodeError):
             continue
         retrospective_match = re.search(
             r"^## 一、整理与回顾\s*\n(.*?)(?=^## 二、领域探索与研究\s*$|\Z)",
@@ -199,7 +188,10 @@ def _monthly_supporting_reports(
         retrospective_text = retrospective_match.group(1).strip()
         if not retrospective_text:
             continue
-        section = f"### {path.name}\n{retrospective_text[:12000]}"
+        section = (
+            f"### {report_start:%Y-%m-%d} 至 {report_end:%Y-%m-%d}\n"
+            f"{retrospective_text[:12000]}"
+        )
         if size + len(section) > max_characters:
             break
         sections.append(section)
