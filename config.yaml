@@ -24,6 +24,7 @@ current_model: "deepseek-v4-flash"
 # Agent 修订由确定性校验失败和 Reviewer 拒绝共享；JSON 无法解析或 API 失败不修订。
 retry:
   agent_revision_limit: 1                    # 只能为 0 或 1；同一语义项最多修订一次
+  daily_summary_retry_limit: 2               # 只能为 0..2；日总结格式无效时的修订次数
   empty_response_retry_limit: 1              # 只能为 0 或 1；stop 但正文为空时最多补答一次
   transient_http_retry_limit: 2              # 连接、超时、HTTP 408/5xx 最多重试次数
   transient_http_backoff_seconds: 1          # HTTP 重试的初始等待秒数，后续指数增加

@@ -135,6 +135,70 @@ class AnalysisWorkflowTests(unittest.TestCase):
         self.assertIn("<summary>\n测试总结\n</summary>", content)
         self.assertIn("我开始重视记录是否可以验证", content)
 
+    def test_summary_removes_one_outer_wrapper_and_leading_heading(self):
+        diary = self.write_diary("2026-07-14")
+        wrapped = "```markdown\n<summary>\n# 日记总结\n有效正文\n</summary>\n```"
+        with patch.object(
+            orchestrator, "call_ai", return_value=AIResponse(wrapped, True)
+        ) as call_model:
+            summary, success = orchestrator.summarize_diary(
+                "2026-07-14", {"name": "mock"}
+            )
+
+        self.assertTrue(success)
+        self.assertEqual("有效正文", summary)
+        self.assertIn("<summary>\n有效正文\n</summary>", diary.read_text(encoding="utf-8"))
+        self.assertEqual(1, call_model.call_count)
+
+    def test_summary_format_error_gets_configured_bounded_revision(self):
+        diary = self.write_diary("2026-07-14")
+        responses = iter(
+            [
+                AIResponse("正文\n## 不应保留的小节\n内容", True),
+                AIResponse("修订后的连续正文", True),
+            ]
+        )
+        prompts = []
+
+        def reply(prompt, *_args, **_kwargs):
+            prompts.append(prompt)
+            return next(responses)
+
+        with patch.dict(
+            settings.CONFIG, {"retry": {"daily_summary_retry_limit": 1}}
+        ), patch.object(orchestrator, "call_ai", side_effect=reply):
+            summary, success = orchestrator.summarize_diary(
+                "2026-07-14", {"name": "mock"}
+            )
+
+        self.assertTrue(success)
+        self.assertEqual("修订后的连续正文", summary)
+        self.assertIn("中控格式修正", prompts[1])
+        self.assertIn("正文内标题", prompts[1])
+        self.assertIn(
+            "<summary>\n修订后的连续正文\n</summary>",
+            diary.read_text(encoding="utf-8"),
+        )
+
+    def test_summary_rejects_json_after_retry_limit(self):
+        diary = self.write_diary("2026-07-14")
+        original = diary.read_text(encoding="utf-8")
+        with patch.dict(
+            settings.CONFIG, {"retry": {"daily_summary_retry_limit": 0}}
+        ), patch.object(
+            orchestrator,
+            "call_ai",
+            return_value=AIResponse('{"summary":"正文"}', True),
+        ) as call_model:
+            message, success = orchestrator.summarize_diary(
+                "2026-07-14", {"name": "mock"}
+            )
+
+        self.assertFalse(success)
+        self.assertIn("输出了 JSON", message)
+        self.assertEqual(original, diary.read_text(encoding="utf-8"))
+        self.assertEqual(1, call_model.call_count)
+
     def test_summary_does_not_write_when_diary_changes_during_model_call(self):
         diary = self.write_diary("2026-07-14")
 
@@ -1516,6 +1580,27 @@ class AnalysisWorkflowTests(unittest.TestCase):
             )
 
         self.assertNotEqual(first, second)
+
+    def test_failure_signature_changes_with_implementation_version(self):
+        now = datetime.datetime(2026, 7, 17, 12, 0)
+        target = {"start": "2026-07-16", "end": "2026-07-16"}
+        model = {
+            "name": "mock",
+            "api_url": "https://example.test/v1",
+            "api_key": "configured",
+        }
+        with patch.object(automation, "_automation_model", return_value=model):
+            current = automation._content_failure_key(
+                "daily_summary", now, target=target
+            )
+        with patch.object(
+            automation, "_automation_model", return_value=model
+        ), patch.object(automation, "_FAILURE_SIGNATURE_VERSION", 2):
+            upgraded = automation._content_failure_key(
+                "daily_summary", now, target=target
+            )
+
+        self.assertNotEqual(current, upgraded)
 
     def test_existing_artifact_clears_stale_blocked_error(self):
         state = {

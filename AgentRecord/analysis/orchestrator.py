@@ -13,7 +13,7 @@ from pathlib import Path
 
 from .. import journal, settings
 from ..agents import researcher, research_planner, retrospective, reviewer
-from ..agents.base import AgentPipelineError, invoke_agent
+from ..agents.base import AgentPipelineError, invoke_agent, is_json_container
 from ..ai_client import (
     CONFIG_ERROR_MARKER,
     call_ai,
@@ -66,6 +66,43 @@ class UsageAccumulator:
         return dict(self.usage)
 
 
+def _normalize_daily_summary(value: object) -> tuple[str, list[str]]:
+    """Remove harmless outer presentation wrappers, then validate the body."""
+    if not isinstance(value, str):
+        return "", ["总结不是文本"]
+    summary = value.strip()
+    fenced = re.fullmatch(
+        r"```(?:markdown|md|text)?\s*\n?(.*?)\n?```",
+        summary,
+        re.DOTALL | re.IGNORECASE,
+    )
+    if fenced:
+        summary = fenced.group(1).strip()
+    wrapped = re.fullmatch(
+        r"<summary>\s*(.*?)\s*</summary>",
+        summary,
+        re.DOTALL | re.IGNORECASE,
+    )
+    if wrapped:
+        summary = wrapped.group(1).strip()
+    lines = summary.splitlines()
+    if lines and re.fullmatch(r"\s{0,3}#{1,6}\s+.+", lines[0]):
+        summary = "\n".join(lines[1:]).strip()
+
+    errors = []
+    if not summary or summary == "(AI 未给出最终回答)":
+        errors.append("总结为空")
+    if is_json_container(summary):
+        errors.append("总结输出了 JSON")
+    if "```" in summary:
+        errors.append("总结包含代码围栏")
+    if re.search(r"</?summary>", summary, re.IGNORECASE):
+        errors.append("总结包含非外层 summary 标签")
+    if re.search(r"(?m)^\s{0,3}#{1,6}\s+", summary):
+        errors.append("总结包含正文内标题")
+    return summary, errors
+
+
 def summarize_diary(date: str, model_config: settings.ModelDict) -> tuple[str, bool]:
     """Generate and safely store one non-thinking daily summary."""
     file_path = settings.DIARY_DIR / f"{date}.md"
@@ -84,24 +121,43 @@ def summarize_diary(date: str, model_config: settings.ModelDict) -> tuple[str, b
 
 【{date} 原始日记】
 {content}"""
-    response = call_ai(
-        prompt,
-        model_config,
-        thinking=False,
-        max_tokens=4096,
-    )
-    summary, success = response
-    if not success:
-        return summary, False
-    summary = summary.strip()
-    if not summary or summary == "(AI 未给出最终回答)":
-        return "日记总结为空。", False
-    if (
-        "```" in summary
-        or re.search(r"</?summary>", summary, re.IGNORECASE)
-        or re.search(r"(?m)^\s{0,3}#{1,6}\s+", summary)
-    ):
-        return "日记总结包含标题、代码围栏或 summary 包装，未写入。", False
+    try:
+        maximum_attempts = settings.retry_policy()["daily_summary_retry_limit"] + 1
+    except RuntimeError as error:
+        return f"{CONFIG_ERROR_MARKER} {error}", False
+    current_prompt = prompt
+    summary = ""
+    for attempt in range(1, maximum_attempts + 1):
+        response = call_ai(
+            current_prompt,
+            model_config,
+            thinking=False,
+            max_tokens=4096,
+        )
+        raw_summary, success = response
+        if not success:
+            return raw_summary, False
+        summary, errors = _normalize_daily_summary(raw_summary)
+        if not errors:
+            break
+        problem = "；".join(errors)
+        logger.warning(
+            "daily_summary_validation_failed date=%s attempt=%s problems=%s",
+            date,
+            attempt,
+            problem,
+        )
+        if attempt == maximum_attempts:
+            return (
+                f"日记总结连续 {maximum_attempts} 次未通过校验: {problem}",
+                False,
+            )
+        current_prompt = (
+            prompt
+            + "\n\n【中控格式修正】\n"
+            + f"上一响应未通过格式校验：{problem}。"
+            + "请重新执行原任务，只输出连续的 Markdown 正文。"
+        )
     result = journal.update_summary_for_date(
         date,
         summary,

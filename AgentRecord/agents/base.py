@@ -36,6 +36,15 @@ class AgentOutputError(AgentPipelineError):
     """The model call succeeded, but no complete minimal JSON object arrived."""
 
 
+def is_json_container(text: str) -> bool:
+    """Return whether the entire text is a JSON object or array."""
+    try:
+        value = json.loads(text.strip())
+    except (json.JSONDecodeError, TypeError):
+        return False
+    return isinstance(value, (dict, list))
+
+
 def _parse_json(text: str) -> dict:
     """Read one JSON object without extracting it from surrounding prose."""
     stripped = text.strip()

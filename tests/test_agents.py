@@ -130,6 +130,8 @@ class AgentModuleTests(unittest.TestCase):
             retrospective.validate(["第一段", "第二段"])
         with self.assertRaisesRegex(AgentPipelineError, "不得自行输出 URL"):
             retrospective.validate("正文 https://example.com")
+        with self.assertRaisesRegex(AgentPipelineError, "不得输出 JSON"):
+            retrospective.validate('{"text":"正文"}')
 
     def test_planner_returns_one_query_or_skip_and_sanitizes_private_data(self):
         self.assertIsNone(
@@ -196,6 +198,10 @@ class AgentModuleTests(unittest.TestCase):
         with self.assertRaisesRegex(AgentPipelineError, "不得自行输出 URL"):
             researcher.validate(
                 {"status": "supported", "text": "请看 https://model.example"}
+            )
+        with self.assertRaisesRegex(AgentPipelineError, "不得嵌套 JSON"):
+            researcher.validate(
+                {"status": "supported", "text": '{"answer":"正文"}'}
             )
 
     def test_url_comparison_does_not_merge_encoded_reserved_paths(self):

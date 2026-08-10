@@ -19,6 +19,7 @@ ModelDict = dict[str, Any]
 
 _RETRY_DEFAULTS = {
     "agent_revision_limit": 1,
+    "daily_summary_retry_limit": 2,
     "empty_response_retry_limit": 1,
     "transient_http_retry_limit": 2,
     "transient_http_backoff_seconds": 1,
@@ -34,6 +35,7 @@ _POSITIVE_RETRY_SETTINGS = {
 }
 _MAXIMUM_RETRY_SETTINGS = {
     "agent_revision_limit": 1,
+    "daily_summary_retry_limit": 2,
     "empty_response_retry_limit": 1,
 }
 
@@ -105,6 +107,11 @@ def retry_policy() -> dict[str, int]:
     configured = CONFIG.get("retry", {})
     if not isinstance(configured, dict):
         raise RuntimeError("config.yaml 中 retry 必须是对象")
+    unknown = sorted(set(configured) - set(_RETRY_DEFAULTS))
+    if unknown:
+        raise RuntimeError(
+            "config.yaml 中 retry 包含不支持的配置项: " + ", ".join(unknown)
+        )
     policy = {}
     for key, default in _RETRY_DEFAULTS.items():
         value = configured.get(key, default)

@@ -2,7 +2,7 @@
 
 import re
 
-from .base import AgentPipelineError, AgentSpec
+from .base import AgentPipelineError, AgentSpec, is_json_container
 
 
 SPEC = AgentSpec(
@@ -25,6 +25,8 @@ def validate(text: str) -> str:
     body = text.strip()
     if not body:
         raise AgentPipelineError("Retrospective 正文为空")
+    if is_json_container(body):
+        raise AgentPipelineError("Retrospective 不得输出 JSON")
     if "```" in body or re.search(r"</?summary>", body, re.IGNORECASE):
         raise AgentPipelineError("Retrospective 不得输出包装标签或代码围栏")
     if re.search(r"(?m)^\s{0,3}#{1,6}\s+", body):

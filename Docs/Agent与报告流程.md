@@ -46,7 +46,7 @@ Planner 的 action/query 不一致、多行问题或字段错误也使用同一�
 
 ### 3.3 纯文本职责
 
-Retrospective 必须返回非空连续正文，不得输出 JSON、标题、列表、URL、代码围栏或 `<summary>`。日记总结同样必须是非空正文，不得带标题、代码围栏或 `<summary>` 包装。
+Retrospective 必须返回非空连续正文，不得输出 JSON、标题、列表、URL、代码围栏或 `<summary>`。日记总结同样必须是非空正文；程序会移除包住整个响应的一层 Markdown 围栏、`<summary>` 和开头标题，仍有格式错误时按 `daily_summary_retry_limit` 有限修订。
 
 ## 4. 四种语义职责
 
@@ -134,7 +134,7 @@ Retrospective 文本 → Reviewer JSON → 必要时一次共享修订
         ↓
 省略旧 summary，V4-Flash non-thinking 生成纯文本
         ↓
-校验非空和无包装
+移除单层外包装，校验非空和正文格式，必要时有限修订
         ↓
 取得日记锁并确认文件哈希未变化
         ↓

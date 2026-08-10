@@ -3,7 +3,7 @@
 import re
 from urllib.parse import parse_qsl, urlsplit
 
-from .base import AgentPipelineError, AgentSpec
+from .base import AgentPipelineError, AgentSpec, is_json_container
 
 
 SPEC = AgentSpec(
@@ -51,6 +51,8 @@ def validate(payload: dict) -> tuple[str, str]:
         raise AgentPipelineError("Researcher status 无效")
     if not body:
         raise AgentPipelineError("Researcher 正文为空")
+    if is_json_container(body):
+        raise AgentPipelineError("Researcher 正文不得嵌套 JSON")
     if re.search(r"(?m)^\s{0,3}#{1,6}\s+", body):
         raise AgentPipelineError("Researcher 不得自行输出标题")
     if re.search(r"(?m)^\s*(?:[-*+]\s+|\d+[.)、]\s+)", body):

@@ -37,6 +37,7 @@ from .orchestrator import (
 logger = logging.getLogger(__name__)
 
 
+_FAILURE_SIGNATURE_VERSION = 1
 _AUTOMATION_TASK_ORDER = (
     "daily_summary",
     "weekly_report",
@@ -214,6 +215,7 @@ def _content_failure_key(
         model_signature["api_key_digest"] = _secret_digest(model.get("api_key"))
         target = target or _default_task_target(task, now)
         payload: dict = {
+            "failure_signature_version": _FAILURE_SIGNATURE_VERSION,
             "task": task,
             "model": model_signature,
             "retry": settings.retry_policy(),
