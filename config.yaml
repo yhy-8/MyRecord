@@ -33,7 +33,7 @@ retry:
 
 # 第三方搜索：周报探索板块必需，用于审计固定查询与来源
 third_search:
-  enabled: false               # 全局开关
+  enabled: True               # 全局开关
   api_url: "https://api.bocha.cn/v1/web-search"
   api_key: ""
   count: 10                    # 单次搜索最多返回 10 条，避免低相关结果挤占上下文
