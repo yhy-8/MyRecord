@@ -1,11 +1,11 @@
-name: Build Executables
+name: Build Executable
 
 on:
   push:
   workflow_dispatch:
 
 jobs:
-  build-windows:
+  build-client-windows:
     runs-on: windows-latest
     env:
       PYTHONUTF8: "1"
@@ -25,22 +25,25 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install -r requirements.txt
+          pip install -r client/requirements.txt
           pip install pyinstaller
 
       - name: Run tests
         timeout-minutes: 5
         run: python -m unittest discover -s tests -v
 
-      - name: Build executable
+      # 新的两端架构：client/ 是唯一打包目标（服务端走 systemd，不打 exe）。
+      # 入口取 client/__main__.py（等价 `python -m client`）；把 client/config.yaml 一并打进包。
+      - name: Build client executable
         run: |
-          pyinstaller --onefile --clean --name AgentRecord --hidden-import=yaml --exclude-module termios --exclude-module tty main.py
-          pyinstaller --onefile --clean --noconsole --name AgentRecordBackground --hidden-import=yaml --exclude-module termios --exclude-module tty main.py
-          Copy-Item config.yaml dist\config.yaml
+          pyinstaller --onefile --clean --name AgentRecord --paths . `
+            --hidden-import=yaml --exclude-module termios --exclude-module tty `
+            --add-data "client/config.yaml;client" client/__main__.py
+          Copy-Item client\config.yaml dist\config.yaml
           dir dist\
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: AgentRecord-windows
+          name: AgentRecord-windows-client
           path: dist/

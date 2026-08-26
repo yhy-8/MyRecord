@@ -1,14 +1,14 @@
 import unittest
 
-from AgentRecord.agents import (
+from server.ai.agents import (
     AGENTS,
     researcher,
     research_planner,
     retrospective,
     reviewer,
 )
-from AgentRecord.agents.base import AgentPipelineError, _prompt, invoke_agent
-from AgentRecord.ai_client import AIResponse
+from server.ai.agents.base import AgentPipelineError, _prompt, invoke_agent
+from server.ai.ai_client import AIResponse
 
 
 class AgentModuleTests(unittest.TestCase):

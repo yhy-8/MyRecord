@@ -3,7 +3,7 @@
 import unittest
 from unittest.mock import patch
 
-from AgentRecord import ai_client, settings
+from server.ai import ai_client, settings
 
 
 class FakeResponse:
@@ -40,7 +40,7 @@ class JournalAITests(unittest.TestCase):
         else:
             settings.CONFIG["third_search"] = self.original_third_search
 
-    @patch("AgentRecord.ai_client.requests.post")
+    @patch("server.ai.ai_client.requests.post")
     def test_returns_complete_openai_compatible_response(self, post):
         post.return_value = FakeResponse(
             {
@@ -71,7 +71,7 @@ class JournalAITests(unittest.TestCase):
         self.assertEqual(80, response.telemetry["usage"]["cached_tokens"])
         self.assertEqual(1, response.telemetry["http_attempts"])
 
-    @patch("AgentRecord.ai_client.requests.post")
+    @patch("server.ai.ai_client.requests.post")
     def test_reads_deepseek_cache_hit_and_miss_usage(self, post):
         post.return_value = FakeResponse(
             {
@@ -93,7 +93,7 @@ class JournalAITests(unittest.TestCase):
         self.assertEqual(70, response.telemetry["usage"]["cached_tokens"])
         self.assertEqual(30, response.telemetry["usage"]["cache_miss_tokens"])
 
-    @patch("AgentRecord.ai_client.requests.post")
+    @patch("server.ai.ai_client.requests.post")
     def test_malformed_usage_does_not_discard_valid_content(self, post):
         post.return_value = FakeResponse(
             {
@@ -113,7 +113,7 @@ class JournalAITests(unittest.TestCase):
         self.assertTrue(response.success)
         self.assertEqual(0, response.telemetry["usage"]["prompt_tokens"])
 
-    @patch("AgentRecord.ai_client._post_with_transient_retry")
+    @patch("server.ai.ai_client._post_with_transient_retry")
     def test_third_party_search_caps_noisy_result_count(self, request):
         settings.CONFIG["third_search"] = {
             "enabled": True,
@@ -145,7 +145,7 @@ class JournalAITests(unittest.TestCase):
         self.assertEqual(10, len(result.evidence))
         self.assertEqual(10, request.call_args.kwargs["json"]["count"])
 
-    @patch("AgentRecord.ai_client._post_with_transient_retry")
+    @patch("server.ai.ai_client._post_with_transient_retry")
     def test_malformed_search_response_is_a_protocol_error(self, request):
         settings.CONFIG["third_search"] = {
             "enabled": True,
@@ -161,7 +161,7 @@ class JournalAITests(unittest.TestCase):
         self.assertEqual(0, result.result_count)
         self.assertIn("搜索协议错误", error)
 
-    @patch("AgentRecord.ai_client._post_with_transient_retry")
+    @patch("server.ai.ai_client._post_with_transient_retry")
     def test_non_success_search_status_is_not_an_empty_result(self, request):
         settings.CONFIG["third_search"] = {
             "enabled": True,
@@ -177,7 +177,7 @@ class JournalAITests(unittest.TestCase):
         self.assertEqual(0, result.result_count)
         self.assertIn("接口异常", error)
 
-    @patch("AgentRecord.ai_client.requests.post")
+    @patch("server.ai.ai_client.requests.post")
     def test_structured_output_uses_configured_json_mode(self, post):
         post.return_value = FakeResponse(
             {"choices": [{"message": {"role": "assistant", "content": "{}"}}]}
@@ -191,7 +191,7 @@ class JournalAITests(unittest.TestCase):
         self.assertEqual({"type": "json_object"}, payload["response_format"])
         self.assertEqual(100000, payload["max_tokens"])
 
-    @patch("AgentRecord.ai_client.requests.post")
+    @patch("server.ai.ai_client.requests.post")
     def test_deepseek_task_controls_thinking_effort_and_budget(self, post):
         post.return_value = FakeResponse(
             {"choices": [{"message": {"role": "assistant", "content": "正文"}}]}
@@ -210,7 +210,7 @@ class JournalAITests(unittest.TestCase):
         self.assertEqual(65536, payload["max_tokens"])
         self.assertNotIn("temperature", payload)
 
-    @patch("AgentRecord.ai_client.requests.post")
+    @patch("server.ai.ai_client.requests.post")
     def test_deepseek_non_thinking_task_is_explicit(self, post):
         post.return_value = FakeResponse(
             {"choices": [{"message": {"role": "assistant", "content": "正文"}}]}
@@ -229,7 +229,7 @@ class JournalAITests(unittest.TestCase):
         self.assertEqual(0.2, payload["temperature"])
         self.assertEqual(4096, payload["max_tokens"])
 
-    @patch("AgentRecord.ai_client.requests.post")
+    @patch("server.ai.ai_client.requests.post")
     def test_output_length_stop_is_classified_as_truncation(self, post):
         post.return_value = FakeResponse(
             {
@@ -248,7 +248,7 @@ class JournalAITests(unittest.TestCase):
         self.assertIn(ai_client.OUTPUT_TRUNCATED_MARKER, response.text)
         self.assertEqual(["length"], response.telemetry["finish_reasons"])
 
-    @patch("AgentRecord.ai_client.requests.post")
+    @patch("server.ai.ai_client.requests.post")
     def test_empty_stop_response_gets_one_final_answer_retry(self, post):
         post.side_effect = [
             FakeResponse(
@@ -290,7 +290,7 @@ class JournalAITests(unittest.TestCase):
         self.assertEqual("user", retry_message["role"])
         self.assertIn("没有返回最终正文", retry_message["content"])
 
-    @patch("AgentRecord.ai_client.requests.post")
+    @patch("server.ai.ai_client.requests.post")
     def test_repeated_empty_stop_response_still_fails_boundedly(self, post):
         post.return_value = FakeResponse(
             {
@@ -310,7 +310,7 @@ class JournalAITests(unittest.TestCase):
         self.assertEqual(2, post.call_count)
         self.assertEqual(1, response.telemetry["empty_content_retries"])
 
-    @patch("AgentRecord.ai_client.requests.post")
+    @patch("server.ai.ai_client.requests.post")
     def test_filtered_and_resource_exhausted_finishes_are_failures(self, post):
         post.side_effect = [
             FakeResponse(
@@ -395,8 +395,8 @@ class JournalAITests(unittest.TestCase):
         self.assertFalse(response.success)
         self.assertTrue(ai_client.is_config_failure(response.text))
 
-    @patch("AgentRecord.ai_client.time.sleep")
-    @patch("AgentRecord.ai_client.requests.post")
+    @patch("server.ai.ai_client.time.sleep")
+    @patch("server.ai.ai_client.requests.post")
     def test_transient_connection_errors_use_bounded_retry(self, post, sleep):
         expected = FakeResponse({"ok": True})
         post.side_effect = [
@@ -411,8 +411,8 @@ class JournalAITests(unittest.TestCase):
         self.assertEqual(3, post.call_count)
         self.assertEqual([1, 2], [call.args[0] for call in sleep.call_args_list])
 
-    @patch("AgentRecord.ai_client.time.sleep")
-    @patch("AgentRecord.ai_client.requests.post")
+    @patch("server.ai.ai_client.time.sleep")
+    @patch("server.ai.ai_client.requests.post")
     def test_transient_http_retry_count_and_backoff_are_configurable(
         self, post, sleep
     ):
@@ -436,7 +436,7 @@ class JournalAITests(unittest.TestCase):
         self.assertEqual(2, post.call_count)
         sleep.assert_called_once_with(3)
 
-    @patch("AgentRecord.ai_client.requests.post")
+    @patch("server.ai.ai_client.requests.post")
     def test_empty_response_retry_can_be_disabled(self, post):
         post.return_value = FakeResponse(
             {
@@ -458,8 +458,8 @@ class JournalAITests(unittest.TestCase):
         self.assertFalse(response.success)
         self.assertEqual(1, post.call_count)
 
-    @patch("AgentRecord.ai_client.time.sleep")
-    @patch("AgentRecord.ai_client.requests.post")
+    @patch("server.ai.ai_client.time.sleep")
+    @patch("server.ai.ai_client.requests.post")
     def test_transient_server_errors_use_bounded_retry(self, post, sleep):
         unavailable = FakeResponse({})
         unavailable.status_code = 503
@@ -472,8 +472,8 @@ class JournalAITests(unittest.TestCase):
         self.assertEqual(3, post.call_count)
         self.assertEqual([1, 2], [call.args[0] for call in sleep.call_args_list])
 
-    @patch("AgentRecord.ai_client.time.sleep")
-    @patch("AgentRecord.ai_client.requests.post")
+    @patch("server.ai.ai_client.time.sleep")
+    @patch("server.ai.ai_client.requests.post")
     def test_exhausted_connection_errors_are_marked_as_network_failure(
         self, post, sleep
     ):
@@ -486,8 +486,8 @@ class JournalAITests(unittest.TestCase):
         self.assertEqual(3, post.call_count)
         self.assertEqual([1, 2], [call.args[0] for call in sleep.call_args_list])
 
-    @patch("AgentRecord.ai_client.time.sleep")
-    @patch("AgentRecord.ai_client.requests.post")
+    @patch("server.ai.ai_client.time.sleep")
+    @patch("server.ai.ai_client.requests.post")
     def test_rate_limit_and_auth_errors_are_classified_separately(self, post, sleep):
         rate_limited = FakeResponse({})
         rate_limited.status_code = 429

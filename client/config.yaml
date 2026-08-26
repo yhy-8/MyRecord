@@ -1,0 +1,11 @@
+# ================= AgentRecord 客户端配置 =================
+# 客户端只存：服务器地址 + 本地数据目录；凭据（device_id/token）在 credentials.json。
+# 客户端本地不保存模型密钥，不做本地 AI。AI 全部在服务端。
+
+client:
+  server_url: "http://localhost:8765"   # 服务端中枢地址
+  records_dir: "./Records"               # 本地日记存储（渲染）
+  analysis_dir: "./AnalysisReports"       # 本地报告完整副本（云端同步）
+  log_dir: "./Log"                       # 本地诊断日志
+  poll_interval_seconds: 60              # 本地向服务端询问/对账的间隔
+  longpoll_timeout_seconds: 25           # 长轮询单次挂起秒数（扇出即拉取）

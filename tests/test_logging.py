@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from AgentRecord.logging_config import configure_logging
+from server.ai.logging_config import configure_logging
 
 
 class LoggingTests(unittest.TestCase):

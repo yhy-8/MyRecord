@@ -1,0 +1,52 @@
+# ================= AgentRecord 服务端配置 =================
+# 服务端中枢：监听 / 数据目录 + 云端 AI（模型、搜索、重试、自动任务）。
+# 模型密钥只在这里（服务端），绝不进入数据空间或日志。
+
+server:
+  host: "0.0.0.0"     # 监听地址
+  port: 8765          # 监听端口
+  data_dir: "./data"  # 服务端数据空间（records/analysis/automation 状态/垃圾桶）
+
+# ---- 云端 AI（沿用原单机分析的模型配置）----
+models:
+  - name: deepseek-v4-pro
+    model_id: deepseek-v4-pro
+    json_mode: true
+    api_url: https://api.deepseek.com/chat/completions
+    api_key:
+
+  - name: deepseek-v4-flash
+    model_id: deepseek-v4-flash
+    json_mode: true
+    api_url: https://api.deepseek.com/chat/completions
+    api_key:
+
+current_model: "deepseek-v4-pro"
+
+retry:
+  agent_revision_limit: 1
+  daily_summary_retry_limit: 2
+  empty_response_retry_limit: 1
+  transient_http_retry_limit: 2
+  transient_http_backoff_seconds: 1
+  automation_content_failure_limit: 2
+  automation_network_retry_minutes: 5
+  automation_content_retry_interval_minutes: 60
+
+third_search:
+  enabled: True
+  api_url: "https://api.bocha.cn/v1/web-search"
+  api_key: ""
+  count: 10
+  timeout: 30
+
+automation:
+  enabled: true
+  daily_summary: true
+  weekly_report: true
+  monthly_report: true
+
+# 数据目录（相对本配置文件所在目录 = server/）
+diary_dir: "./data/Records"
+analysis_dir: "./data/AnalysisReports"
+log_dir: "./data/Log"

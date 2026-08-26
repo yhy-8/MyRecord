@@ -5,10 +5,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from AgentRecord import settings
-from AgentRecord.ai_client import AIResponse, ToolResult
-from AgentRecord.analysis import automation, context, orchestrator
-from AgentRecord.agents.base import AgentPipelineError
+from server.ai import settings
+from server.ai.ai_client import AIResponse, ToolResult
+from server.ai.analysis import automation, context, orchestrator
+from server.ai.agents.base import AgentPipelineError
 
 
 class AnalysisWorkflowTests(unittest.TestCase):

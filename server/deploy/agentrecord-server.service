@@ -1,0 +1,23 @@
+# AgentRecord 服务端中枢 systemd 单元（裸机 root 运行，明文存储）。
+# 安装（在独立 server 工程内）：
+#   sudo cp server/deploy/agentrecord-server.service /etc/systemd/system/
+#   修改 ExecStart 的解释器路径与 WorkingDirectory 为独立 server 工程绝对路径
+#   sudo systemctl daemon-reload && sudo systemctl enable --now agentrecord-server
+
+[Unit]
+Description=AgentRecord server hub (sync + AI reports + fanout)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 按实际解释器与工程路径修改；WorkingDirectory 应指向独立 server/ 工程根
+#（即含 server/ 子目录的父目录，使 `python -m server.main run` 可解析）。
+ExecStart=/home/a/miniconda3/envs/aiagent/bin/python -m server.main run
+WorkingDirectory=/mnt/d盘/工具/编程/已完成编程/AgentRecord
+Restart=on-failure
+RestartSec=3
+User=root
+
+[Install]
+WantedBy=multi-user.target

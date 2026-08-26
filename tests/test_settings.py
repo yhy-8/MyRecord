@@ -3,11 +3,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from AgentRecord import settings
+from server.ai import settings
 
 
 class ModelSettingsTests(unittest.TestCase):
-    def test_source_config_remains_at_project_root(self):
+    def test_source_config_remains_at_server_root(self):
         self.assertEqual(
             Path(settings.__file__).resolve().parent.parent / "config.yaml",
             settings._get_config_path(),
@@ -21,9 +21,6 @@ class ModelSettingsTests(unittest.TestCase):
                 settings, "_get_config_path", return_value=config_path
             ), self.assertRaisesRegex(RuntimeError, "顶层必须是对象"):
                 settings._load_config()
-
-    def test_log_directory_uses_config_relative_default(self):
-        self.assertEqual(settings.CONFIG_DIR / "Log", settings.LOG_DIR)
 
     def test_selected_model_is_persisted_without_rewriting_config(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -42,7 +39,9 @@ class ModelSettingsTests(unittest.TestCase):
                 "models": [{"name": "first"}, {"name": "second"}],
             }
             try:
-                with patch("AgentRecord.settings._get_config_path", return_value=config_path):
+                with patch.object(
+                    settings, "_get_config_path", return_value=config_path
+                ):
                     selected = settings.ModelConfig.select("second")
             finally:
                 settings.CONFIG = original_config
@@ -50,7 +49,7 @@ class ModelSettingsTests(unittest.TestCase):
             self.assertEqual("second", selected["name"])
             content = config_path.read_text(encoding="utf-8")
             self.assertIn("# 保留这条注释", content)
-            self.assertIn("current_model: \"second\"", content)
+            self.assertIn('current_model: "second"', content)
 
     def test_deepseek_json_mode_must_be_explicit(self):
         raw_model = {
