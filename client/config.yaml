@@ -7,5 +7,4 @@ client:
   records_dir: "./Records"               # 本地日记存储（渲染）
   analysis_dir: "./AnalysisReports"       # 本地报告完整副本（云端同步）
   log_dir: "./Log"                       # 本地诊断日志
-  poll_interval_seconds: 60              # 本地向服务端询问/对账的间隔
   longpoll_timeout_seconds: 25           # 长轮询单次挂起秒数（扇出即拉取）

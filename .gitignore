@@ -5,3 +5,8 @@ __pycache__/
 client/Records/
 AnalysisReports/
 Log/
+
+# Coverage measurement artifacts.
+.coverage
+.coverage.*
+htmlcov/
