@@ -36,7 +36,6 @@ def _client_settings(records_dir: Path, analysis_dir: Path) -> dict:
             "records_dir": records_dir,
             "analysis_dir": analysis_dir,
             "log_dir": records_dir.parent / "Log",
-            "poll_interval_seconds": 60,
             "longpoll_timeout_seconds": 25,
         }
     }
@@ -64,8 +63,12 @@ class ClientSyncE2ETestBase(unittest.TestCase):
         self.httpd.shutdown()
         self.httpd.server_close()
 
-    def _new_client(self, device, token, root: Path):
-        """构造一个指向独立临时本地目录、使用真实令牌的 SyncClient。"""
+    def _new_client(self, device, token, root: Path, server_url: str | None = None):
+        """构造一个指向独立临时本地目录、使用真实令牌的 SyncClient。
+
+        server_url 缺省指向 setUp 里启动的真实服务端；传入一个无人监听的端口
+        即可模拟离线场景（离线队列会保留，等上线后冲刷）。
+        """
         records = root / "Records"
         analysis = root / "AnalysisReports"
         state = root / "state"
@@ -86,7 +89,7 @@ class ClientSyncE2ETestBase(unittest.TestCase):
         ]
         for p in patches:
             p.start()
-        return SyncClient(server_url=self.base), patches
+        return SyncClient(server_url=server_url or self.base), patches
 
     def _stop(self, patches) -> None:
         for p in patches:
@@ -108,16 +111,14 @@ class WritePushReconcileTest(ClientSyncE2ETestBase):
 
     def test_push_and_reconcile_back_to_local(self):
         client_a, pa = self._new_client(self.device_a, self.token_a, _tmp_dir("cli-a-"))
-        client_b, pb = self._new_client(self.device_b, self.token_b, _tmp_dir("cli-b-"))
         try:
-            client_b.pull()  # 与 server_hub 同样的初始对账
+            client_a.pull()  # 与服务端做初始对账
             client_a.push_new(self._entry(self.device_a, 1, 1717200000, "第一条记录"))
             day = journal.day_path("2024-06-01").read_text(encoding="utf-8")
             self.assertIn("第一条记录", day)
             self.assertIn(f"{self.device_a}-1", day)
         finally:
             self._stop(pa)
-            self._stop(pb)
 
 
 class FanoutBetweenDevicesTest(ClientSyncE2ETestBase):
@@ -170,6 +171,98 @@ class TombstoneAntiResurrectionTest(ClientSyncE2ETestBase):
         finally:
             self._stop(pa)
             self._stop(pb)
+
+
+class OfflineQueueTest(ClientSyncE2ETestBase):
+    """离线时写入先落本地并进 outbox；上线后 send_pending 冲刷到服务端。"""
+
+    def test_offline_push_queues_then_flushes_when_online(self):
+        root = _tmp_dir("cli-off-")
+        entry = self._entry(self.device_a, 1, 1717200000, "离线写入")
+
+        # 模拟 CLI 写记录：先本地落盘，再进离线队列（service unreachable → 保留）
+        offline, po = self._new_client(
+            self.device_a, self.token_a, root, server_url="http://127.0.0.1:1"
+        )
+        try:
+            journal.append_record(entry)  # 本地写入永不回滚
+            offline.push_new(entry)  # 进 outbox；推送失败 → 保留待续推
+            day = journal.day_path("2024-06-01").read_text(encoding="utf-8")
+            self.assertIn("离线写入", day)
+            outbox_text = (root / "state" / "outbox.json").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn(self.device_a, outbox_text)
+            self.assertIn("离线写入", outbox_text)
+        finally:
+            self._stop(po)
+
+        # 上线：同一本地目录（共用同一 outbox），指向真实服务端后冲刷
+        online, pa = self._new_client(
+            self.device_b, self.token_b, root, server_url=self.base
+        )
+        try:
+            online.send_pending()
+            status = online.status()
+            self.assertEqual(status["entry_count"], 1)
+            self.assertNotIn(
+                self.device_a,
+                (root / "state" / "outbox.json").read_text(encoding="utf-8"),
+            )
+            day = journal.day_path("2024-06-01").read_text(encoding="utf-8")
+            self.assertIn("离线写入", day)
+        finally:
+            self._stop(pa)
+
+
+class FullSyncTest(ClientSyncE2ETestBase):
+    """启动 / 手动 /sync 的完整同步：冲刷离线队列 + 拉取对账 + 同步报告。"""
+
+    def test_full_sync_flushes_outbox_pulls_and_syncs_reports(self):
+        root = _tmp_dir("cli-full-")
+        # 写一条并离线（无人监听端口），进离线队列
+        offline, po = self._new_client(
+            self.device_a, self.token_a, root, server_url="http://127.0.0.1:1"
+        )
+        try:
+            journal.append_record(self._entry(self.device_a, 1, 1717200000, "离线待推送"))
+            offline.push_new(self._entry(self.device_a, 1, 1717200000, "离线待推送"))
+            self.assertIn(
+                self.device_a,
+                (root / "state" / "outbox.json").read_text(encoding="utf-8"),
+            )
+        finally:
+            self._stop(po)
+
+        # 服务端暴露一个报告；线上客户端上线后 full_sync 一并处理
+        samples = {"Weekly/2024-05-27_to_2024-06-02_auto.md": "# 周报\n"}
+        self.httpd.list_reports = lambda kind: list(samples)
+        self.httpd.read_report = lambda rel: samples.get(rel)
+
+        online, pa = self._new_client(
+            self.device_b, self.token_b, root, server_url=self.base
+        )
+        try:
+            online.full_sync()
+            # 离线队列被冲刷到服务端
+            status = online.status()
+            self.assertEqual(status["entry_count"], 1)
+            self.assertNotIn(
+                self.device_a,
+                (root / "state" / "outbox.json").read_text(encoding="utf-8"),
+            )
+            # 本地日记对账到位
+            day = journal.day_path("2024-06-01").read_text(encoding="utf-8")
+            self.assertIn("离线待推送", day)
+            # 报告同步到本地
+            target = (
+                root / "AnalysisReports" / "Weekly"
+                / "2024-05-27_to_2024-06-02_auto.md"
+            )
+            self.assertTrue(target.exists())
+            self.assertIn("周报", target.read_text(encoding="utf-8"))
+        finally:
+            self._stop(pa)
 
 
 class ReportSyncTest(ClientSyncE2ETestBase):

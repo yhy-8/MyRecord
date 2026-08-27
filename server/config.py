@@ -24,6 +24,7 @@ def _merge(base: dict, extra: dict) -> dict:
 def load() -> dict:
     path = config_path()
     server = {}
+    value = {}
     if path.exists():
         try:
             value = yaml.safe_load(path.read_text(encoding="utf-8"))

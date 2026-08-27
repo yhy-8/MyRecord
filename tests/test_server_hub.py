@@ -1,5 +1,6 @@
 """P1 服务端 hub 测试：鉴权、存储合并、tombstone、渲染、HTTP 同步。"""
 
+import datetime
 import tempfile
 import threading
 import time
@@ -107,6 +108,153 @@ class RenderParserTest(unittest.TestCase):
         parsed = parse_day_file("2024-01-01", legacy)
         self.assertEqual(len(parsed["entries"]), 2)
         self.assertTrue(parsed["entries"][0]["entry_id"].startswith("legacy-"))
+
+
+class StoreDeviceTests(unittest.TestCase):
+    """设备注册、令牌校验/轮换/撤销、快照与损坏恢复。"""
+
+    def test_device_name_uniqueness_and_verify(self):
+        data = _tmp_data_dir() / "state.json"
+        store = Store(data)
+        token1 = auth.new_token()
+        token2 = auth.new_token()
+        d1 = store.register_device("phone", token1)
+        d2 = store.register_device("phone", token2)
+        self.assertEqual("phone", d1)
+        self.assertEqual("phone-2", d2)
+        self.assertTrue(store.verify_device("phone", token1))
+        self.assertFalse(store.verify_device("phone", token2))
+        self.assertTrue(store.verify_device("phone-2", token2))
+
+    def test_rotate_token(self):
+        data = _tmp_data_dir() / "state.json"
+        store = Store(data)
+        token1 = auth.new_token()
+        token2 = auth.new_token()
+        device = store.register_device("dev", token1)
+        self.assertTrue(store.verify_device(device, token1))
+        self.assertTrue(store.rotate_token(device, token2))
+        self.assertFalse(store.verify_device(device, token1))
+        self.assertTrue(store.verify_device(device, token2))
+        self.assertFalse(store.rotate_token("missing", token2))
+
+    def test_revoke_device(self):
+        data = _tmp_data_dir() / "state.json"
+        store = Store(data)
+        token = auth.new_token()
+        device = store.register_device("dev", token)
+        self.assertFalse(store.revoke_device("missing"))
+        self.assertTrue(store.revoke_device(device))
+        self.assertFalse(store.verify_device(device, token))
+        self.assertNotIn(device, store.device_ids())
+
+    def test_device_ids_only_include_active(self):
+        data = _tmp_data_dir() / "state.json"
+        store = Store(data)
+        store.register_device("b", auth.new_token())
+        store.register_device("a", auth.new_token())
+        store.revoke_device("b")
+        ids = store.device_ids()
+        self.assertEqual(["a"], ids)
+
+    def test_snapshot_excludes_token_hashes(self):
+        data = _tmp_data_dir() / "state.json"
+        store = Store(data)
+        store.register_device("dev", auth.new_token())
+        snap = store.snapshot()
+        self.assertIn("active", snap["devices"]["dev"])
+        self.assertNotIn("token_hash", snap["devices"]["dev"])
+
+    def test_load_corrupt_state_recovers_defaults(self):
+        data = _tmp_data_dir()
+        state_file = data / "state.json"
+        state_file.write_text("{not valid json", encoding="utf-8")
+        store = Store(state_file)
+        self.assertEqual(0, store.data["version"])
+        self.assertEqual({}, store.data["entries"])
+        self.assertEqual({}, store.data["devices"])
+
+
+class StoreRenderTest(unittest.TestCase):
+    """store.render_records：Records 桶渲染、垃圾桶渲染与已有 summary 保留。"""
+
+    def _store_with_entries(self, state_file):
+        store = Store(state_file)
+        store.append_entries(
+            "a",
+            [{"entry_id": "a-1", "date": "2024-01-01", "ts": 1, "tag": "", "text": "保留正文"}],
+        )
+        store.append_entries(
+            "b",
+            [{"entry_id": "b-1", "date": "2024-01-01", "ts": 5, "tag": "", "text": "待删除正文"}],
+        )
+        store.tombstone("b-1", "b")
+        return store
+
+    def test_render_records_writes_entries_and_trash(self):
+        data = _tmp_data_dir() / "state.json"
+        store = self._store_with_entries(data)
+        records_dir = data.parent / "Records"
+        trash_dir = data.parent / "Trash"
+
+        store.render_records(records_dir, trash_dir)
+
+        records = (records_dir / "2024-01-01.md").read_text(encoding="utf-8")
+        self.assertIn("保留正文", records)
+        self.assertNotIn("待删除正文", records)  # 已删正文应收进垃圾桶
+        self.assertIn("agentrecord-tombstone", records)
+
+        trash = (trash_dir / "2024-01-01.md").read_text(encoding="utf-8")
+        self.assertIn("待删除正文", trash)
+        self.assertNotIn("保留正文", trash)
+
+    def test_render_preserves_existing_summary(self):
+        data = _tmp_data_dir() / "state.json"
+        store = Store(data)
+        store.append_entries(
+            "a",
+            [{"entry_id": "a-1", "date": "2024-01-01", "ts": 1, "tag": "", "text": "新记录"}],
+        )
+        records_dir = data.parent / "Records"
+        records_dir.mkdir(parents=True, exist_ok=True)
+        (records_dir / "2024-01-01.md").write_text(
+            "# 2024-01-01\n\n<summary>\n已有总结\n</summary>\n\n---\n## 原始记录流\n",
+            encoding="utf-8",
+        )
+
+        store.render_records(records_dir, data.parent / "Trash")
+
+        content = (records_dir / "2024-01-01.md").read_text(encoding="utf-8")
+        self.assertIn("已有总结", content)
+        self.assertIn("新记录", content)
+
+    def test_tombstone_is_idempotent_and_rejects_missing(self):
+        data = _tmp_data_dir() / "state.json"
+        store = Store(data)
+        store.append_entries(
+            "a",
+            [{"entry_id": "a-1", "date": "2024-01-01", "ts": 1, "tag": "", "text": "x"}],
+        )
+        self.assertTrue(store.tombstone("a-1", "a"))
+        self.assertFalse(store.tombstone("a-1", "a"))
+        self.assertFalse(store.tombstone("does-not-exist", "a"))
+
+    def test_append_derives_date_from_timestamp_when_missing(self):
+        data = _tmp_data_dir() / "state.json"
+        store = Store(data)
+        store.append_entries(
+            "a",
+            [{"entry_id": "a-1", "ts": 0, "text": "x"}],
+        )
+        entry = store.data["entries"]["a-1"]
+        self.assertEqual(datetime.date.today().isoformat(), entry["date"])
+
+    def test_append_rejects_missing_entry_id(self):
+        data = _tmp_data_dir() / "state.json"
+        store = Store(data)
+        accepted = store.append_entries("a", [{"text": "no-id"}])
+        self.assertEqual([], accepted)
+        self.assertEqual(0, store.data["version"])
 
 
 class AdminEndpointTest(unittest.TestCase):

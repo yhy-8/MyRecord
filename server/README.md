@@ -1,9 +1,8 @@
 # AgentRecord 服务端（中枢 + 云端 AI）
 
 数据中枢与云端 AI：设备鉴权、条目合并/对账/扇出、垃圾桶、自动任务（日总结、自然周报、
-自然月报）。模型密钥只存这里。日志不保存私密原文。
-
-本目录是**独立可发布的服务器工程**，不依赖 `client/`，可直接拷贝/部署运行。
+自然月报）。模型密钥只存这里。日志不保存私密原文。本目录是**独立可发布的服务器工程**，
+不依赖 `client/`，可直接拷贝/部署运行。
 
 ## 安装与启动
 
@@ -13,7 +12,8 @@ python -m server.main run
 ```
 
 > 入口统一为 `python -m server.main run`（`server/main.py`）。
-> 启动后自带每分钟后台线程按“日总结 → 周报 → 月报”依赖顺序执行自动任务。
+> 启动后自带**每分钟后台线程**按“日总结 → 周报 → 月报”依赖顺序执行自动任务；该线程属
+> 服务端调度，与客户端同步无关。
 
 ## 子命令
 
@@ -26,6 +26,48 @@ python -m server.main token revoke --device 名称   停用设备
 python -m server.main import --records 路径    导入旧版 Records
 python -m server.main render          重渲染当天 Records
 ```
+
+## 角色：与客户端的协作
+
+- **同步**：暴露 `push / pull / longpoll / delete / status / reports` HTTP 接口
+  （见 `hub/server.py`）。客户端以**长连接（长轮询）**挂起在 `longpoll`，服务端有新条目/
+  报告时立即返回（扇出）；客户端只在启动/手动 `/sync` 做完整对账，不会密集轮询。
+- **云端 AI**：自动任务写入 `<summary>` 与周/月报告（`AnalysisReports/`），客户端通过
+  `/api/reports` 拉取本地副本。
+- **数据空间**：`server/data/` 是权威事实源，客户端本地只是对账副本。
+
+## 代码总览（每个文件做什么）
+
+### 入口与配置
+
+| 文件 | 职责 |
+|---|---|
+| `main.py` | 服务端 CLI：`run`（起 hub + AI 自动任务线程）、`token`（设备令牌管理）、`import`（旧数据导入）、`render`（重渲染 Records） |
+| `config.py` / `config.yaml` | 读取服务端配置（监听、模型、搜索、重试、自动任务、数据目录） |
+
+### 同步中枢（hub/）
+
+| 文件 | 职责 |
+|---|---|
+| `hub/server.py` | HTTP 同步服务（stdlib ThreadingHTTPServer）：`/api/sync/push`、`/api/sync/pull`、`/api/sync/longpoll`、`/api/entries/delete`、`/api/status`、`/api/reports`、`/api/admin/*`；Bearer + device_id 鉴权 |
+| `hub/store.py` | 权威条目存储：append-only 合并（按 entry_id 去重）、tombstone、垃圾桶、设备令牌、全局 `version` 同步游标、`wait_for_change`（长轮询等待）、拉取 `pull(version)` |
+| `hub/auth.py` | 设备令牌哈希（scrypt，加盐、常量时间），只存哈希，不落明文 |
+| `hub/parser.py` | 解析每日日记文件为条目列表（兼容新旧 entry 标记） |
+| `hub/render.py` | 日记渲染格式（两端共用）：entry 标记、tombstone 占位、`<summary>` 区域 |
+
+### 云端 AI（ai/）
+
+| 文件 | 职责 |
+|---|---|
+| `ai/settings.py` | 运行配置、目录与模型选择（`current_model` / `models`） |
+| `ai/ai_client.py` | OpenAI 兼容模型请求、HTTP/thinking/JSON 输出、Token 遥测、固定网页搜索、错误分类 |
+| `ai/journal.py` | 原始日记读写与 `<summary>` 区域更新（AI 只能通过这里写日记） |
+| `ai/agents/base.py` | 单 Agent 提示、纯文本/JSON 协议及一次协议重试 |
+| `ai/agents/*.py` | 四种语义职责：`retrospective`（回顾）、`research_planner`（选题）、`researcher`（研究）、`reviewer`（审查） |
+| `ai/analysis/context.py` | 周/月范围、日记解析、引用边界、近期总结、周报回顾提取 |
+| `ai/analysis/orchestrator.py` | 冻结输入、分组、调度、审查、Token 累计、渲染、原子交付报告 |
+| `ai/analysis/automation.py` | 缺失检测、持久队列、前置屏障、重试时间、系统调度安装 |
+| `ai/file_lock.py`、`ai/logging_config.py` | 跨进程互斥、有界诊断日志 |
 
 ## 配置
 

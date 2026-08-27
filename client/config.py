@@ -9,7 +9,6 @@ _DEFAULTS = {
     "records_dir": "./Records",
     "analysis_dir": "./AnalysisReports",
     "log_dir": "./Log",
-    "poll_interval_seconds": 60,
     "longpoll_timeout_seconds": 25,
 }
 

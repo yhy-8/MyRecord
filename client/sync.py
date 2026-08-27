@@ -1,4 +1,8 @@
-"""客户端同步：push（写后即触发）、离线队列、每 1 分钟拉取、长轮询扇出即拉取、在线删除。"""
+"""客户端同步：启动/手动完整同步、写后即 push、离线队列、长连接（长轮询）扇出即拉取、在线删除。
+
+同步模型：不密集轮询云端。启动或 /sync 时做一次完整对账；运行期间保持一条长连接
+（长轮询挂起，服务端有更新即返回并立即应用），每条记录写入即触发 push。
+"""
 
 import json
 import os
@@ -126,6 +130,17 @@ class SyncClient:
             _save_outbox(remaining)
         self._apply_delta(delta)
         return delta
+
+    # ---------- 完整同步（启动 / 手动 /sync） ----------
+
+    def full_sync(self) -> None:
+        """完整同步一次：先冲刷离线队列，再拉取对账，再同步报告。
+
+        用于客户端启动时链接云端、以及手动 /sync 命令。
+        """
+        self.send_pending()
+        self.pull()
+        self.sync_reports()
 
     # ---------- 拉取 / 长轮询 ----------
 
