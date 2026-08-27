@@ -15,6 +15,13 @@ def config_path() -> Path:
     return Path(__file__).resolve().parent / "config.yaml"
 
 
+def _is_absolute_path(p: Path) -> bool:
+    """Absolute as configured: has a drive, or is a POSIX-root path such as
+    '/abs/data' (no drive) which Windows would otherwise treat as relative and
+    re-base onto the config directory.  Such paths are honored unchanged."""
+    return p.is_absolute() or (bool(p.root) and not p.drive)
+
+
 def _merge(base: dict, extra: dict) -> dict:
     result = dict(base)
     result.update(extra or {})
@@ -34,7 +41,8 @@ def load() -> dict:
             server = value["server"]
     merged = _merge(_DEFAULTS, server)
     data_dir = Path(str(merged["data_dir"]))
-    if not data_dir.is_absolute():
-        data_dir = config_path().parent / data_dir
-    merged["data_dir"] = data_dir.resolve()
+    if _is_absolute_path(data_dir):
+        merged["data_dir"] = data_dir
+    else:
+        merged["data_dir"] = (config_path().parent / data_dir).resolve()
     return {"server": merged, "raw": value if isinstance(value, dict) else {}}

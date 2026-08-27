@@ -25,7 +25,7 @@ class ServerConfigTests(unittest.TestCase):
         self.assertEqual("0.0.0.0", server["host"])
         self.assertEqual(8765, server["port"])
         # data_dir 缺省 './data'，应解析为 config 目录下的绝对路径
-        self.assertEqual(missing.parent / "data", server["data_dir"])
+        self.assertEqual((missing.parent / "data").resolve(), server["data_dir"])
         self.assertEqual({}, value["raw"])
 
     def test_load_merges_server_section_from_yaml(self):
