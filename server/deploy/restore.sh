@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# AgentRecord 服务端恢复：从备份 tar 恢复整个 data 空间。
+# MyRecord 服务端恢复：从备份 tar 恢复整个 data 空间。
 # 用法（在独立 server 工程内）：server/deploy/restore.sh <备份文件.tar.gz>
 set -euo pipefail
 
@@ -33,4 +33,4 @@ mkdir -p "$DATA_DIR"
 # 解压后替换 data 目录内容
 tar -xzf "$BACKUP" -C "$(dirname "$DATA_DIR")"
 echo "恢复完成：$DATA_DIR"
-echo "请重启服务后核对：sudo systemctl restart agentrecord-server"
+echo "请重启服务后核对：sudo systemctl restart myrecord-server"

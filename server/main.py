@@ -119,7 +119,7 @@ def _command_run(args: argparse.Namespace) -> int:
 
     threading.Thread(target=automation_daemon, daemon=True).start()
 
-    print(f"AgentRecord 服务端已启动（{host}:{port}），数据目录：{data_dir}", flush=True)
+    print(f"MyRecord 服务端已启动（{host}:{port}），数据目录：{data_dir}", flush=True)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

@@ -1,15 +1,15 @@
 """日记文件渲染：两端共用同一视觉格式。
 
 每天仍是一个 `Records/YYYY-MM-DD.md` 容器。每条记录前带一个隐藏的
-`<!-- agentrecord-entry:<entry_id> -->` 标记，删除位置写
-`<!-- agentrecord-tombstone:<entry_id> -->` 占位（不含正文）。这些标记在
+`<!-- myrecord-entry:<entry_id> -->` 标记，删除位置写
+`<!-- myrecord-tombstone:<entry_id> -->` 占位（不含正文）。这些标记在
 Markdown 渲染中不可见，仅用于对账与去重。`<summary>` 区域由服务端独占写。
 """
 
 import datetime
 
-ENTRY_MARKER_PREFIX = "<!-- agentrecord-entry:"
-TOMBSTONE_MARKER_PREFIX = "<!-- agentrecord-tombstone:"
+ENTRY_MARKER_PREFIX = "<!-- myrecord-entry:"
+TOMBSTONE_MARKER_PREFIX = "<!-- myrecord-tombstone:"
 
 _DEFAULT_SUMMARY = "暂无今日总结。"
 

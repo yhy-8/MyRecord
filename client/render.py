@@ -2,8 +2,8 @@
 
 import datetime
 
-ENTRY_MARKER_PREFIX = "<!-- agentrecord-entry:"
-TOMBSTONE_MARKER_PREFIX = "<!-- agentrecord-tombstone:"
+ENTRY_MARKER_PREFIX = "<!-- myrecord-entry:"
+TOMBSTONE_MARKER_PREFIX = "<!-- myrecord-tombstone:"
 
 _DEFAULT_SUMMARY = "暂无今日总结。"
 

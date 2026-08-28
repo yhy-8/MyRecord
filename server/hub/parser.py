@@ -1,4 +1,4 @@
-"""解析每日日记文件为条目列表（兼容新的 entry_id 标记与旧 RECORD_MARKER）。"""
+"""解析每日日记文件为条目列表（按 myrecord-* 标记与记录行解析）。"""
 
 import datetime
 import hashlib
@@ -7,16 +7,11 @@ import re
 
 from .render import ENTRY_MARKER_PREFIX, TOMBSTONE_MARKER_PREFIX
 
-_LEGACY_RECORD_MARKER = "<!-- agentrecord-record -->"
-_LEGACY_ESCAPED = "<!-- agentrecord-record-text -->"
-
 _ENTRY_MARKER = re.compile(
-    rf"^{re.escape(ENTRY_MARKER_PREFIX)}([^>]+) -->",
-    re.MULTILINE,
+    rf"^{re.escape(ENTRY_MARKER_PREFIX)}([^>]+) -->", re.MULTILINE
 )
 _TOMBSTONE_MARKER = re.compile(
-    rf"^{re.escape(TOMBSTONE_MARKER_PREFIX)}([^>]+) -->",
-    re.MULTILINE,
+    rf"^{re.escape(TOMBSTONE_MARKER_PREFIX)}([^>]+) -->", re.MULTILINE
 )
 _RECORD = re.compile(
     r"^\*\*(\d{2}:\d{2})(?: ([^\n]*?))?:\*\*\s?(.*?)"
@@ -42,7 +37,10 @@ def legacy_entry_id(date: str, index: int) -> str:
 
 def parse_day_file(date: str, content: str) -> dict:
     """返回 {"entries": [...], "tombstones": [entry_id, ...]}。"""
-    markers = [(m.start(), m.group(1)) for m in _ENTRY_MARKER.finditer(content)]
+    markers = [
+        (m.start(), m.group(1)) for m in _ENTRY_MARKER.finditer(content)
+    ]
+    markers.sort(key=lambda item: item[0])
     tombstones = [m.group(1) for m in _TOMBSTONE_MARKER.finditer(content)]
     records = list(_RECORD.finditer(content))
 
@@ -57,12 +55,6 @@ def parse_day_file(date: str, content: str) -> dict:
             entry_id = legacy_entry_id(date, index)
         tag = (match.group(2) or "").strip()
         text = match.group(3).strip()
-        text = re.sub(
-            rf"^{re.escape(_LEGACY_ESCAPED)}\s*$",
-            _LEGACY_RECORD_MARKER,
-            text,
-            flags=re.MULTILINE,
-        )
         entries.append(
             {
                 "entry_id": entry_id,

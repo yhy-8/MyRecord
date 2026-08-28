@@ -15,8 +15,8 @@ from . import settings
 from .file_lock import FileLock
 
 
-RECORD_MARKER = "<!-- agentrecord-record -->"
-ESCAPED_RECORD_MARKER = "<!-- agentrecord-record-text -->"
+RECORD_MARKER = "<!-- myrecord-record -->"
+ESCAPED_RECORD_MARKER = "<!-- myrecord-record-text -->"
 
 
 def _dated_diary_files() -> list[Path]:

@@ -11,7 +11,7 @@ SPEC = AgentSpec(
     can_read_raw=True,
     instructions="""写一份可直接阅读的“整理与回顾”正文。
 忠实回顾本周期做过什么、关注点如何分配，以及观点、理念、理想或行为模式出现了怎样的变化。行为分析只能是事实整理，不得把时间先后写成因果，不得心理诊断，不得给出行为教练式命令。
-可以自然分段，但不要设计小节、列表或引用；中控会统一添加标题和本次输入对应的记录依据。
+用**短要点分点**呈现（Markdown 无序列表），每条一个独立要点，避免写成一大段连续文字，让排版清晰、阅读舒服；可用加粗主题词作为要点开头引导（例如 **工作进展**、**遇到的问题**、**想法变化**），按本周期实际情况灵活分组。不要自行输出标题或编号小节；中控会统一添加标题和本次输入对应的记录依据。
 只返回完整正文。""",
     structured_output=False,
     thinking=True,
@@ -31,8 +31,6 @@ def validate(text: str) -> str:
         raise AgentPipelineError("Retrospective 不得输出包装标签或代码围栏")
     if re.search(r"(?m)^\s{0,3}#{1,6}\s+", body):
         raise AgentPipelineError("Retrospective 不得自行输出标题")
-    if re.search(r"(?m)^\s*(?:[-*+]\s+|\d+[.)、]\s+)", body):
-        raise AgentPipelineError("Retrospective 不得自行输出列表")
     if re.search(r"https?://", body, re.IGNORECASE):
         raise AgentPipelineError("Retrospective 不得自行输出 URL")
     return body

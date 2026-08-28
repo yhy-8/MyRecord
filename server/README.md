@@ -1,4 +1,4 @@
-# AgentRecord 服务端（中枢 + 云端 AI）
+# MyRecord 服务端（中枢 + 云端 AI）
 
 数据中枢与云端 AI：设备鉴权、条目合并/对账/扇出、垃圾桶、自动任务（日总结、自然周报、
 自然月报）。模型密钥只存这里。日志不保存私密原文。本目录是**独立可发布的服务器工程**，
@@ -43,7 +43,7 @@ python -m server.main render          重渲染当天 Records
 | 文件 | 职责 |
 |---|---|
 | `main.py` | 服务端 CLI：`run`（起 hub + AI 自动任务线程）、`token`（设备令牌管理）、`import`（旧数据导入）、`render`（重渲染 Records） |
-| `config.py` / `config.yaml` | 读取服务端配置（监听、模型、搜索、重试、自动任务、数据目录） |
+| `config.py` / `config.yaml` | 读取服务端配置（监听、模型、重试、自动任务、数据目录） |
 
 ### 同步中枢（hub/）
 
@@ -60,26 +60,26 @@ python -m server.main render          重渲染当天 Records
 | 文件 | 职责 |
 |---|---|
 | `ai/settings.py` | 运行配置、目录与模型选择（`current_model` / `models`） |
-| `ai/ai_client.py` | OpenAI 兼容模型请求、HTTP/thinking/JSON 输出、Token 遥测、固定网页搜索、错误分类 |
+| `ai/ai_client.py` | OpenAI 兼容模型请求、HTTP/thinking/JSON 输出、Token 遥测、错误分类 |
 | `ai/journal.py` | 原始日记读写与 `<summary>` 区域更新（AI 只能通过这里写日记） |
 | `ai/agents/base.py` | 单 Agent 提示、纯文本/JSON 协议及一次协议重试 |
-| `ai/agents/*.py` | 四种语义职责：`retrospective`（回顾）、`research_planner`（选题）、`researcher`（研究）、`reviewer`（审查） |
+| `ai/agents/*.py` | 两种语义职责：`retrospective`（回顾）、`reviewer`（审查） |
 | `ai/analysis/context.py` | 周/月范围、日记解析、引用边界、近期总结、周报回顾提取 |
-| `ai/analysis/orchestrator.py` | 冻结输入、分组、调度、审查、Token 累计、渲染、原子交付报告 |
+| `ai/analysis/orchestrator.py` | 冻结输入、分块、调度、审查、Token 累计、渲染、原子交付报告 |
 | `ai/analysis/automation.py` | 缺失检测、持久队列、前置屏障、重试时间、系统调度安装 |
 | `ai/file_lock.py`、`ai/logging_config.py` | 跨进程互斥、有界诊断日志 |
 
 ## 配置
 
 `server/config.yaml`：监听地址/端口、`models`、`current_model`、`retry`（失败/重试策略）、
-`third_search`（周报联网搜索）、`automation`（开关）、数据目录（`data_dir`、`diary_dir`、
-`analysis_dir`、`log_dir`，相对路径以 `server/` 为基准）。
+`automation`（开关）、数据目录（`data_dir`、`diary_dir`、`analysis_dir`、`log_dir`，相对路径以
+`server/` 为基准）。周报不再联网检索，无搜索配置。
 
 ## 部署
 
 `server/deploy/`：
 
-- `agentrecord-server.service` — systemd 单元（安装/启停说明见文件头注释）。
+- `myrecord-server.service` — systemd 单元（安装/启停说明见文件头注释）。
 - `backup.sh` — 备份 `data` 空间为 tar（保留最近 N 份）。
 - `restore.sh` — 从备份恢复 `data` 空间。
 
@@ -93,3 +93,5 @@ python -m server.main render          重渲染当天 Records
 - 删改为垃圾桶语义（tombstone），不做硬删除。
 - 设备鉴权用长令牌，服务端只存哈希（scrypt）。
 - 模型密钥只在服务端；不入数据空间、不入日志。
+- 日记文件统一使用 `<!-- myrecord-* -->` 条目/删除标记；不再兼容旧 `agentrecord-*`。
+  迁移前数据先就地转新格式：`python migrate_markers.py [Records 目录]`。

@@ -43,7 +43,7 @@ def _client_settings(records_dir: Path, analysis_dir: Path) -> dict:
 
 class ClientSyncE2ETestBase(unittest.TestCase):
     def setUp(self):
-        self._data = _tmp_dir("agentrecord-srv-")
+        self._data = _tmp_dir("myrecord-srv-")
         self.store = Store(self._data / "state.json")
 
         self.token_a = auth.new_token()
@@ -162,7 +162,7 @@ class TombstoneAntiResurrectionTest(ClientSyncE2ETestBase):
             client_b.pull()
             b_content = b_file.read_text(encoding="utf-8")
             self.assertNotIn("将被删除", b_content)
-            self.assertIn("agentrecord-tombstone", b_content)  # 客户端 render 前缀
+            self.assertIn("myrecord-tombstone", b_content)  # 客户端 render 前缀
 
             client_b.send_pending()  # B 尝试推回（不应让 tombstone 条目复活）
             status = client_a.status()

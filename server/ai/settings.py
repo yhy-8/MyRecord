@@ -52,14 +52,6 @@ def is_valid_http_url(value: object) -> bool:
     return parts.scheme.casefold() in {"http", "https"} and bool(hostname)
 
 
-def is_positive_number(value: object) -> bool:
-    return (
-        not isinstance(value, bool)
-        and isinstance(value, (int, float))
-        and value > 0
-    )
-
-
 def _get_config_path() -> Path:
     """获取 config.yaml 路径，兼容 PyInstaller 打包后的路径。"""
     if getattr(sys, "frozen", False):
@@ -270,25 +262,6 @@ def configuration_warnings() -> list[str]:
                     f"活动模型 {active_model.get('name', '未命名')} 的 api_key 为空，"
                     "总结和报告暂时无法生成。"
                 )
-    third_search = CONFIG.get("third_search", {})
-    if not isinstance(third_search, dict):
-        warnings.append("config.yaml 中 third_search 必须是对象")
-        third_search = {}
-    else:
-        count = third_search.get("count", 10)
-        if isinstance(count, bool) or not isinstance(count, int):
-            warnings.append("config.yaml 中 third_search.count 必须是整数")
-        else:
-            if count < 1 or count > 10:
-                warnings.append(
-                    f"third_search.count={count} 超出有效范围 1..10；"
-                    "运行时会限制到该范围。"
-                )
-        timeout = third_search.get("timeout", 30)
-        if not is_positive_number(timeout):
-            warnings.append(
-                "config.yaml 中 third_search.timeout 必须是正数"
-            )
     automation = CONFIG.get("automation", {})
     if not isinstance(automation, dict):
         warnings.append("config.yaml 中 automation 必须是对象")
@@ -297,21 +270,6 @@ def configuration_warnings() -> list[str]:
         for key in ("enabled", "daily_summary", "weekly_report", "monthly_report"):
             if key in automation and not isinstance(automation[key], bool):
                 warnings.append(f"config.yaml 中 automation.{key} 必须是布尔值")
-    weekly_automatic = bool(
-        automation.get("enabled") is True
-        and automation.get("weekly_report") is True
-    )
-    search_ready = bool(
-        third_search.get("enabled") is True
-        and is_valid_http_url(third_search.get("api_url", ""))
-        and str(third_search.get("api_key") or "").strip()
-        and is_positive_number(third_search.get("timeout", 30))
-    )
-    if weekly_automatic and not search_ready:
-        warnings.append(
-            "自动周报已启用，但 third_search 未启用或缺少 api_url/api_key；"
-            "周报会在配置检查阶段暂停。"
-        )
     try:
         retry_policy()
     except RuntimeError as error:

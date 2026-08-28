@@ -67,7 +67,7 @@ class ModelSettingsTests(unittest.TestCase):
         self.assertNotIn("max_tokens", effective)
         self.assertNotIn("json_mode", raw_model)
 
-    def test_config_warnings_explain_provider_defaults_and_search_cap(self):
+    def test_config_warnings_explain_provider_defaults(self):
         with patch.object(
             settings,
             "CONFIG",
@@ -78,7 +78,6 @@ class ModelSettingsTests(unittest.TestCase):
                         "api_url": "https://api.deepseek.com/chat/completions",
                     }
                 ],
-                "third_search": {"count": 20},
             },
         ):
             warnings = settings.configuration_warnings()
@@ -86,9 +85,8 @@ class ModelSettingsTests(unittest.TestCase):
         message = " ".join(warnings)
         self.assertNotIn("版本", message)
         self.assertIn("json_mode", message)
-        self.assertIn("有效范围 1..10", message)
 
-    def test_config_warnings_cover_active_key_and_automatic_weekly_search(self):
+    def test_config_warnings_cover_active_key_and_search_removed(self):
         with patch.object(
             settings,
             "CONFIG",
@@ -102,13 +100,12 @@ class ModelSettingsTests(unittest.TestCase):
                     }
                 ],
                 "automation": {"enabled": True, "weekly_report": True},
-                "third_search": {"enabled": False},
             },
         ):
             message = " ".join(settings.configuration_warnings())
 
         self.assertIn("api_key 为空", message)
-        self.assertIn("自动周报已启用", message)
+        self.assertNotIn("搜索", message)
 
     def test_retry_policy_uses_configured_values_and_defaults(self):
         with patch.object(
@@ -160,14 +157,13 @@ class ModelSettingsTests(unittest.TestCase):
         with patch.object(
             settings,
             "CONFIG",
-            {"models": "bad", "third_search": "bad"},
+            {"models": "bad"},
         ):
             message = " ".join(settings.configuration_warnings())
 
         self.assertIn("models 必须是数组", message)
-        self.assertIn("third_search 必须是对象", message)
 
-    def test_configuration_warnings_reject_invalid_urls_and_timeout(self):
+    def test_configuration_warnings_reject_invalid_urls(self):
         with patch.object(
             settings,
             "CONFIG",
@@ -180,13 +176,11 @@ class ModelSettingsTests(unittest.TestCase):
                         "api_key": "configured",
                     }
                 ],
-                "third_search": {"timeout": "slow"},
             },
         ):
             message = " ".join(settings.configuration_warnings())
 
         self.assertIn("api_url 无效", message)
-        self.assertIn("third_search.timeout 必须是正数", message)
 
 
 if __name__ == "__main__":

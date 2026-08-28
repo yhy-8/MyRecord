@@ -7,10 +7,10 @@ from pathlib import Path
 from . import settings
 
 
-LOG_NAME = "AgentRecord.log"
+LOG_NAME = "MyRecord.log"
 MAX_LOG_BYTES = 5 * 1024 * 1024
 LOG_BACKUP_COUNT = 2
-_HANDLER_NAME = "AgentRecord.rotating_file"
+_HANDLER_NAME = "MyRecord.rotating_file"
 
 
 def configure_logging(
@@ -20,10 +20,10 @@ def configure_logging(
     backup_count: int = LOG_BACKUP_COUNT,
     force: bool = False,
 ) -> Path | None:
-    """Configure one size-rotated handler for the AgentRecord logger tree."""
+    """Configure one size-rotated handler for the MyRecord logger tree."""
     directory = log_dir or settings.LOG_DIR
     path = directory / LOG_NAME
-    logger = logging.getLogger("AgentRecord")
+    logger = logging.getLogger("MyRecord")
     logger.setLevel(logging.INFO)
     logger.propagate = False
 

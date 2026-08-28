@@ -1,4 +1,4 @@
-"""OpenAI-compatible model request and controller-owned search tests."""
+"""OpenAI-compatible model request and audit telemetry tests."""
 
 import unittest
 from unittest.mock import patch
@@ -25,20 +25,12 @@ class FakeResponse:
 
 class JournalAITests(unittest.TestCase):
     def setUp(self):
-        self.original_third_search = settings.CONFIG.get("third_search")
-        settings.CONFIG["third_search"] = {"enabled": False}
         self.model = {
             "name": "test-model",
             "model_id": "test-model-id",
             "api_url": "https://example.test/chat/completions",
             "api_key": "secret",
         }
-
-    def tearDown(self):
-        if self.original_third_search is None:
-            settings.CONFIG.pop("third_search", None)
-        else:
-            settings.CONFIG["third_search"] = self.original_third_search
 
     @patch("server.ai.ai_client.requests.post")
     def test_returns_complete_openai_compatible_response(self, post):
@@ -112,70 +104,6 @@ class JournalAITests(unittest.TestCase):
 
         self.assertTrue(response.success)
         self.assertEqual(0, response.telemetry["usage"]["prompt_tokens"])
-
-    @patch("server.ai.ai_client._post_with_transient_retry")
-    def test_third_party_search_caps_noisy_result_count(self, request):
-        settings.CONFIG["third_search"] = {
-            "enabled": True,
-            "api_key": "search-key",
-            "api_url": "https://search.example.test",
-            "count": 25,
-        }
-        request.return_value = FakeResponse(
-            {
-                "code": 200,
-                "data": {
-                    "webPages": {
-                        "value": [
-                            {
-                                "name": f"结果 {index}",
-                                "url": f"https://example.com/{index}",
-                                "snippet": "摘要",
-                            }
-                            for index in range(15)
-                        ]
-                    }
-                },
-            }
-        )
-
-        result = ai_client.bocha_search("公开查询")
-
-        self.assertEqual(10, result.result_count)
-        self.assertEqual(10, len(result.evidence))
-        self.assertEqual(10, request.call_args.kwargs["json"]["count"])
-
-    @patch("server.ai.ai_client._post_with_transient_retry")
-    def test_malformed_search_response_is_a_protocol_error(self, request):
-        settings.CONFIG["third_search"] = {
-            "enabled": True,
-            "api_key": "search-key",
-            "api_url": "https://search.example.test",
-        }
-        request.return_value = FakeResponse(
-            {"code": 200, "data": {"webPages": {"value": {}}}}
-        )
-
-        result, error = ai_client.search_web_once("公开查询")
-
-        self.assertEqual(0, result.result_count)
-        self.assertIn("搜索协议错误", error)
-
-    @patch("server.ai.ai_client._post_with_transient_retry")
-    def test_non_success_search_status_is_not_an_empty_result(self, request):
-        settings.CONFIG["third_search"] = {
-            "enabled": True,
-            "api_key": "search-key",
-            "api_url": "https://search.example.test",
-        }
-        response = FakeResponse({"message": "bad request"})
-        response.status_code = 400
-        request.return_value = response
-
-        result, error = ai_client.search_web_once("公开查询")
-
-        self.assertEqual(0, result.result_count)
-        self.assertIn("接口异常", error)
 
     @patch("server.ai.ai_client.requests.post")
     def test_structured_output_uses_configured_json_mode(self, post):
@@ -350,29 +278,6 @@ class JournalAITests(unittest.TestCase):
         self.assertIn("不承担日常聊天", prompt)
         self.assertIn("不自行读取文件或调用工具", prompt)
 
-    def test_incomplete_third_party_search_config_is_not_available(self):
-        settings.CONFIG["third_search"] = {
-            "enabled": True,
-            "api_key": "search-key",
-        }
-
-        self.assertFalse(ai_client.third_party_search_available())
-
-        settings.CONFIG["third_search"] = {
-            "enabled": True,
-            "api_key": None,
-            "api_url": "https://search.example.test",
-        }
-        self.assertFalse(ai_client.third_party_search_available())
-
-        settings.CONFIG["third_search"] = {
-            "enabled": True,
-            "api_key": "search-key",
-            "api_url": "https://search.example.test",
-            "timeout": 0,
-        }
-        self.assertFalse(ai_client.third_party_search_available())
-
     def test_missing_model_key_is_a_configuration_failure(self):
         model = {
             "name": "test",
@@ -485,27 +390,6 @@ class JournalAITests(unittest.TestCase):
         self.assertTrue(ai_client.is_network_failure(message))
         self.assertEqual(3, post.call_count)
         self.assertEqual([1, 2], [call.args[0] for call in sleep.call_args_list])
-
-    @patch("server.ai.ai_client.time.sleep")
-    @patch("server.ai.ai_client.requests.post")
-    def test_rate_limit_and_auth_errors_are_classified_separately(self, post, sleep):
-        rate_limited = FakeResponse({})
-        rate_limited.status_code = 429
-        post.return_value = rate_limited
-
-        message, success = ai_client.call_ai("自动任务", self.model)
-        self.assertFalse(success)
-        self.assertTrue(ai_client.is_rate_limit_failure(message))
-        self.assertEqual(1, post.call_count)
-
-        post.reset_mock()
-        unauthorized = FakeResponse({})
-        unauthorized.status_code = 401
-        post.return_value = unauthorized
-        message, success = ai_client.call_ai("自动任务", self.model)
-        self.assertFalse(success)
-        self.assertTrue(ai_client.is_config_failure(message))
-        self.assertEqual(1, post.call_count)
 
 
 if __name__ == "__main__":

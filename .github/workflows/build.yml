@@ -36,7 +36,7 @@ jobs:
       # 入口取 client/__main__.py（等价 `python -m client`）；把 client/config.yaml 一并打进包。
       - name: Build client executable
         run: |
-          pyinstaller --onefile --clean --name AgentRecord --paths . `
+          pyinstaller --onefile --clean --name MyRecord --paths . `
             --hidden-import=yaml --exclude-module termios --exclude-module tty `
             --add-data "client/config.yaml;client" client/__main__.py
           Copy-Item client\config.yaml dist\config.yaml
@@ -45,5 +45,5 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: AgentRecord-windows-client
+          name: MyRecord-windows-client
           path: dist/

@@ -220,17 +220,6 @@ def _content_failure_key(
             "model": model_signature,
             "retry": settings.retry_policy(),
         }
-        if task == "weekly_report":
-            third_search = settings.CONFIG.get("third_search", {})
-            if not isinstance(third_search, dict):
-                third_search = {}
-            payload["third_search"] = {
-                key: third_search.get(key)
-                for key in ("enabled", "api_url", "count", "timeout")
-            }
-            payload["third_search"]["api_key_digest"] = _secret_digest(
-                third_search.get("api_key")
-            )
         if task == "daily_summary":
             date = datetime.date.fromisoformat(target["start"])
             path = settings.DIARY_DIR / f"{date.isoformat()}.md"
@@ -918,10 +907,10 @@ def launch_automation_retry() -> tuple[bool, str]:
     return True, "已在独立后台进程中按依赖顺序重试失败自动任务。"
 
 
-_CRON_MARKER = "# AgentRecord automation"
-_WINDOWS_MINUTE_TASK_NAME = "AgentRecord Automation"
-_WINDOWS_LOGON_TASK_NAME = "AgentRecord Automation Logon"
-_WINDOWS_BACKGROUND_EXECUTABLE = "AgentRecordBackground.exe"
+_CRON_MARKER = "# MyRecord automation"
+_WINDOWS_MINUTE_TASK_NAME = "MyRecord Automation"
+_WINDOWS_LOGON_TASK_NAME = "MyRecord Automation Logon"
+_WINDOWS_BACKGROUND_EXECUTABLE = "MyRecordBackground.exe"
 
 
 def _automation_command(action: str = "--run-automation") -> list[str]:
@@ -1064,7 +1053,7 @@ def install_system_automation() -> tuple[bool, str]:
                 return (
                     False,
                     f"缺少无窗口后台入口 {_WINDOWS_BACKGROUND_EXECUTABLE}，"
-                    "请将它与 AgentRecord.exe 放在同一目录后重试。",
+                    "请将它与 MyRecord.exe 放在同一目录后重试。",
                 )
             task_command = subprocess.list2cmdline(command)
             schedules = (
@@ -1129,7 +1118,7 @@ def install_system_automation() -> tuple[bool, str]:
 
 
 def uninstall_system_automation() -> tuple[bool, str]:
-    """卸载由 AgentRecord 创建的用户级系统任务。"""
+    """卸载由 MyRecord 创建的用户级系统任务。"""
     try:
         if _is_windows():
             delete_results = [

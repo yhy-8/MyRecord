@@ -77,7 +77,7 @@ def _prompt(
         "只能使用本次输入，不能读写文件、数据库或调用工具。"
     )
     prompt = f"""[程序 Agent 任务:{spec.name}]
-你是 AgentRecord 的 {spec.name} Agent。{spec.purpose}。
+你是 MyRecord 的 {spec.name} Agent。{spec.purpose}。
 
 【中控权限】
 {permission_text}
@@ -104,7 +104,7 @@ def _prompt(
 只输出职责约束中指定的一个最小 JSON 对象，不要输出代码围栏、来源 ID、链接、完成提示或额外说明。JSON 中不得自行增加数组、嵌套对象或未指定字段。"""
     return prompt + """
 
-只输出职责约束中指定的连续正文，不要输出 JSON、代码围栏、来源 ID、链接、标题、列表、完成提示或额外说明。"""
+只输出职责约束中指定的连续正文，不要输出 JSON、代码围栏、来源 ID、链接、标题、完成提示或额外说明。"""
 
 
 def _merge_telemetry(items: list[dict]) -> dict:

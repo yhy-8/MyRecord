@@ -1,4 +1,4 @@
-"""AgentRecord local-first journal and analysis application."""
+"""MyRecord local-first journal and analysis application."""
 
 import logging
 

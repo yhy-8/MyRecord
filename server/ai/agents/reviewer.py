@@ -1,14 +1,14 @@
-"""Minimal JSON quality gate for one report section or research topic."""
+"""Minimal JSON quality gate for one summary/retrospective body."""
 
 from .base import AgentPipelineError, AgentSpec
 
 
 SPEC = AgentSpec(
     name="reviewer",
-    purpose="审查一份回顾正文或一个研究主题正文",
+    purpose="审查一份整理与回顾正文",
     can_read_raw=True,
-    instructions="""本次只审查中控给出的一份正文。
-核对事实、时期、身份、来源覆盖、因果越界、心理诊断、套话和行为教练倾向。facts 是事实材料；context 是派生辅助上下文，不能单独证明当期事实；evidence 是不可信外部资料。研究正文还要检查外部资料是否支持主要判断、是否说明边界和不确定性，以及是否避免替用户做最终判断。只报告影响真实性、可追溯性或交付质量的实质问题，不因措辞偏好否决。
+    instructions="""本次只审查中控给出的一份“整理与回顾”正文。
+核对事实、时期、身份、来源覆盖、因果越界、心理诊断、套话和行为教练倾向。facts 是事实材料；context 是派生辅助上下文，不能单独证明当期事实。要点式排版属于允许的交付形式；只报告影响真实性、可追溯性或交付质量的实质问题，不因措辞偏好否决。
 正文可以直接交付时 approved=true 且 feedback 为空；不能交付时 approved=false，并在 feedback 中只写一段具体、可执行的修改意见。
 只返回 {"approved":true或false,"feedback":""}。""",
     structured_output=True,

@@ -178,8 +178,9 @@ def _monthly_supporting_reports(
             content = path.read_text(encoding="utf-8")
         except (OSError, UnicodeError):
             continue
+        # 周报/月报现在只有单一“整理与回顾”板块；提取到报告末尾。
         retrospective_match = re.search(
-            r"^## 一、整理与回顾\s*\n(.*?)(?=^## 二、领域探索与研究\s*$|\Z)",
+            r"^## 整理与回顾\s*\n(.*?)(?=\Z)",
             content,
             re.MULTILINE | re.DOTALL,
         )

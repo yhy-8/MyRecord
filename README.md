@@ -1,9 +1,9 @@
-# AgentRecord
+# MyRecord
 
-AgentRecord 是一个**本地优先、多设备云端同步**的个人记录与周期回顾工具。你像写日记一样自由记录，
+MyRecord 是一个**本地优先、多设备云端同步**的个人记录与周期回顾工具。你像写日记一样自由记录，
 不需要预先分类，也不会把记录过程变成与 AI 的对话。
 
-项目重构为**服务端中枢 + 客户端薄端**两端架构（原单机 `AgentRecord/` 包已移除）：
+项目重构为**服务端中枢 + 客户端薄端**两端架构（原单机 `MyRecord/` 包已移除）：
 
 - **服务端（`server/`）**：数据中枢、设备鉴权、条目合并/对账/扇出、垃圾桶，以及全部云端 AI
   （日记总结、自然周报、自然月报）。模型密钥只存在服务端。
@@ -17,7 +17,7 @@ AgentRecord 是一个**本地优先、多设备云端同步**的个人记录与�
 ```text
 server/                  服务端中枢 + 云端 AI（独立工程，见 server/README.md）
   main.py                服务端 CLI（run / token / import / render）
-  config.yaml            服务端配置（监听、模型、搜索、重试、自动任务）
+  config.yaml            服务端配置（监听、模型、重试、自动任务）
   config.py              服务端配置读取
   requirements.txt      服务端依赖（pyyaml、requests）
   README.md              服务端独立工程说明
@@ -66,7 +66,7 @@ pip install -r server/requirements.txt
 python -m server.main run
 ```
 
-或使用 systemd（`server/deploy/agentrecord-server.service`，启动后按注释修改解释器路径与
+或使用 systemd（`server/deploy/myrecord-server.service`，启动后按注释修改解释器路径与
 `WorkingDirectory` 为独立 server 工程绝对路径）。
 
 常用服务端子命令：
@@ -116,6 +116,8 @@ python -m client
 - 记录写入永不因同步失败回滚；删改为**垃圾桶语义**（tombstone），不做硬删除，防“已删条目复活”。
 - 设备鉴权用长令牌；服务端只存令牌哈希（scrypt）。传输应为 HTTPS（当前样例默认 http，上线请启用 TLS）。
 - 模型密钥只在服务端；不入数据空间、不入日志。
+- 日记文件的条目/删除标记统一采用 `<!-- myrecord-* -->` 格式。迁移前的旧数据（`agentrecord-*`）
+  需先就地转新格式：`python migrate_markers.py [Records 目录]`。
 
 ## 文档结构（总体 / 客户端 / 服务端）
 
@@ -136,7 +138,7 @@ python -m client
 ## 文档
 
 - [`Docs/设计原则与系统架构.md`](./Docs/设计原则与系统架构.md) — 产品边界、核心原则、模块职责
-- [`Docs/Agent与报告流程.md`](./Docs/Agent与报告流程.md) — 云端 AI 各阶段与检索流程
+- [`Docs/Agent与报告流程.md`](./Docs/Agent与报告流程.md) — 云端 AI 各阶段与总结流程
 - [`Docs/运行机制与数据.md`](./Docs/运行机制与数据.md) — 配置、文件布局、自动任务、故障恢复
 - [`Docs/部署指南.md`](./Docs/部署指南.md) — 端口开放、systemd 部署、签发设备凭证、备份与加密传输
 - [`Docs/重构计划与功能说明.md`](./Docs/重构计划与功能说明.md) — 两端架构的已定稿功能契约

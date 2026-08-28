@@ -10,7 +10,7 @@ import time
 
 from rich.panel import Panel
 
-from .. import idseq, journal, sync
+from .. import idseq, journal
 from ..sync import SyncClient, SyncError
 
 
@@ -18,7 +18,7 @@ def _banner() -> None:
     from rich.console import Console
 
     console = Console()
-    console.print(Panel.fit("[bold]AgentRecord 客户端[/bold]", border_style="cyan"))
+    console.print(Panel.fit("[bold]MyRecord 客户端[/bold]", border_style="cyan"))
 
 
 def _help_text() -> str:

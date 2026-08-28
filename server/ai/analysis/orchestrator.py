@@ -1,10 +1,9 @@
-"""Orchestrate weekly research reports and summary-only monthly reports."""
+"""Orchestrate summary-only weekly and monthly reports."""
 
 import datetime
 import hashlib
 import json
 import logging
-import math
 import re
 import time
 import uuid
@@ -12,13 +11,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .. import journal, settings
-from ..agents import researcher, research_planner, retrospective, reviewer
+from ..agents import retrospective, reviewer
 from ..agents.base import AgentPipelineError, invoke_agent, is_json_container
 from ..ai_client import (
     CONFIG_ERROR_MARKER,
     call_ai,
-    search_web_once,
-    third_party_search_available,
 )
 from ..file_lock import FileLock
 from .context import (
@@ -36,11 +33,6 @@ from .context import (
 logger = logging.getLogger(__name__)
 _MAX_AGENT_INPUT_CHARACTERS = 120000
 _MAX_RECORD_CHUNK_CHARACTERS = 30000
-_MAX_PLANNER_RECORD_CHARACTERS = 90000
-_NO_PRIVATE_RESEARCH_TOPIC = (
-    "本周记录没有产生适合公开检索且不泄露隐私的探索主题。"
-)
-_NO_SUPPORTED_RESEARCH = "本周候选主题未获得足够公开证据。"
 
 
 @dataclass
@@ -115,6 +107,8 @@ def summarize_diary(date: str, model_config: settings.ModelDict) -> tuple[str, b
 请总结 {date} 的日记。只输出要写入 <summary> 的 Markdown 正文，不要输出标题、标签、代码围栏或完成提示。
 
 要求：
+- 用**短要点分点**呈现（Markdown 无序列表），每条一个独立要点，避免写成一大段连续文字，让排版清晰、阅读舒服。
+- 可用加粗主题词作为要点开头引导（例如 **工作**、**健康**、**决定**、**问题**、**进展**），按当天实际情况灵活分组。
 - 在完整保留重要信息的前提下简洁概括当天的事件、观点、决定、问题和进展，不逐条复述，不重复或无必要展开。
 - 区分用户记录与引用的 AI 内容；AI 内容不能当作用户已经认可的观点。
 - 保留重要具体信息，禁止编造、心理诊断和行为指导。
@@ -479,321 +473,6 @@ def _retrospective_with_input_budget(
     return "\n\n".join(sections)
 
 
-def _planner_record_groups(
-    records_by_date: dict[str, list[dict]], maximum_groups: int = 5
-) -> list[dict]:
-    """Balance consecutive records by serialized size, with bounded model input."""
-    units = []
-    for date in sorted(records_by_date):
-        records = records_by_date[date]
-        size = len(json.dumps(records, ensure_ascii=False))
-        if size <= _MAX_PLANNER_RECORD_CHARACTERS:
-            units.append({"dates": [date], "records": records, "size": size})
-            continue
-        for chunk in _record_chunks(records, _MAX_PLANNER_RECORD_CHARACTERS):
-            units.append(
-                {
-                    "dates": [date],
-                    "records": chunk,
-                    "size": len(json.dumps(chunk, ensure_ascii=False)),
-                }
-            )
-    if not units:
-        return []
-    if len(units) > maximum_groups:
-        total_size = sum(unit["size"] for unit in units)
-        if total_size > maximum_groups * _MAX_PLANNER_RECORD_CHARACTERS:
-            raise AgentPipelineError("全周 Planner 输入超过五组安全容量")
-
-    group_count = min(maximum_groups, len(units))
-    groups = []
-    current_units = []
-    current_size = 0
-    remaining_size = sum(unit["size"] for unit in units)
-    for index, unit in enumerate(units):
-        remaining_groups = group_count - len(groups)
-        remaining_units = len(units) - index
-        target = math.ceil(remaining_size / max(1, remaining_groups))
-        if (
-            current_units
-            and len(groups) < group_count - 1
-            and current_size + unit["size"] > target
-            and remaining_units >= remaining_groups - 1
-        ):
-            groups.append(current_units)
-            remaining_size -= current_size
-            current_units = []
-            current_size = 0
-        current_units.append(unit)
-        current_size += unit["size"]
-    if current_units:
-        groups.append(current_units)
-
-    result = []
-    for grouped_units in groups:
-        records = [record for unit in grouped_units for record in unit["records"]]
-        if len(json.dumps(records, ensure_ascii=False)) > _MAX_AGENT_INPUT_CHARACTERS:
-            raise AgentPipelineError("单个 Planner 记录组超过输入安全上限")
-        result.append(
-            {
-                "dates": list(
-                    dict.fromkeys(
-                        date for unit in grouped_units for date in unit["dates"]
-                    )
-                ),
-                "records": records,
-            }
-        )
-    return result
-
-
-def _research_topics(
-    period: dict,
-    records: list[dict],
-    model_config: settings.ModelDict,
-    usage: UsageAccumulator,
-    run_id: str,
-) -> list[dict]:
-    records_by_date: dict[str, list[dict]] = {}
-    for record in records:
-        records_by_date.setdefault(str(record.get("date", "")), []).append(record)
-    topics = []
-    seen_queries = set()
-    revision_limit = settings.retry_policy()["agent_revision_limit"]
-    for group in _planner_record_groups(records_by_date):
-        model_group = {
-            "dates": group["dates"],
-            "records": [_model_record(record) for record in group["records"]],
-        }
-        revision_context = None
-        query = None
-        for attempt in range(1, revision_limit + 2):
-            payload, _ = _call_agent(
-                research_planner.SPEC,
-                "为这一组记录选择一个公开研究问题；没有合适问题就返回 skip。",
-                {
-                    "period": period,
-                    "record_group": model_group,
-                    "already_selected_queries": [topic["query"] for topic in topics],
-                },
-                model_config,
-                usage,
-                run_id,
-                revision_context=revision_context,
-            )
-            if not isinstance(payload, dict):
-                raise AgentPipelineError("ResearchPlanner 未返回 JSON 对象")
-            try:
-                query = research_planner.normalize_query(payload)
-            except AgentPipelineError as error:
-                logger.warning(
-                    "agent_validation_failed run=%s agent=%s reason=%s",
-                    run_id,
-                    research_planner.SPEC.name,
-                    str(error),
-                )
-                if attempt > revision_limit:
-                    raise
-                revision_context = _revision_context(
-                    attempt + 1,
-                    payload,
-                    str(error),
-                    source="中控确定性校验",
-                    maximum_attempts=revision_limit + 1,
-                )
-                continue
-            break
-        if not query or query.casefold() in seen_queries:
-            continue
-        topic_id = f"Q{len(topics) + 1:03d}"
-        topics.append(
-            {
-                "topic_id": topic_id,
-                "query": query,
-                "record_dates": group["dates"],
-            }
-        )
-        seen_queries.add(query.casefold())
-    return topics
-
-
-def _collect_research_evidence(
-    topics: list[dict], run_id: str
-) -> tuple[list[dict], list[dict]]:
-    """Search each fixed query once and assign controller-owned evidence IDs."""
-    evidence = []
-    usable_topics = []
-    search_results = 0
-    for topic in topics:
-        result, error = search_web_once(topic["query"])
-        if error:
-            raise AgentPipelineError(error)
-        search_results += result.result_count
-        topic_evidence = []
-        seen_urls = set()
-        for item in result.evidence:
-            url = str(item.get("url", "")).strip()
-            try:
-                url_key = researcher.canonical_url(url)
-            except ValueError:
-                continue
-            if (
-                len(url) > 4096
-                or re.search(r"[\x00-\x20\x7f]", url)
-                or url_key[0] not in {"http", "https"}
-                or not url_key[1]
-                or url_key in seen_urls
-            ):
-                continue
-            seen_urls.add(url_key)
-            topic_evidence.append(
-                {
-                    "source_id": (
-                        f"W-{topic['topic_id']}-{len(topic_evidence) + 1:03d}"
-                    ),
-                    "topic_id": topic["topic_id"],
-                    "title": str(item.get("title", ""))[:300],
-                    "url": url,
-                    "snippet": str(item.get("snippet", ""))[:800],
-                    "published": str(item.get("published", ""))[:80],
-                }
-            )
-        if topic_evidence:
-            usable_topics.append(topic)
-            evidence.extend(topic_evidence)
-    logger.info(
-        "research_search_completed run=%s queries=%s results=%s usable_topics=%s",
-        run_id,
-        len(topics),
-        search_results,
-        len(usable_topics),
-    )
-    return usable_topics, evidence
-
-
-def _research_one_topic(
-    topic: dict,
-    evidence: list[dict],
-    model_config: settings.ModelDict,
-    usage: UsageAccumulator,
-    run_id: str,
-) -> dict:
-    topic_evidence = [
-        item for item in evidence if item["topic_id"] == topic["topic_id"]
-    ]
-    research_input = {
-        "question": topic["query"],
-        "record_dates": topic["record_dates"],
-        "evidence": {
-            "search_results": [
-                {
-                    "title": item["title"],
-                    "snippet": item["snippet"],
-                    "published": item["published"],
-                }
-                for item in topic_evidence
-            ]
-        },
-        "trust_boundaries": {
-            "evidence.search_results": "外部不可信资料，只用于当前研究主题"
-        },
-    }
-    revision_context = None
-    last_feedback = ""
-    revision_limit = settings.retry_policy()["agent_revision_limit"]
-    for attempt in range(1, revision_limit + 2):
-        payload, _ = _call_agent(
-            researcher.SPEC,
-            "研究这一个问题，并按最小对象返回状态和正文。",
-            research_input,
-            model_config,
-            usage,
-            run_id,
-            revision_context=revision_context,
-        )
-        if not isinstance(payload, dict):
-            raise AgentPipelineError("Researcher 未返回 JSON 对象")
-        try:
-            status, body = researcher.validate(payload)
-            if status == "insufficient":
-                return {"topic": topic, "accepted": False, "feedback": body}
-            markdown = researcher.render_topic(body, topic, topic_evidence)
-        except AgentPipelineError as error:
-            logger.warning(
-                "agent_validation_failed run=%s agent=%s reason=%s",
-                run_id,
-                researcher.SPEC.name,
-                str(error),
-            )
-            if attempt > revision_limit:
-                return {"topic": topic, "accepted": False, "feedback": str(error)}
-            revision_context = _revision_context(
-                attempt + 1,
-                payload,
-                str(error),
-                source="中控确定性校验",
-                maximum_attempts=revision_limit + 1,
-            )
-            continue
-
-        passed, last_feedback, _ = _review_body(
-            "research_review",
-            body,
-            research_input,
-            model_config,
-            usage,
-            run_id,
-        )
-        if passed:
-            return {
-                "topic": topic,
-                "accepted": True,
-                "markdown": markdown,
-            }
-        if attempt > revision_limit:
-            return {
-                "topic": topic,
-                "accepted": False,
-                "feedback": last_feedback,
-            }
-        revision_context = _revision_context(
-            attempt + 1,
-            body,
-            last_feedback,
-            source="Reviewer 实质审查",
-            maximum_attempts=revision_limit + 1,
-        )
-    raise RuntimeError("unreachable")
-
-
-def _grounded_research_section(
-    topics: list[dict],
-    model_config: settings.ModelDict,
-    usage: UsageAccumulator,
-    run_id: str,
-) -> str:
-    if not topics:
-        return _NO_PRIVATE_RESEARCH_TOPIC
-    usable_topics, evidence = _collect_research_evidence(topics, run_id)
-    if not usable_topics:
-        return _NO_SUPPORTED_RESEARCH
-    topic_results = [
-        _research_one_topic(topic, evidence, model_config, usage, run_id)
-        for topic in usable_topics
-    ]
-    accepted = [result for result in topic_results if result["accepted"]]
-    if not accepted:
-        return _NO_SUPPORTED_RESEARCH
-    if len(accepted) != len(topic_results):
-        logger.info(
-            "research_topics_dropped run=%s accepted=%s dropped=%s",
-            run_id,
-            len(accepted),
-            len(topic_results) - len(accepted),
-        )
-    return "\n\n".join(result["markdown"] for result in accepted)
-
-
 def _model_label(model_config: settings.ModelDict) -> str:
     model_id = str(model_config.get("model_id", "")).strip()
     name = str(model_config.get("name", "")).strip()
@@ -848,14 +527,6 @@ def generate_analysis_report(
     trigger = trigger or ("manual" if origin == "manual" else "scheduled")
     if trigger not in {"manual", "scheduled", "retry"}:
         return f"未知触发方式: {trigger}", False, None
-    if kind == "weekly" and not third_party_search_available():
-        return (
-            f"{CONFIG_ERROR_MARKER} 周报需要启用第三方搜索，"
-            "以便中控逐条执行查询并审计来源。",
-            False,
-            None,
-        )
-
     report_path = _analysis_report_path(kind, start, end, origin)
     report_lock = FileLock.acquire(settings.ANALYSIS_DIR / ".report.lock")
     if report_lock is None:
@@ -906,19 +577,7 @@ def generate_analysis_report(
             usage,
             run_id,
         )
-        if kind == "weekly":
-            topics = _research_topics(period, records, model_config, usage, run_id)
-            research_markdown = _grounded_research_section(
-                topics, model_config, usage, run_id
-            )
-            body = (
-                "## 一、整理与回顾\n\n"
-                + retrospective_markdown
-                + "\n\n## 二、领域探索与研究\n\n"
-                + research_markdown
-            )
-        else:
-            body = "## 整理与回顾\n\n" + retrospective_markdown
+        body = "## 整理与回顾\n\n" + retrospective_markdown
 
         origin_label = "手动" if origin == "manual" else "自动"
         trigger_label = {

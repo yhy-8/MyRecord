@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# AgentRecord 服务端简单备份：把整个 data 空间打 tar 到备份目录，保留最近 N 份。
+# MyRecord 服务端简单备份：把整个 data 空间打 tar 到备份目录，保留最近 N 份。
 # 用法（在独立 server 工程内）：server/deploy/backup.sh [备份目录] [保留份数]
 set -euo pipefail
 
@@ -17,11 +17,11 @@ KEEP="${2:-7}"
 
 mkdir -p "$BACKUP_DIR"
 STAMP="$(date +%Y%m%d-%H%M%S)"
-OUT="$BACKUP_DIR/agentrecord-data-$STAMP.tar.gz"
+OUT="$BACKUP_DIR/MyRecord-data-$STAMP.tar.gz"
 
 tar -czf "$OUT" -C "$(dirname "$DATA_DIR")" "$(basename "$DATA_DIR")"
 echo "已备份: $OUT"
 
 # 只保留最近 KEEP 份
-ls -1t "$BACKUP_DIR"/agentrecord-data-*.tar.gz 2>/dev/null | tail -n +"$((KEEP+1))" | xargs -r rm -f
+ls -1t "$BACKUP_DIR"/MyRecord-data-*.tar.gz 2>/dev/null | tail -n +"$((KEEP+1))" | xargs -r rm -f
 echo "备份完成（保留最近 $KEEP 份）。"

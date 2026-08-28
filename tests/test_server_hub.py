@@ -16,7 +16,7 @@ import requests
 
 
 def _tmp_data_dir() -> Path:
-    return Path(tempfile.mkdtemp(prefix="agentrecord-p1-"))
+    return Path(tempfile.mkdtemp(prefix="myrecord-p1-"))
 
 
 class AuthTest(unittest.TestCase):
@@ -202,7 +202,7 @@ class StoreRenderTest(unittest.TestCase):
         records = (records_dir / "2024-01-01.md").read_text(encoding="utf-8")
         self.assertIn("保留正文", records)
         self.assertNotIn("待删除正文", records)  # 已删正文应收进垃圾桶
-        self.assertIn("agentrecord-tombstone", records)
+        self.assertIn("myrecord-tombstone", records)
 
         trash = (trash_dir / "2024-01-01.md").read_text(encoding="utf-8")
         self.assertIn("待删除正文", trash)
