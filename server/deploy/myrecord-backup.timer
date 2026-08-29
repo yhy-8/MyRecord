@@ -1,0 +1,12 @@
+# MyRecord 服务端每周自动备份定时器：每周一 00:00 触发 myrecord-backup.service。
+# Persistent=true：错过触发时间（如关机）则在下次开机后补跑。
+
+[Unit]
+Description=Weekly trigger for MyRecord server backup
+
+[Timer]
+OnCalendar=weekly
+Persistent=true
+
+[Install]
+WantedBy=timers.target

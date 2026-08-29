@@ -10,8 +10,6 @@ MyRecord 是一个**本地优先、多设备云端同步**的个人记录与周�
 - **客户端（`client/`）**：薄记录端。只负责写当天日记、实时同步、查看与常用命令；**不保存模型密钥、
   不做本地 AI**。
 
-架构决策与历史背景见 [`Docs/重构计划与功能说明.md`](./Docs/重构计划与功能说明.md)。
-
 ## 目录结构
 
 ```text
@@ -127,7 +125,7 @@ python -m client
 | 总体工作配合说明 | 本文件（README.md） | 两端如何协作、仓库代码总览、启动/运行/测试 |
 | 客户端说明 | [`client/README.md`](./client/README.md) | client/ 每个文件/模块的职责与命令 |
 | 服务端说明 | [`server/README.md`](./server/README.md) | server/ 每个文件/模块的职责、协议与部署 |
-| 深度设计参考 | [`Docs/`](./Docs) | 架构原则、同步机制、AI 报告流程、重构/测试/审查 |
+| 深度设计参考 | [`Docs/`](./Docs) | 架构原则、同步机制、AI 报告流程、部署 |
 
 ## 自动任务
 
@@ -140,7 +138,6 @@ python -m client
 - [`Docs/Agent与报告流程.md`](./Docs/Agent与报告流程.md) — 云端 AI 各阶段与总结流程
 - [`Docs/运行机制与数据.md`](./Docs/运行机制与数据.md) — 配置、文件布局、自动任务、故障恢复
 - [`Docs/部署指南.md`](./Docs/部署指南.md) — 端口开放、systemd 部署、签发设备凭证、备份与加密传输
-- [`Docs/重构计划与功能说明.md`](./Docs/重构计划与功能说明.md) — 两端架构的已定稿功能契约
 
 > 根目录已不再提供 `main.py` / `config.yaml`（旧单机残留已删除）。
 > 入口严格区分：客户端用 `python -m client`，服务端用 `python -m server.main run`。
