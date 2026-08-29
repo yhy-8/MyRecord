@@ -264,8 +264,12 @@ def serve(
     admin_retry=None,
     admin_set_model=None,
     status_ai=None,
+    ssl_context=None,
 ):
     server = ThreadingHTTPServer((host, port), SyncHandler)
+    if ssl_context is not None:
+        # 用自签证书直连 TLS：把监听 socket 包成 TLS，客户端用 verify 校验证书
+        server.socket = ssl_context.wrap_socket(server.socket, server_side=True)
     server.store = store
     server.list_reports = list_reports or (lambda kind: [])
     server.read_report = read_report or (lambda rel: None)

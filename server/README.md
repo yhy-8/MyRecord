@@ -19,12 +19,13 @@ python -m server.main run
 
 ```text
 python -m server.main run            启动同步+AI 服务
-python -m server.main token create --device 名称   签发新设备令牌（首登用）
-python -m server.main token list     列出活动设备
-python -m server.main token rotate --device 名称   轮换令牌
-python -m server.main token revoke --device 名称   停用设备
+python -m server.main token create --device 标签   签发/重签唯一链接凭证（覆盖旧 token）
+python -m server.main token list                   查看当前唯一凭证状态
+python -m server.main token rotate --device 标签     重新签发（覆盖旧 token）
+python -m server.main token revoke --device 标签     停用凭证（所有端失去同步）
 python -m server.main import --records 路径    导入旧版 Records
 python -m server.main render          重渲染当天 Records
+python -m server.main cert             生成自签证书（服务端直连 TLS，`--ip` 可指定 SAN）
 ```
 
 ## 角色：与客户端的协作
@@ -51,7 +52,7 @@ python -m server.main render          重渲染当天 Records
 |---|---|
 | `hub/server.py` | HTTP 同步服务（stdlib ThreadingHTTPServer）：`/api/sync/push`、`/api/sync/pull`、`/api/sync/longpoll`、`/api/entries/delete`、`/api/status`、`/api/reports`、`/api/admin/*`；Bearer + device_id 鉴权 |
 | `hub/store.py` | 权威条目存储：append-only 合并（按 entry_id 去重）、tombstone、垃圾桶、设备令牌、全局 `version` 同步游标、`wait_for_change`（长轮询等待）、拉取 `pull(version)` |
-| `hub/auth.py` | 设备令牌哈希（scrypt，加盐、常量时间），只存哈希，不落明文 |
+| `hub/auth.py` | 链接凭证令牌哈希（scrypt，加盐、常量时间），只存哈希，不落明文 |
 | `hub/render.py` | 日记文件格式（两端共用）：渲染 entry 标记、tombstone 占位、`<summary>` 区域，并反向解析文件为条目列表（兼容新旧 entry 标记） |
 
 ### 云端 AI（ai/）
@@ -89,7 +90,8 @@ python -m server.main render          重渲染当天 Records
 
 - 原始日记是唯一事实源；报告、总结、自动任务状态都是可重建派生数据。
 - 删改为垃圾桶语义（tombstone），不做硬删除。
-- 设备鉴权用长令牌，服务端只存哈希（scrypt）。
+- 链接凭证是**单一共享 token**（服务端只存 scrypt 哈希），凭证不绑定设备；设备由各端自报本机名区分。
+- 支持服务端直连自签证书 TLS（`cert` 生成，`config.yaml` 填 `server.tls`），客户端 `verify` 校验收信。
 - 模型密钥只在服务端；不入数据空间、不入日志。
 - 日记文件统一使用 `<!-- myrecord-* -->` 条目/删除标记；不再兼容旧 `agentrecord-*`。
   迁移前数据先就地转新格式：`python migrate_markers.py [Records 目录]`。

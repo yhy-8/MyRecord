@@ -70,10 +70,10 @@ python -m server.main run
 
 ```text
 python -m server.main run                    启动同步+AI 服务
-python -m server.main token create --device 名称   签发新设备令牌（首登用）
-python -m server.main token list             列出活动设备
-python -m server.main token rotate --device 名称   轮换令牌
-python -m server.main token revoke --device 名称   停用设备
+python -m server.main token create --device 标签   签发/重签唯一链接凭证（覆盖旧 token）
+python -m server.main token list                   查看当前唯一凭证状态
+python -m server.main token rotate --device 标签     重新签发（覆盖旧 token）
+python -m server.main token revoke --device 标签     停用凭证（所有端失去同步）
 python -m server.main import --records 路径  导入旧版 Records
 python -m server.main render                 重渲染当天 Records
 ```
@@ -82,7 +82,8 @@ python -m server.main render                 重渲染当天 Records
 
 安装依赖（在独立 client 工程内）：`pip install -r client/requirements.txt`。
 
-首次在客户端写入服务端签发的凭据（`device_id` 与 `token`）到 `client/credentials.json`，然后：
+将服务端签发的唯一链接凭证 `token` 写入 `client/credentials.json`（格式见样板
+`client/credentials.example.json`；设备名默认用本机名，如 `MK8`、`vivo y78`），然后：
 
 ```bash
 python -m client
@@ -111,7 +112,10 @@ python -m client
 
 - **原始日记是唯一事实源**；总结、报告、自动任务状态都是可重建的派生数据。
 - 记录写入永不因同步失败回滚；删改为**垃圾桶语义**（tombstone），不做硬删除，防“已删条目复活”。
-- 设备鉴权用长令牌；服务端只存令牌哈希（scrypt）。传输应为 HTTPS（当前样例默认 http，上线请启用 TLS）。
+- 链接凭证是**单一共享 token**（服务端只存 scrypt 哈希），凭证不绑定设备：持有 token 即可用
+  任意客户端同步，设备由各端自报本机名区分，每条记录带上设备名。
+- 传输建议启用 TLS：自签证书直连即可（无需反向代理），`python -m server.main cert` 一键生成，
+  客户端 `config.yaml` 的 `verify` 校验收信。无凭证/离线时仍可本地记录，上线后按内容一致 id 自动合并。
 - 模型密钥只在服务端；不入数据空间、不入日志。
 - 日记文件的条目/删除标记统一采用 `<!-- myrecord-* -->` 格式。迁移前的旧数据（`agentrecord-*`）
   需先就地转新格式：`python migrate_markers.py [Records 目录]`。

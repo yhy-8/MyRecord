@@ -67,32 +67,37 @@ class Store:
     # ---------- 设备与令牌 ----------
 
     def register_device(self, name: str, token: str) -> str:
-        """注册新设备，返回其 device_id（标签）。"""
+        """签发链接凭证（单一凭证模型）。
+
+        服务端只存在唯一一个 token：签发新 token 会直接覆盖并删除旧 token，
+        旧凭证立即失效。返回设备标签（仅用于展示/管理）。
+        """
         with self._lock:
-            device_id = self._unique_device_id(name)
-            self.data["devices"][device_id] = {
-                "created_at": int(datetime.datetime.now().timestamp()),
-                "token_hash": auth.hash_token(token),
-                "active": True,
+            device_id = auth.slugify(name) or "device"
+            self.data["devices"] = {
+                device_id: {
+                    "created_at": int(datetime.datetime.now().timestamp()),
+                    "token_hash": auth.hash_token(token),
+                    "active": True,
+                }
             }
             self._save()
             return device_id
 
-    def _unique_device_id(self, name: str) -> str:
-        base = auth.slugify(name) or "device"
-        device_id = base
-        index = 2
-        while device_id in self.data["devices"]:
-            device_id = f"{base}-{index}"
-            index += 1
-        return device_id
-
     def verify_device(self, device_id: str, token: str) -> bool:
+        """校验链接凭证。
+
+        凭证不绑定具体设备：只要 token 匹配任一活动凭证即放行。device_id 是
+        客户端自报的本机名（用于条目归属与展示），不参与令牌匹配——符合“只签发
+        一个链接凭证，各端用本机名区分”的模型。
+        """
         with self._lock:
-            record = self.data["devices"].get(device_id)
-            if not record or record.get("active") is not True:
-                return False
-            return auth.verify_token(token, record["token_hash"])
+            for record in self.data["devices"].values():
+                if record.get("active") is not True:
+                    continue
+                if auth.verify_token(token, record["token_hash"]):
+                    return True
+            return False
 
     def rotate_token(self, device_id: str, token: str) -> bool:
         with self._lock:

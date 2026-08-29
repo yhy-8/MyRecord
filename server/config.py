@@ -8,6 +8,7 @@ _DEFAULTS = {
     "host": "0.0.0.0",
     "port": 8765,
     "data_dir": "./data",
+    "tls": {"certfile": "", "keyfile": ""},
 }
 
 
@@ -45,4 +46,17 @@ def load() -> dict:
         merged["data_dir"] = data_dir
     else:
         merged["data_dir"] = (config_path().parent / data_dir).resolve()
+    tls = merged.get("tls")
+    if not isinstance(tls, dict):
+        merged["tls"] = {"certfile": "", "keyfile": ""}
+    else:
+        merged["tls"] = {
+            "certfile": str(tls.get("certfile") or ""),
+            "keyfile": str(tls.get("keyfile") or ""),
+        }
+    base_dir = config_path().parent
+    for key in ("certfile", "keyfile"):
+        raw = merged["tls"][key]
+        if raw and not _is_absolute_path(Path(raw)):
+            merged["tls"][key] = str((base_dir / raw).resolve())
     return {"server": merged, "raw": value if isinstance(value, dict) else {}}

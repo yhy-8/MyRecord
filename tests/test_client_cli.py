@@ -10,12 +10,19 @@
 """
 
 import datetime
+import json
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from client import cli as cli_app
+from client import config as client_config
 from client import identity as client_identity
+from client import journal as client_journal
+from client import sync as client_sync
+from client.sync import SyncClient
+
+from client import cli as cli_app
 
 
 class ClientCLIHelpTests(unittest.TestCase):
@@ -27,14 +34,59 @@ class ClientCLIHelpTests(unittest.TestCase):
         self.assertNotIn(" 模式", text)
 
 
+class ClientCLIUnconfiguredOfflineTests(unittest.TestCase):
+    """本地优先：无凭据/离线时仍能本地记录，push 静默失败并留离线队列。"""
+
+    def test_plain_input_records_locally_without_credentials(self):
+        root = Path(tempfile.mkdtemp(prefix="cli-nocred-"))
+        records = root / "Records"
+        records.mkdir(parents=True, exist_ok=True)
+        entry = {
+            "entry_id": "e-test1",
+            "device_id": "desk-01",
+            "date": "2024-06-01",
+            "ts": 5,
+            "tag": "",
+            "text": "无凭据本地记录",
+        }
+        # 无凭据 + 死端口：真实 SyncClient 与真实 journal
+        with patch.object(client_sync, "_state_path", return_value=root / "state.json"), patch.object(
+            client_sync, "_outbox_path", return_value=root / "outbox.json"
+        ), patch.object(
+            client_config,
+            "load",
+            return_value={
+                "client": {
+                    "server_url": "http://127.0.0.1:1",
+                    "records_dir": records,
+                    "analysis_dir": root / "AnalysisReports",
+                    "log_dir": root / "Log",
+                    "longpoll_timeout_seconds": 25,
+                    "verify": "",
+                }
+            },
+        ), patch.object(client_identity, "load", return_value={}):
+            client = SyncClient()
+            client.push_new(entry)  # 无凭据：内部静默失败，不抛异常
+            client_journal.append_record(entry)  # 本地记录永不依赖凭据/在线
+
+            day = (records / "2024-06-01.md").read_text(encoding="utf-8")
+            self.assertIn("无凭据本地记录", day)
+            self.assertIn("e-test1", day)
+
+        # 离线队列保留，等待拿到凭据后上线冲刷
+        outbox = json.loads((root / "outbox.json").read_text(encoding="utf-8"))
+        self.assertEqual(1, len(outbox["entries"]))
+
+
 class ClientCLIPlainInputTests(unittest.TestCase):
     def test_plain_input_builds_entry_and_writes_and_pushes(self):
         with patch.object(cli_app, "journal") as journal, patch.object(
             client_identity, "make_entry_id"
-        ) as make_entry_id, patch.object(client_identity, "require") as require:
+        ) as make_entry_id, patch.object(client_identity, "device_name") as device_name:
             make_entry_id.return_value = "e2e-a-1"
+            device_name.return_value = "e2e-a"
             journal.append_record = Mock()
-            require.return_value = {"device_id": "e2e-a", "token": "t"}
 
             client = Mock()
             cli_app._write_record(client, "普通记录")

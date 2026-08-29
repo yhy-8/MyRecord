@@ -10,6 +10,7 @@ _DEFAULTS = {
     "analysis_dir": "./AnalysisReports",
     "log_dir": "./Log",
     "longpoll_timeout_seconds": 25,
+    "verify": "",
 }
 
 

@@ -42,60 +42,56 @@ class ServerMainTokenTests(unittest.TestCase):
                 return line[len("token: "):].strip()
         return None
 
-    def test_token_create_lists_and_revokes(self):
-        rc, text = self._capture(["token", "create", "--device", "phone a"])
+    def test_token_single_credential_create_list_revoke(self):
+        # 单一链接凭证：create 无需 --device，签发唯一 token
+        rc, text = self._capture(["token", "create"])
         self.assertEqual(0, rc)
-        self.assertIn("device_id: phone-a", text)
+        self.assertIn("device_id: sync", text)
         self.assertIn("token: ", text)
-
-        store = Store(self.data_dir / "state.json")
-        self.assertIn("phone-a", store.device_ids())
         token = self._token_from(text)
         self.assertIsNotNone(token)
-        self.assertTrue(store.verify_device("phone-a", token))
+
+        # 凭证不绑定设备名：任意自报名字都能通过校验（单一凭证模型）
+        store = Store(self.data_dir / "state.json")
+        self.assertTrue(store.verify_device("whatever", token))
 
         rc, listing = self._capture(["token", "list"])
         self.assertEqual(0, rc)
-        self.assertIn("phone-a", listing)
+        self.assertIn("sync", listing)
 
-        rc, _ = self._capture(["token", "revoke", "--device", "phone-a"])
+        rc, _ = self._capture(["token", "revoke"])
         self.assertEqual(0, rc)
-        # 重新读取 state.json，确认撤销已持久化
         fresh = Store(self.data_dir / "state.json")
-        self.assertFalse(fresh.verify_device("phone-a", token))
-        self.assertNotIn("phone-a", fresh.device_ids())
+        self.assertFalse(fresh.verify_device("whatever", token))
+        self.assertNotIn("sync", fresh.device_ids())
 
-    def test_token_rotate_changes_token(self):
-        rc, first_text = self._capture(["token", "create", "--device", "device-A"])
+    def test_token_rotate_overwrites_old_token(self):
+        rc, first_text = self._capture(["token", "create"])
         self.assertEqual(0, rc)
-        device_id = "device-A"
         token1 = self._token_from(first_text)
         self.assertIsNotNone(token1)
 
-        rc, second_text = self._capture(
-            ["token", "rotate", "--device", device_id]
-        )
+        rc, second_text = self._capture(["token", "rotate"])
         self.assertEqual(0, rc)
         token2 = self._token_from(second_text)
 
         store = Store(self.data_dir / "state.json")
         self.assertNotEqual(token1, token2)
-        self.assertFalse(store.verify_device(device_id, token1))
-        self.assertTrue(store.verify_device(device_id, token2))
+        # 覆盖：旧 token 立即失效，只有新 token 有效
+        self.assertFalse(store.verify_device("sync", token1))
+        self.assertTrue(store.verify_device("sync", token2))
 
-    def test_token_revoke_unknown_device_returns_error(self):
+    def test_token_revoke_without_valid_credential_returns_error(self):
         err = io.StringIO()
         with patch("sys.stdout", io.StringIO()), patch("sys.stderr", err):
-            rc = server_main.main(["token", "revoke", "--device", "missing"])
+            rc = server_main.main(["token", "revoke"])
         self.assertEqual(1, rc)
-        self.assertIn("设备不存在", err.getvalue())
+        self.assertIn("无有效链接凭证", err.getvalue())
 
-    def test_token_create_requires_device(self):
-        err = io.StringIO()
-        with patch("sys.stdout", io.StringIO()), patch("sys.stderr", err):
-            rc = server_main.main(["token", "create"])
-        self.assertEqual(2, rc)
-        self.assertIn("--device", err.getvalue())
+    def test_token_create_needs_no_device_arg(self):
+        rc, text = self._capture(["token", "create"])
+        self.assertEqual(0, rc)
+        self.assertIn("token: ", text)
 
 
 class ServerMainRenderImportTests(unittest.TestCase):

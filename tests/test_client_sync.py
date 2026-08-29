@@ -46,10 +46,13 @@ class ClientSyncE2ETestBase(unittest.TestCase):
         self._data = _tmp_dir("myrecord-srv-")
         self.store = Store(self._data / "state.json")
 
-        self.token_a = auth.new_token()
-        self.device_a = self.store.register_device("e2e-a", self.token_a)
-        self.token_b = auth.new_token()
-        self.device_b = self.store.register_device("e2e-b", self.token_b)
+        # 单一共享链接凭证：所有客户端用同一个 token，设备身份由各端自报本机名区分。
+        self.token = auth.new_token()
+        self.store.register_device("e2e", self.token)
+        self.token_a = self.token
+        self.token_b = self.token
+        self.device_a = "e2e-a"  # 客户端自报本机名
+        self.device_b = "e2e-b"
 
         self.httpd = serve(self.store, "127.0.0.1", 0)
         self.port = self.httpd.server_address[1]
@@ -83,9 +86,10 @@ class ClientSyncE2ETestBase(unittest.TestCase):
             ),
             patch.object(
                 client_identity,
-                "require",
-                return_value={"device_id": device, "token": token},
+                "load",
+                return_value={"token": token, "device_id": device},
             ),
+            patch.object(client_identity, "device_name", return_value=device),
         ]
         for p in patches:
             p.start()

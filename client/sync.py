@@ -68,11 +68,21 @@ class SyncClient:
 
     # ---------- 底层请求 ----------
 
+    def _verify(self):
+        """TLS 服务器证书校验：返回路径或 False。
+
+        - 空/未配置 → False（跳过校验，适用于 http 明文或仅内网信任）
+        - 某路径 → 交给 requests 校验该 CA/自签证书
+        """
+        return config.load()["client"].get("verify") or False
+
     def _headers(self):
-        cred = identity.require()
+        cred = identity.load()
+        if not cred:
+            raise SyncError("未配置凭据，仅本地记录；上线前请先写入 credentials.json。")
         return {
             "Authorization": f"Bearer {cred['token']}",
-            "X-Device-Id": cred["device_id"],
+            "X-Device-Id": identity.device_name(),
         }
 
     def _request(self, method: str, path: str, *, json_body=None, timeout: float = 30.0):
@@ -83,6 +93,7 @@ class SyncClient:
                 headers=self._headers(),
                 json=json_body,
                 timeout=timeout,
+                verify=self._verify(),
             )
         except requests.RequestException as error:
             raise SyncError(f"无法连接服务端: {error}") from error
@@ -190,6 +201,7 @@ class SyncClient:
                 self.base_url + "/api/reports/" + rel,
                 headers=self._headers(),
                 timeout=30.0,
+                verify=self._verify(),
             )
         except requests.RequestException:
             return None

@@ -197,17 +197,25 @@ def _handle_model(client: SyncClient) -> None:
 
 
 def _write_record(client: SyncClient, text: str) -> None:
-    cred = identity.require()
+    """本地优先写入：不要求凭据/在线，始终先落盘；随后尽力即时同步。
+
+    entry_id 由内容+时间确定性生成（设备无关），所以哪怕在没有凭据、离线
+    的情况下记录，上线拿到凭据后也能被服务端按 entry_id 正确合并去重。
+    """
     now = datetime.datetime.now()
     entry = {
-        "entry_id": identity.make_entry_id(cred["device_id"]),
-        "device_id": cred["device_id"],
+        "entry_id": identity.make_entry_id(
+            now.strftime("%Y-%m-%d"), int(now.timestamp()), text
+        ),
+        "device_id": identity.device_name(),  # 设备名：本机名，用于区分设备
         "date": now.strftime("%Y-%m-%d"),
         "ts": int(now.timestamp()),
         "tag": "",
         "text": text,
     }
+    # 本地写入永不回滚，与同步成败无关
     journal.append_record(entry)
+    # 尽力即时同步：无凭据或离线时 push_new 会静默失败并留在离线队列
     client.push_new(entry)
 
 
@@ -232,17 +240,17 @@ def _longpoll_loop(client: SyncClient) -> None:
 
 
 def run_interactive() -> None:
-    # 仅确认本地凭据存在（返回值不用）
-    identity.require()
+    # 不要求凭据：无凭据时仅本地记录，上线拿到凭据后再同步（本地优先）
     client = SyncClient()
     print("已连接服务端：" + client.base_url)
 
     # 启动时一次性链接云端并完整同步（拉取对账 + 冲刷离线队列 + 同步报告）
+    # 无凭据或离线都只是无法同步，不影响本地记录
     try:
         client.full_sync()
         print("启动同步完成：本地已与云端对账一致。")
     except SyncError as error:
-        print(f"[yellow][!][/yellow] 启动同步失败（离线/服务端不可达），已保留本地与离线队列：{error}")
+        print(f"[yellow][!][/yellow] {error}（本地照常记录，上线后自动同步）")
 
     _banner()
     print(_help_text())

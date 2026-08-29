@@ -111,20 +111,20 @@ class RenderParserTest(unittest.TestCase):
 
 
 class StoreDeviceTests(unittest.TestCase):
-    """设备注册、令牌校验/轮换/撤销、快照与损坏恢复。"""
+    """单一链接凭证：签发覆盖旧凭证、校验/轮换/撤销、快照与损坏恢复。"""
 
-    def test_device_name_uniqueness_and_verify(self):
+    def test_register_replaces_existing_single_token(self):
+        """签发新 token 直接覆盖并删除旧 token（单一凭证模型）。"""
         data = _tmp_data_dir() / "state.json"
         store = Store(data)
         token1 = auth.new_token()
         token2 = auth.new_token()
-        d1 = store.register_device("phone", token1)
-        d2 = store.register_device("phone", token2)
-        self.assertEqual("phone", d1)
-        self.assertEqual("phone-2", d2)
-        self.assertTrue(store.verify_device("phone", token1))
-        self.assertFalse(store.verify_device("phone", token2))
-        self.assertTrue(store.verify_device("phone-2", token2))
+        store.register_device("phone", token1)
+        self.assertTrue(store.verify_device("any-name", token1))  # 凭证不绑定设备名
+        # 重新签发 → 旧 token 失效，只剩新 token
+        store.register_device("phone", token2)
+        self.assertFalse(store.verify_device("any-name", token1))
+        self.assertTrue(store.verify_device("any-name", token2))
 
     def test_rotate_token(self):
         data = _tmp_data_dir() / "state.json"
@@ -152,10 +152,11 @@ class StoreDeviceTests(unittest.TestCase):
         data = _tmp_data_dir() / "state.json"
         store = Store(data)
         store.register_device("b", auth.new_token())
-        store.register_device("a", auth.new_token())
-        store.revoke_device("b")
+        store.register_device("a", auth.new_token())  # 单一凭证：覆盖旧 token
         ids = store.device_ids()
-        self.assertEqual(["a"], ids)
+        self.assertEqual(["a"], ids)  # 只剩当前唯一凭证
+        store.revoke_device("a")
+        self.assertEqual([], store.device_ids())
 
     def test_snapshot_excludes_token_hashes(self):
         data = _tmp_data_dir() / "state.json"

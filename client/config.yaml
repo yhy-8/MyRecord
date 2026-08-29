@@ -8,3 +8,4 @@ client:
   analysis_dir: "./AnalysisReports"       # 本地报告完整副本（云端同步）
   log_dir: "./Log"                       # 本地诊断日志
   longpoll_timeout_seconds: 25           # 长轮询单次挂起秒数（扇出即拉取）
+  verify: ""                             # TLS 可空：空=http明文/不校验；设服务端自签证书/CA 路径=https 直连校验

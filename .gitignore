@@ -6,6 +6,9 @@ client/Records/
 AnalysisReports/
 Log/
 
+# 服务端运行时数据空间（权威 state.json、Records、Trash、报告、日志、TLS 私钥）。
+server/data/
+
 # 设备身份凭证（服务端签发的 device_id/token），等同密钥，不入版本库。
 client/credentials.json
 

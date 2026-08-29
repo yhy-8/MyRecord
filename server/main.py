@@ -2,6 +2,8 @@
 
 import argparse
 import datetime
+import os
+import ssl
 import sys
 from pathlib import Path
 
@@ -93,6 +95,25 @@ def _command_run(args: argparse.Namespace) -> int:
     render_records()
     host = server_cfg["host"]
     port = int(server_cfg["port"])
+    certfile = server_cfg["tls"]["certfile"]
+    keyfile = server_cfg["tls"]["keyfile"]
+    if not (certfile and keyfile):
+        print(
+            "[!] 禁止明文传输：服务端只能在 TLS 下运行。\n"
+            "请先执行 `python -m server.main cert` 生成自签证书，再在\n"
+            "server/config.yaml 的 server.tls.certfile / keyfile 填入路径。",
+            file=sys.stderr,
+        )
+        return 2
+    if not (Path(certfile).is_file() and Path(keyfile).is_file()):
+        print(
+            f"[!] TLS 证书/密钥不存在：{certfile}, {keyfile}\n"
+            "请先执行 `python -m server.main cert` 生成自签证书。",
+            file=sys.stderr,
+        )
+        return 2
+    ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ssl_context.load_cert_chain(certfile, keyfile)
     httpd = hub_server.serve(
         store,
         host,
@@ -103,6 +124,7 @@ def _command_run(args: argparse.Namespace) -> int:
         admin_retry=admin_retry,
         admin_set_model=admin_set_model,
         status_ai=status_ai,
+        ssl_context=ssl_context,
     )
 
     import threading
@@ -127,37 +149,35 @@ def _command_run(args: argparse.Namespace) -> int:
     return 0
 
 
+_CRED_LABEL = "sync"  # 唯一链接凭证的内部标签（单一凭证模型，无多设备）
+
+
 def _command_token(args: argparse.Namespace) -> int:
+    """管理唯一链接凭证。
+
+    服务端只存在唯一一个 token；create 与 rotate 等价（签发并覆盖旧 token）。
+    不再需要 --device：凭证不绑定设备，设备由各端自报本机名区分。
+    """
     store, _ = _store(Path(config.load()["server"]["data_dir"]))
     if args.action == "list":
-        for device_id in store.device_ids():
-            print(device_id)
+        active = store.device_ids()
+        if active:
+            print(f"有效链接凭证：{active[0]}")
+        else:
+            print("当前无有效链接凭证（先执行 token create）。")
         return 0
     if args.action in ("create", "rotate"):
-        if not args.device:
-            print("需要 --device 参数。", file=sys.stderr)
-            return 2
         token = auth.new_token()
-        if args.action == "create":
-            device_id = store.register_device(args.device, token)
-            print(f"device_id: {device_id}")
-            print(f"token: {token}")
-        else:
-            if not store.rotate_token(args.device, token):
-                print("设备不存在或已停用。", file=sys.stderr)
-                return 1
-            print(f"device_id: {args.device}")
-            print(f"token: {token}")
-        print("令牌只显示一次，请妥善保存（服务端只存哈希）。")
+        store.register_device(_CRED_LABEL, token)  # 覆盖并删除旧 token
+        print(f"device_id: {_CRED_LABEL}")
+        print(f"token: {token}")
+        print("令牌只显示一次，请妥善保存（服务端只存哈希）。签发会覆盖并作废旧凭证。")
         return 0
     if args.action == "revoke":
-        if not args.device:
-            print("需要 --device 参数。", file=sys.stderr)
-            return 2
-        if not store.revoke_device(args.device):
-            print("设备不存在。", file=sys.stderr)
+        if not store.revoke_device(_CRED_LABEL):
+            print("当前无有效链接凭证可停用。", file=sys.stderr)
             return 1
-        print(f"已停用设备 {args.device}")
+        print(f"已停用链接凭证 {_CRED_LABEL}（所有客户端无法再同步）。")
         return 0
     print(f"未知操作: {args.action}", file=sys.stderr)
     return 2
@@ -202,16 +222,90 @@ def _command_render(args: argparse.Namespace) -> int:
     return 0
 
 
+def _command_cert(args: argparse.Namespace) -> int:
+    """生成自签证书（CA 能力）用于服务端直连 TLS。
+
+    输出到 <data_dir>/tls/server.crt 与 server.key；证书本身可作 CA，
+    客户端 config.yaml 的 verify 指向 .crt 即可校验收信。可指定 --cn 与
+    --ip/--dns 作为 SAN，确保客户端连接的地址被证书覆盖。
+    """
+    try:
+        import ipaddress
+
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        from cryptography.x509.oid import NameOID
+    except ImportError:
+        print(
+            "需要 cryptography：`pip install cryptography`（server/requirements.txt 已含）",
+            file=sys.stderr,
+        )
+        return 2
+
+    cfg = config.load()
+    data_dir = Path(cfg["server"]["data_dir"])
+    tls_dir = data_dir / "tls"
+    tls_dir.mkdir(parents=True, exist_ok=True)
+    certfile = tls_dir / "server.crt"
+    keyfile = tls_dir / "server.key"
+
+    import socket
+
+    cn = args.cn or socket.gethostname()
+    names = [x509.DNSName(cn)]
+    for dns in args.dns or []:
+        names.append(x509.DNSName(dns))
+    for ip in args.ip or []:
+        names.append(x509.IPAddress(ipaddress.ip_address(ip)))
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    subject = issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn)])
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(issuer)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(datetime.datetime.now(datetime.timezone.utc))
+        .not_valid_after(
+            datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=3650)
+        )
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .add_extension(x509.SubjectAlternativeName(names), critical=False)
+        .sign(key, hashes.SHA256())
+    )
+    keyfile.write_bytes(
+        key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.TraditionalOpenSSL,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+    )
+    certfile.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    os.chmod(keyfile, 0o600)
+
+    print(f"已生成自签证书（CA 能力，有效期 10 年）：")
+    print(f"  cert: {certfile}")
+    print(f"  key : {keyfile}")
+    print("配置 server/config.yaml 的 server.tls.certfile/keyfile 指向上述路径即启用 HTTPS。")
+    print("客户端 config.yaml 设 server_url=https://<地址>:8765、verify=该 .crt 证书路径（含本机名 SAN，建议 --ip 加服务器 IP）。")
+    return 0
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="server")
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("run", help="启动 hub 服务")
-    token = sub.add_parser("token", help="设备令牌管理")
+    token = sub.add_parser("token", help="链接凭证管理（单一共享 token）")
     token.add_argument("action", choices=["create", "rotate", "revoke", "list"])
-    token.add_argument("--device", default="")
     imp = sub.add_parser("import", help="导入旧版 Records 目录")
     imp.add_argument("--records", required=True)
     sub.add_parser("render", help="重新渲染当天 Records")
+    cert = sub.add_parser("cert", help="生成自签证书（服务端直连 TLS）")
+    cert.add_argument("--cn", default="", help="证书 CN（默认本机名）")
+    cert.add_argument("--ip", action="append", default=[], help="SAN IP，可多次（如服务器公网/局域网 IP）")
+    cert.add_argument("--dns", action="append", default=[], help="SAN 域名，可多次")
     return parser.parse_args(argv)
 
 
@@ -226,6 +320,8 @@ def main(argv: list[str] | None = None) -> int:
         return _command_import(args)
     if command == "render":
         return _command_render(args)
+    if command == "cert":
+        return _command_cert(args)
     print(f"未知命令: {command}", file=sys.stderr)
     return 2
 

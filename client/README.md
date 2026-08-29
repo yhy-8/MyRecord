@@ -53,7 +53,7 @@ python -m client
 |---|---|
 | `__main__.py` | 程序入口：`python -m client` → `run_interactive()` |
 | `config.py` / `config.yaml` | 读取本地配置（服务器地址、数据目录、长轮询秒数） |
-| `identity.py` | 设备身份与本地状态：读写 `credentials.json`（device_id/token）、`seq.json` 本设备单调序号（`make_entry_id = device_id-序号`） |
+| `identity.py` | 链接凭证与设备身份：读写 `credentials.json`（单一共享 token，可选 device_id 覆盖）；`device_name()` 自报本机名（电脑名/手机名）；`make_entry_id(date,ts,text)` 生成设备无关的确定性 entry_id |
 | `journal.py` | 本地日记渲染与写入：按天 `Records/YYYY-MM-DD.md` 原子追加、对账补齐、tombstone 移除 |
 | `file_lock.py` | 跨进程互斥（`.journal.lock` 等），保证原子写 |
 | `sync.py` | 与中枢的同步客户端：`push_new`（写后即 push）、`send_pending`（冲刷离线队列）、`pull`（拉取对账）、`longpoll`（长连接扇出）、`full_sync`（启动/手动完整同步）、`sync_reports`（同步报告）、`delete_latest`、`status/admin_retry/admin_set_model` |
@@ -61,8 +61,8 @@ python -m client
 
 ## 本地文件
 
-- `credentials.json` 凭据（首登写入）
-- `seq.json` 本设备单调序号（entry_id 生成）
+- `credentials.example.json` 凭据**样板**：复制为 `credentials.json` 并填入服务端签发的 token
+- `credentials.json` 链接凭证（服务端签发的唯一共享 token，可选 device_id 覆盖设备名）
 - `outbox.json` 离线待推送队列
 - `Records/` 本地日记、`AnalysisReports/` 云端报告副本、`Log/` 本地日志
 
@@ -70,4 +70,6 @@ python -m client
 
 - 原始日记是唯一事实源；写后永不因同步失败回滚。
 - 删改是垃圾桶语义（tombstone），不做硬删除。
-- 模型密钥只在服务端；传输建议启用 HTTPS。
+- 凭证是单一共享 token（不入中枢、不入数据空间）；设备由各端自报本机名区分，每条记录带设备名。
+- 传输建议启用 TLS：自签证书直连即可（`server.main cert` 生成，客户端 `verify` 校验收信）。
+- **无凭证/离线时照常本地记录**，上线拿到 token 后按内容一致 id 自动合并。

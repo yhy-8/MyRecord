@@ -23,7 +23,7 @@ class ClientIdentityCredentialsTests(unittest.TestCase):
 
     def test_save_then_load_roundtrip(self):
         with patch.object(identity, "credentials_path", return_value=self.path):
-            identity.save("device-A", "token-123")
+            identity.save("token-123", "device-A")
             value = identity.load()
 
         self.assertEqual({"device_id": "device-A", "token": "token-123"}, value)
@@ -45,32 +45,33 @@ class ClientIdentityCredentialsTests(unittest.TestCase):
 
     def test_require_returns_value_when_configured(self):
         with patch.object(identity, "credentials_path", return_value=self.path):
-            identity.save("d", "t")
+            identity.save("t", "d")
             self.assertEqual({"device_id": "d", "token": "t"}, identity.require())
 
 
-class ClientIdSeqTests(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.path = Path(self.tmp.name) / "seq.json"
+class ClientEntryIdTests(unittest.TestCase):
+    """设备无关的确定性 entry_id：同一记录在任何客户端都得到同一个 id。"""
 
-    def tearDown(self):
-        self.tmp.cleanup()
+    def test_entry_id_deterministic_and_device_independent(self):
+        i1 = identity.make_entry_id("2024-06-01", 1717200000, "第一条")
+        i2 = identity.make_entry_id("2024-06-01", 1717200000, "第一条")
+        self.assertEqual(i1, i2)  # 同记录同 id（跨客户端一致）
+        self.assertTrue(i1.startswith("e"))
 
-    def test_next_seq_is_monotonic_and_persists(self):
-        with patch.object(identity, "seq_path", return_value=self.path):
-            self.assertEqual(1, identity.next_seq())
-            self.assertEqual(2, identity.next_seq())
-            self.assertEqual(3, identity.next_seq())
+        # 不同时间写相同文字 → 不同 id（不误合并同一天重复句子）
+        self.assertNotEqual(i1, identity.make_entry_id("2024-06-01", 1717200060, "第一条"))
+        # 不同文字 → 不同 id
+        self.assertNotEqual(i1, identity.make_entry_id("2024-06-01", 1717200000, "另一条"))
+        # 不同日期 → 不同 id
+        self.assertNotEqual(i1, identity.make_entry_id("2024-06-02", 1717200000, "第一条"))
 
-        # 重新读取（持久化跨重启）
-        with patch.object(identity, "seq_path", return_value=self.path):
-            self.assertEqual(4, identity.next_seq())
+    def test_device_name_defaults_to_hostname(self):
+        with patch.object(identity, "load", return_value={}):
+            self.assertTrue(identity.device_name())
 
-    def test_make_entry_id_combines_device_and_seq(self):
-        with patch.object(identity, "seq_path", return_value=self.path):
-            self.assertEqual("device-A-1", identity.make_entry_id("device-A"))
-            self.assertEqual("device-A-2", identity.make_entry_id("device-A"))
+    def test_device_name_prefers_override(self):
+        with patch.object(identity, "load", return_value={"token": "t", "device_id": "vivo y78"}):
+            self.assertEqual("vivo y78", identity.device_name())
 
 
 class ClientMainTests(unittest.TestCase):
