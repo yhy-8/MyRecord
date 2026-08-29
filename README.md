@@ -129,7 +129,7 @@ python -m client
 | 总体工作配合说明 | 本文件（README.md） | 两端如何协作、仓库代码总览、启动/运行/测试 |
 | 客户端说明 | [`client/README.md`](./client/README.md) | client/ 每个文件/模块的职责与命令 |
 | 服务端说明 | [`server/README.md`](./server/README.md) | server/ 每个文件/模块的职责、协议与部署 |
-| 深度设计参考 | [`Docs/`](./Docs) | 架构原则、同步机制、AI 报告流程、部署 |
+| 深度设计参考 | [`Docs/`](./Docs) | 代码结构、同步机制、条目 id 算法、鉴权与 TLS、部署 |
 
 ## 自动任务
 
@@ -138,10 +138,8 @@ python -m client
 
 ## 文档
 
-- [`Docs/设计原则与系统架构.md`](./Docs/设计原则与系统架构.md) — 产品边界、核心原则、模块职责
-- [`Docs/Agent与报告流程.md`](./Docs/Agent与报告流程.md) — 云端 AI 各阶段与总结流程
-- [`Docs/运行机制与数据.md`](./Docs/运行机制与数据.md) — 配置、文件布局、自动任务、故障恢复
-- [`Docs/部署指南.md`](./Docs/部署指南.md) — 端口开放、systemd 部署、签发设备凭证、备份与加密传输
+- [`Docs/代码结构.md`](./Docs/代码结构.md) — 两端模块职责、数据流、记录格式与 entry_id、鉴权/TLS、同步协议
+- [`Docs/部署指南.md`](./Docs/部署指南.md) — 简明部署步骤（服务端 + 凭证 + TLS + 客户端 + 备份）
 
 > 根目录已不再提供 `main.py` / `config.yaml`（旧单机残留已删除）。
 > 入口严格区分：客户端用 `python -m client`，服务端用 `python -m server.main run`。

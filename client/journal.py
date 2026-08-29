@@ -14,6 +14,7 @@ from . import config
 from .file_lock import file_lock
 
 ENTRY_MARKER_PREFIX = "<!-- myrecord-entry:"
+DEVICE_MARKER_PREFIX = "<!-- myrecord-device:"
 TOMBSTONE_MARKER_PREFIX = "<!-- myrecord-tombstone:"
 
 _DEFAULT_SUMMARY = "暂无今日总结。"
@@ -24,13 +25,19 @@ _DEFAULT_SUMMARY = "暂无今日总结。"
 
 def entry_block(entry: dict) -> str:
     tag = (entry.get("tag") or "").strip()
+    dev = (entry.get("device_id") or "").strip()
     hhmm = datetime.datetime.fromtimestamp(int(entry.get("ts", 0))).strftime("%H:%M")
     entry_id = entry["entry_id"]
     if tag:
         header = f"**{hhmm} {tag}:** {entry.get('text', '')}"
+    elif dev:
+        header = f"**{hhmm} [{dev}]:** {entry.get('text', '')}"
     else:
         header = f"**{hhmm}:** {entry.get('text', '')}"
-    return f"{ENTRY_MARKER_PREFIX}{entry_id} -->\n{header}\n"
+    line = f"{ENTRY_MARKER_PREFIX}{entry_id} -->\n"
+    if dev:
+        line += f"{DEVICE_MARKER_PREFIX}{dev} -->\n"
+    return line + header + "\n"
 
 
 def tombstone_block(entry_id: str) -> str:
@@ -105,8 +112,11 @@ def apply_delta(entries: list[dict], tombstones: list[dict]) -> None:
 
 def _apply_tombstone(entry_id: str) -> None:
     prefix = re.escape(ENTRY_MARKER_PREFIX)
+    dev_prefix = re.escape(DEVICE_MARKER_PREFIX)
     pattern = re.compile(
-        rf"^{prefix}{re.escape(entry_id)} -->\n" r"[^\n]*\n",
+        rf"^{prefix}{re.escape(entry_id)} -->\n"
+        rf"(?:{dev_prefix}[^\n]*\n)?"  # 可选：记录自带的设备名标记行
+        r"[^\n]*\n",
         re.MULTILINE,
     )
     for path in records_dir().glob("*.md"):

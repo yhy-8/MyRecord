@@ -15,6 +15,7 @@ import json
 import re
 
 ENTRY_MARKER_PREFIX = "<!-- myrecord-entry:"
+DEVICE_MARKER_PREFIX = "<!-- myrecord-device:"
 TOMBSTONE_MARKER_PREFIX = "<!-- myrecord-tombstone:"
 
 _DEFAULT_SUMMARY = "暂无今日总结。"
@@ -28,13 +29,19 @@ def _fmt_hhmm(ts: int) -> str:
 def entry_block(entry: dict) -> str:
     """把一条 entry 渲染成文件中的一块（隐藏标记 + 记录行）。"""
     tag = (entry.get("tag") or "").strip()
+    dev = (entry.get("device_id") or "").strip()
     hhmm = _fmt_hhmm(int(entry.get("ts", 0)))
     entry_id = entry["entry_id"]
     if tag:
         header = f"**{hhmm} {tag}:** {entry.get('text', '')}"
+    elif dev:
+        header = f"**{hhmm} [{dev}]:** {entry.get('text', '')}"
     else:
         header = f"**{hhmm}:** {entry.get('text', '')}"
-    return f"{ENTRY_MARKER_PREFIX}{entry_id} -->\n{header}\n"
+    line = f"{ENTRY_MARKER_PREFIX}{entry_id} -->\n"
+    if dev:
+        line += f"{DEVICE_MARKER_PREFIX}{dev} -->\n"
+    return line + header + "\n"
 
 
 def tombstone_block(entry_id: str) -> str:
@@ -70,6 +77,9 @@ def render_day_file(
 _ENTRY_MARKER = re.compile(
     rf"^{re.escape(ENTRY_MARKER_PREFIX)}([^>]+) -->", re.MULTILINE
 )
+_DEVICE_MARKER = re.compile(
+    rf"^{re.escape(DEVICE_MARKER_PREFIX)}([^>]+) -->", re.MULTILINE
+)
 _TOMBSTONE_MARKER = re.compile(
     rf"^{re.escape(TOMBSTONE_MARKER_PREFIX)}([^>]+) -->", re.MULTILINE
 )
@@ -101,11 +111,16 @@ def parse_day_file(date: str, content: str) -> dict:
         (m.start(), m.group(1)) for m in _ENTRY_MARKER.finditer(content)
     ]
     markers.sort(key=lambda item: item[0])
+    dev_markers = [
+        (m.start(), m.group(1)) for m in _DEVICE_MARKER.finditer(content)
+    ]
+    dev_markers.sort(key=lambda item: item[0])
     tombstones = [m.group(1) for m in _TOMBSTONE_MARKER.finditer(content)]
     records = list(_RECORD.finditer(content))
 
     entries = []
     marker_index = 0
+    dev_index = 0
     for index, match in enumerate(records, 1):
         entry_id = None
         if marker_index < len(markers) and markers[marker_index][0] < match.start():
@@ -113,12 +128,20 @@ def parse_day_file(date: str, content: str) -> dict:
             marker_index += 1
         if entry_id is None:
             entry_id = legacy_entry_id(date, index)
+        device_id = ""
+        if dev_index < len(dev_markers) and dev_markers[dev_index][0] < match.start():
+            device_id = dev_markers[dev_index][1]
+            dev_index += 1
         tag = (match.group(2) or "").strip()
+        # 设备无标签渲染时，第 2 组就是 [设备名]，此时不当标签
+        if device_id and tag == f"[{device_id}]":
+            tag = ""
         text = match.group(3).strip()
         entries.append(
             {
                 "entry_id": entry_id,
                 "date": date,
+                "device_id": device_id,
                 "ts": _ts_from(date, match.group(1)),
                 "tag": tag,
                 "speaker": "quoted_ai" if "[AI回复]" in tag else "user",
