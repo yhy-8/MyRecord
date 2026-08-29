@@ -1,7 +1,15 @@
 import unittest
 
-from server.ai.agents import AGENTS, retrospective, reviewer
-from server.ai.agents.base import AgentPipelineError, _prompt, invoke_agent
+from server.ai.agents import (
+    AGENTS,
+    RETROSPECTIVE_SPEC,
+    REVIEWER_SPEC,
+    AgentPipelineError,
+    _prompt,
+    invoke_agent,
+    validate_reviewer,
+    validate_retrospective,
+)
 from server.ai.ai_client import AIResponse
 
 
@@ -12,7 +20,7 @@ class AgentModuleTests(unittest.TestCase):
         self.assertTrue(AGENTS["retrospective"].can_read_raw)
 
     def test_agent_prompt_requires_one_minimal_json_task(self):
-        prompt = _prompt(reviewer.SPEC, "审查正文", {"text": "正文"})
+        prompt = _prompt(REVIEWER_SPEC, "审查正文", {"text": "正文"})
         self.assertIn("只负责当前这一项语义任务", prompt)
         self.assertIn("完整覆盖本任务所需信息的前提下保持简洁", prompt)
         self.assertIn("一个最小 JSON 对象", prompt)
@@ -30,7 +38,7 @@ class AgentModuleTests(unittest.TestCase):
             )
 
         payload, telemetry = invoke_agent(
-            reviewer.SPEC,
+            REVIEWER_SPEC,
             "审查这一份正文，并按最小对象返回结论和一段修改意见。",
             {"text": "正文"},
             {"name": "mock"},
@@ -52,7 +60,7 @@ class AgentModuleTests(unittest.TestCase):
 
     def test_agent_invocation_unwraps_one_outer_json_fence(self):
         payload, _ = invoke_agent(
-            reviewer.SPEC,
+            REVIEWER_SPEC,
             "审查这一份正文，并按最小对象返回结论和一段修改意见。",
             {"text": "正文"},
             {"name": "mock"},
@@ -80,7 +88,7 @@ class AgentModuleTests(unittest.TestCase):
             return next(responses)
 
         payload, telemetry = invoke_agent(
-            reviewer.SPEC, "审查正文", {}, {"name": "mock"}, fake_call
+            REVIEWER_SPEC, "审查正文", {}, {"name": "mock"}, fake_call
         )
 
         self.assertEqual({"approved": True, "feedback": ""}, payload)
@@ -97,7 +105,7 @@ class AgentModuleTests(unittest.TestCase):
             return AIResponse("纯文本正文", True)
 
         body, _ = invoke_agent(
-            retrospective.SPEC, "生成正文", {}, {"name": "mock"}, fake_call
+            RETROSPECTIVE_SPEC, "生成正文", {}, {"name": "mock"}, fake_call
         )
 
         self.assertEqual("纯文本正文", body)
@@ -116,40 +124,40 @@ class AgentModuleTests(unittest.TestCase):
             "**遇到的问题**\n"
             "- 周报探索耗时过长，已移除。"
         )
-        self.assertEqual(bullets, retrospective.validate(bullets))
+        self.assertEqual(bullets, validate_retrospective(bullets))
         self.assertEqual(
             "正文第一段\n\n正文第二段",
-            retrospective.validate("正文第一段\n\n正文第二段"),
+            validate_retrospective("正文第一段\n\n正文第二段"),
         )
 
     def test_retrospective_rejects_only_structural_violations(self):
         with self.assertRaisesRegex(AgentPipelineError, "不得自行输出标题"):
-            retrospective.validate("### 模型自拟标题\n正文")
+            validate_retrospective("### 模型自拟标题\n正文")
         with self.assertRaisesRegex(AgentPipelineError, "纯文本"):
-            retrospective.validate(["第一段", "第二段"])
+            validate_retrospective(["第一段", "第二段"])
         with self.assertRaisesRegex(AgentPipelineError, "不得自行输出 URL"):
-            retrospective.validate("正文 https://example.com")
+            validate_retrospective("正文 https://example.com")
         with self.assertRaisesRegex(AgentPipelineError, "不得输出 JSON"):
-            retrospective.validate('{"text":"正文"}')
+            validate_retrospective('{"text":"正文"}')
 
     def test_reviewer_uses_minimal_json_decision(self):
         self.assertEqual(
-            (True, ""), reviewer.validate({"approved": True, "feedback": ""})
+            (True, ""), validate_reviewer({"approved": True, "feedback": ""})
         )
         self.assertEqual(
             (False, "这一判断没有记录支持"),
-            reviewer.validate(
+            validate_reviewer(
                 {"approved": False, "feedback": "这一判断没有记录支持"}
             ),
         )
 
     def test_all_agent_contracts_reject_model_owned_arrays(self):
         with self.assertRaises(AgentPipelineError):
-            reviewer.validate({"approved": True, "feedback": []})
+            validate_reviewer({"approved": True, "feedback": []})
 
     def test_revision_prompt_preserves_original_request_as_prefix(self):
         revised = _prompt(
-            retrospective.SPEC,
+            RETROSPECTIVE_SPEC,
             "生成",
             {"records": ["内容"]},
             {"feedback": "删去无依据判断"},

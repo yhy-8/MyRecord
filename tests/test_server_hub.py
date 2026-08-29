@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 
 from server.hub import auth, render
-from server.hub.parser import parse_day_file
+from server.hub.render import parse_day_file
 from server.hub.store import Store
 from server.hub.server import serve
 

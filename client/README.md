@@ -10,7 +10,7 @@
 python -m client
 ```
 
-> 入口统一为 `python -m client`（`client/__main__.py` 唤起 `client/main.py`）。
+> 入口统一为 `python -m client`（`client/__main__.py` 直接调用 `cli.run_interactive`）。
 > 打包命令见仓库根 `.github/workflows/build.yml`（PyInstaller 入口 `client/__main__.py`）。
 
 ## 同步模型（与云端的协作方式）
@@ -51,16 +51,13 @@ python -m client
 
 | 文件 | 职责 |
 |---|---|
-| `main.py` / `__main__.py` | 程序入口：`python -m client` → `run_interactive()` |
+| `__main__.py` | 程序入口：`python -m client` → `run_interactive()` |
 | `config.py` / `config.yaml` | 读取本地配置（服务器地址、数据目录、长轮询秒数） |
-| `credentials.py` | 读取/写入 `credentials.json`（服务端签发的 device_id/token） |
-| `idseq.py` | 本设备单调序号（`seq.json`），生成 `entry_id = device_id-序号` |
-| `journal.py` | 本地日记写入：按天 `Records/YYYY-MM-DD.md` 原子追加、对账补齐、tombstone 移除 |
-| `render.py` / `terminal.py` | 日记渲染格式 / 清屏、日期解析辅助 |
+| `identity.py` | 设备身份与本地状态：读写 `credentials.json`（device_id/token）、`seq.json` 本设备单调序号（`make_entry_id = device_id-序号`） |
+| `journal.py` | 本地日记渲染与写入：按天 `Records/YYYY-MM-DD.md` 原子追加、对账补齐、tombstone 移除 |
 | `file_lock.py` | 跨进程互斥（`.journal.lock` 等），保证原子写 |
 | `sync.py` | 与中枢的同步客户端：`push_new`（写后即 push）、`send_pending`（冲刷离线队列）、`pull`（拉取对账）、`longpoll`（长连接扇出）、`full_sync`（启动/手动完整同步）、`sync_reports`（同步报告）、`delete_latest`、`status/admin_retry/admin_set_model` |
-| `cli/app.py` | 交互主循环：八个命令路由、启动时 `full_sync`、维持长连接后台线程 |
-| `cli/view.py` | `/v` 查看本地日记 |
+| `cli.py` | 交互主循环：八个命令路由、`/v` 查看本地日记、清屏与日期解析、启动时 `full_sync`、维持长连接后台线程 |
 
 ## 本地文件
 

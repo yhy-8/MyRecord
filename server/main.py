@@ -7,7 +7,7 @@ from pathlib import Path
 
 from . import config
 from .hub import auth, server as hub_server
-from .hub.parser import parse_day_file
+from .hub.render import parse_day_file
 from .hub.store import Store
 
 

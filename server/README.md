@@ -52,8 +52,7 @@ python -m server.main render          重渲染当天 Records
 | `hub/server.py` | HTTP 同步服务（stdlib ThreadingHTTPServer）：`/api/sync/push`、`/api/sync/pull`、`/api/sync/longpoll`、`/api/entries/delete`、`/api/status`、`/api/reports`、`/api/admin/*`；Bearer + device_id 鉴权 |
 | `hub/store.py` | 权威条目存储：append-only 合并（按 entry_id 去重）、tombstone、垃圾桶、设备令牌、全局 `version` 同步游标、`wait_for_change`（长轮询等待）、拉取 `pull(version)` |
 | `hub/auth.py` | 设备令牌哈希（scrypt，加盐、常量时间），只存哈希，不落明文 |
-| `hub/parser.py` | 解析每日日记文件为条目列表（兼容新旧 entry 标记） |
-| `hub/render.py` | 日记渲染格式（两端共用）：entry 标记、tombstone 占位、`<summary>` 区域 |
+| `hub/render.py` | 日记文件格式（两端共用）：渲染 entry 标记、tombstone 占位、`<summary>` 区域，并反向解析文件为条目列表（兼容新旧 entry 标记） |
 
 ### 云端 AI（ai/）
 
@@ -62,8 +61,7 @@ python -m server.main render          重渲染当天 Records
 | `ai/settings.py` | 运行配置、目录与模型选择（`current_model` / `models`） |
 | `ai/ai_client.py` | OpenAI 兼容模型请求、HTTP/thinking/JSON 输出、Token 遥测、错误分类 |
 | `ai/journal.py` | 原始日记读写与 `<summary>` 区域更新（AI 只能通过这里写日记） |
-| `ai/agents/base.py` | 单 Agent 提示、纯文本/JSON 协议及一次协议重试 |
-| `ai/agents/*.py` | 两种语义职责：`retrospective`（回顾）、`reviewer`（审查） |
+| `ai/agents/` | 单模块：AgentSpec、纯文本/JSON 协议及一次协议重试、`retrospective`（回顾）与 `reviewer`（审查）两种职责 |
 | `ai/analysis/context.py` | 周/月范围、日记解析、引用边界、近期总结、周报回顾提取 |
 | `ai/analysis/orchestrator.py` | 冻结输入、分块、调度、审查、Token 累计、渲染、原子交付报告 |
 | `ai/analysis/automation.py` | 缺失检测、持久队列、前置屏障、重试时间、系统调度安装 |

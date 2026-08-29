@@ -230,12 +230,12 @@ class AnalysisWorkflowTests(unittest.TestCase):
         self.assertIn("**工作进展**", path.read_text(encoding="utf-8"))
 
     def test_retrospective_accepts_bullet_structured_output(self):
-        from server.ai.agents import retrospective
+        from server.ai.agents import validate_retrospective
 
         bullets = (
             "**工作进展**\n- 完成记录模块重构。\n\n**遇到的问题**\n- 修复同步丢帧。"
         )
-        self.assertEqual(bullets, retrospective.validate(bullets))
+        self.assertEqual(bullets, validate_retrospective(bullets))
 
     def test_retrospective_reviewer_can_request_one_content_revision(self):
         day = datetime.date(2026, 7, 14)

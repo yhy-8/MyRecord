@@ -1,5 +1,12 @@
-"""python -m client"""
+"""客户端入口：交互记录界面（python -m client）。"""
 
-from .main import main
+from .cli import run_interactive
 
-raise SystemExit(main())
+
+def main() -> int:
+    run_interactive()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

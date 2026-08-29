@@ -11,7 +11,7 @@ from pathlib import Path
 
 import requests
 
-from . import config, credentials, journal
+from . import config, identity, journal
 from .file_lock import file_lock
 
 
@@ -69,7 +69,7 @@ class SyncClient:
     # ---------- 底层请求 ----------
 
     def _headers(self):
-        cred = credentials.require()
+        cred = identity.require()
         return {
             "Authorization": f"Bearer {cred['token']}",
             "X-Device-Id": cred["device_id"],

@@ -3,19 +3,19 @@
 覆盖新薄客户端的统一单模式交互（共 8 个命令）：
 - 每个命令的调度路由
 - 普通输入 → 生成 entry 并写本地 + 即时 push
-- 启动时一次性 full_sync（连上云端对账）
+- 启动时 full_sync（连上云端对账）
 - /sync 手动完整同步
 - /d 在线删除当天最新一条（服务端确认，入垃圾桶）
 - /model 按服务端模型列表循环切换
 """
 
+import datetime
 import unittest
+from pathlib import Path
 from unittest.mock import Mock, patch
 
-from client.cli import app as cli_app
-from client.cli import view as cli_view
-from client import credentials as client_credentials
-from client import terminal as client_terminal
+from client import cli as cli_app
+from client import identity as client_identity
 
 
 class ClientCLIHelpTests(unittest.TestCase):
@@ -30,9 +30,9 @@ class ClientCLIHelpTests(unittest.TestCase):
 class ClientCLIPlainInputTests(unittest.TestCase):
     def test_plain_input_builds_entry_and_writes_and_pushes(self):
         with patch.object(cli_app, "journal") as journal, patch.object(
-            cli_app, "idseq"
-        ) as idseq, patch.object(client_credentials, "require") as require:
-            idseq.make_entry_id.return_value = "e2e-a-1"
+            client_identity, "make_entry_id"
+        ) as make_entry_id, patch.object(client_identity, "require") as require:
+            make_entry_id.return_value = "e2e-a-1"
             journal.append_record = Mock()
             require.return_value = {"device_id": "e2e-a", "token": "t"}
 
@@ -50,14 +50,14 @@ class ClientCLIPlainInputTests(unittest.TestCase):
 class ClientCLICommandRoutingTests(unittest.TestCase):
     def test_dispatch_routes_known_commands(self):
         with patch.object(cli_app, "SyncClient") as SyncClient, patch.object(
-            client_credentials, "require"
+            client_identity, "require"
         ) as require, patch.object(cli_app, "journal") as journal, patch.object(
-            cli_app, "idseq"
-        ) as idseq, patch.object(client_terminal, "clear_screen") as clear, patch.object(
-            cli_view, "show_day"
+            client_identity, "make_entry_id"
+        ) as make_entry_id, patch.object(cli_app, "clear_screen") as clear, patch.object(
+            cli_app, "show_day"
         ) as show_day:
             require.return_value = {"device_id": "e2e-a", "token": "t"}
-            idseq.make_entry_id.return_value = "e2e-a-1"
+            make_entry_id.return_value = "e2e-a-1"
             journal.append_record = Mock()
             client = Mock()
             client.base_url = "http://127.0.0.1:1"
@@ -93,12 +93,12 @@ class ClientCLICommandRoutingTests(unittest.TestCase):
 
     def test_eof_exit_writes_no_record(self):
         with patch.object(cli_app, "SyncClient") as SyncClient, patch.object(
-            client_credentials, "require"
+            client_identity, "require"
         ) as require, patch.object(cli_app, "journal") as journal, patch.object(
-            cli_app, "idseq"
-        ) as idseq:
+            client_identity, "make_entry_id"
+        ) as make_entry_id:
             require.return_value = {"device_id": "e2e-a", "token": "t"}
-            idseq.make_entry_id.return_value = "e2e-a-1"
+            make_entry_id.return_value = "e2e-a-1"
             journal.append_record = Mock()
             SyncClient.return_value = Mock()
             SyncClient.return_value.base_url = "http://127.0.0.1:1"
@@ -107,6 +107,38 @@ class ClientCLICommandRoutingTests(unittest.TestCase):
                 cli_app.run_interactive()
 
             journal.append_record.assert_not_called()
+
+
+class ClientCLIDateTests(unittest.TestCase):
+    """/v 与终端日期解析辅助（已并入 cli/app.py）。"""
+
+    def test_resolve_date_defaults_to_today(self):
+        self.assertEqual(
+            datetime.date.today().isoformat(), cli_app.resolve_date("")
+        )
+        self.assertEqual(
+            datetime.date.today().isoformat(), cli_app.resolve_date("today")
+        )
+        self.assertEqual(
+            datetime.date.today().isoformat(), cli_app.resolve_date("今天")
+        )
+
+    def test_resolve_date_handles_negative_and_explicit_dates(self):
+        yesterday = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
+        self.assertEqual(yesterday, cli_app.resolve_date("yesterday"))
+        self.assertEqual(yesterday, cli_app.resolve_date("昨天"))
+        self.assertEqual(yesterday, cli_app.resolve_date("-1"))
+        self.assertEqual("2024-01-02", cli_app.resolve_date("2024-01-02"))
+
+    def test_resolve_date_rejects_unparseable(self):
+        self.assertEqual("", cli_app.resolve_date("xyz"))
+
+    def test_show_day_prints_missing_message_for_absent_date(self):
+        with patch.object(cli_app, "journal") as journal:
+            journal.day_path.return_value = Path("/nonexistent.md")
+            with patch("builtins.print") as mock_print:
+                cli_app.show_day("2024-01-02")
+        self.assertIn("还没有记录", mock_print.call_args.args[0])
 
 
 if __name__ == "__main__":

@@ -5,10 +5,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from client import credentials, idseq, main as client_main
+from client import identity
+from client import __main__ as client_main
 
 
-class ClientCredentialsTests(unittest.TestCase):
+class ClientIdentityCredentialsTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.path = Path(self.tmp.name) / "credentials.json"
@@ -17,35 +18,35 @@ class ClientCredentialsTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_load_returns_empty_when_missing(self):
-        with patch.object(credentials, "credentials_path", return_value=self.path):
-            self.assertEqual({}, credentials.load())
+        with patch.object(identity, "credentials_path", return_value=self.path):
+            self.assertEqual({}, identity.load())
 
     def test_save_then_load_roundtrip(self):
-        with patch.object(credentials, "credentials_path", return_value=self.path):
-            credentials.save("device-A", "token-123")
-            value = credentials.load()
+        with patch.object(identity, "credentials_path", return_value=self.path):
+            identity.save("device-A", "token-123")
+            value = identity.load()
 
         self.assertEqual({"device_id": "device-A", "token": "token-123"}, value)
 
     def test_load_rejects_malformed_or_incomplete(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text("{not json", encoding="utf-8")
-        with patch.object(credentials, "credentials_path", return_value=self.path):
-            self.assertEqual({}, credentials.load())
+        with patch.object(identity, "credentials_path", return_value=self.path):
+            self.assertEqual({}, identity.load())
 
         self.path.write_text('{"device_id": "d"}', encoding="utf-8")
-        with patch.object(credentials, "credentials_path", return_value=self.path):
-            self.assertEqual({}, credentials.load())
+        with patch.object(identity, "credentials_path", return_value=self.path):
+            self.assertEqual({}, identity.load())
 
     def test_require_fails_when_unconfigured(self):
-        with patch.object(credentials, "credentials_path", return_value=self.path):
+        with patch.object(identity, "credentials_path", return_value=self.path):
             with self.assertRaisesRegex(RuntimeError, "未配置凭据"):
-                credentials.require()
+                identity.require()
 
     def test_require_returns_value_when_configured(self):
-        with patch.object(credentials, "credentials_path", return_value=self.path):
-            credentials.save("d", "t")
-            self.assertEqual({"device_id": "d", "token": "t"}, credentials.require())
+        with patch.object(identity, "credentials_path", return_value=self.path):
+            identity.save("d", "t")
+            self.assertEqual({"device_id": "d", "token": "t"}, identity.require())
 
 
 class ClientIdSeqTests(unittest.TestCase):
@@ -57,19 +58,19 @@ class ClientIdSeqTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_next_seq_is_monotonic_and_persists(self):
-        with patch.object(idseq, "seq_path", return_value=self.path):
-            self.assertEqual(1, idseq.next_seq())
-            self.assertEqual(2, idseq.next_seq())
-            self.assertEqual(3, idseq.next_seq())
+        with patch.object(identity, "seq_path", return_value=self.path):
+            self.assertEqual(1, identity.next_seq())
+            self.assertEqual(2, identity.next_seq())
+            self.assertEqual(3, identity.next_seq())
 
         # 重新读取（持久化跨重启）
-        with patch.object(idseq, "seq_path", return_value=self.path):
-            self.assertEqual(4, idseq.next_seq())
+        with patch.object(identity, "seq_path", return_value=self.path):
+            self.assertEqual(4, identity.next_seq())
 
     def test_make_entry_id_combines_device_and_seq(self):
-        with patch.object(idseq, "seq_path", return_value=self.path):
-            self.assertEqual("device-A-1", idseq.make_entry_id("device-A"))
-            self.assertEqual("device-A-2", idseq.make_entry_id("device-A"))
+        with patch.object(identity, "seq_path", return_value=self.path):
+            self.assertEqual("device-A-1", identity.make_entry_id("device-A"))
+            self.assertEqual("device-A-2", identity.make_entry_id("device-A"))
 
 
 class ClientMainTests(unittest.TestCase):

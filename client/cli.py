@@ -5,13 +5,16 @@
 """
 
 import datetime
+import subprocess
+import sys
 import threading
 import time
+from pathlib import Path
 
 from rich.panel import Panel
 
-from .. import idseq, journal
-from ..sync import SyncClient, SyncError
+from . import identity, journal
+from .sync import SyncClient, SyncError
 
 
 def _banner() -> None:
@@ -35,9 +38,62 @@ def _help_text() -> str:
     )
 
 
-def _handle_view(arg: str) -> None:
-    from .view import show_day
+# ---------- 终端辅助 ----------
 
+
+def clear_screen() -> None:
+    if sys.platform == "win32":
+        subprocess.run(["cls"], shell=True)
+    else:
+        print("\033c", end="")
+
+
+def resolve_date(arg: str = "") -> str:
+    """解析日期参数（today/昨天/-1/MM-DD/YYYY-MM-DD），默认今天。"""
+    today = datetime.date.today()
+    value = arg.strip()
+    if not value:
+        return today.isoformat()
+    lower = value.lower()
+    aliases = {"today": 0, "今天": 0, "yesterday": 1, "昨天": 1}
+    if lower in aliases:
+        return (today - datetime.timedelta(days=aliases[lower])).isoformat()
+    if value.startswith("-") and value[1:].isdigit():
+        return (today - datetime.timedelta(days=int(value[1:]))).isoformat()
+    for fmt in ("%Y-%m-%d", "%Y%m%d"):
+        try:
+            return datetime.datetime.strptime(value, fmt).date().isoformat()
+        except ValueError:
+            continue
+    import re
+
+    m = re.fullmatch(r"(\d{1,2})-(\d{1,2})", value)
+    if m:
+        try:
+            return datetime.date(today.year, int(m.group(1)), int(m.group(2))).isoformat()
+        except ValueError:
+            pass
+    return ""
+
+
+def show_day(arg: str) -> None:
+    """查看本地日记（不提供报告查看）。"""
+    date = resolve_date(arg)
+    if not date:
+        print("[黄色][!] 无法解析日期。[/黄色]")
+        return
+    path = journal.day_path(date)
+    if not path.exists():
+        print(f"（{date} 还没有记录。）")
+        return
+    print(f"===== {date} =====")
+    print(path.read_text(encoding="utf-8"))
+
+
+# ---------- 命令处理 ----------
+
+
+def _handle_view(arg: str) -> None:
     date = arg.split(maxsplit=1)[1].strip() if " " in arg else ""
     show_day(date)
 
@@ -141,10 +197,10 @@ def _handle_model(client: SyncClient) -> None:
 
 
 def _write_record(client: SyncClient, text: str) -> None:
-    cred = _require_creds()
+    cred = identity.require()
     now = datetime.datetime.now()
     entry = {
-        "entry_id": idseq.make_entry_id(cred["device_id"]),
+        "entry_id": identity.make_entry_id(cred["device_id"]),
         "device_id": cred["device_id"],
         "date": now.strftime("%Y-%m-%d"),
         "ts": int(now.timestamp()),
@@ -153,12 +209,6 @@ def _write_record(client: SyncClient, text: str) -> None:
     }
     journal.append_record(entry)
     client.push_new(entry)
-
-
-def _require_creds() -> dict:
-    from .. import credentials
-
-    return credentials.require()
 
 
 def _longpoll_loop(client: SyncClient) -> None:
@@ -183,7 +233,7 @@ def _longpoll_loop(client: SyncClient) -> None:
 
 def run_interactive() -> None:
     # 仅确认本地凭据存在（返回值不用）
-    _require_creds()
+    identity.require()
     client = SyncClient()
     print("已连接服务端：" + client.base_url)
 
@@ -202,8 +252,6 @@ def run_interactive() -> None:
         target=_longpoll_loop, args=(client,), daemon=True
     )
     thread.start()
-
-    from ..terminal import clear_screen
 
     while True:
         try:

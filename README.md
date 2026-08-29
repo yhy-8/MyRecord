@@ -29,19 +29,18 @@ server/                  服务端中枢 + 云端 AI（独立工程，见 server
     AnalysisReports/     报告目录
       .automation-state.json   自动任务状态
     Log/                 服务端日志
-  hub/                   同步协议、存储、鉴权、渲染
+  hub/                   同步协议、存储、鉴权、日记格式(render)
   ai/                    云端 AI：agents / analysis(context,orchestrator,automation)
 
 client/                  客户端薄端（独立工程，见 client/README.md）
-  main.py / __main__.py  客户端入口（python -m client）
+  __main__.py            客户端入口（python -m client）
   config.yaml            客户端配置（服务器地址、数据目录、轮询间隔）
   config.py              客户端配置读取
-  credentials.json       本地凭据（服务端签发，首登后写入，不入中枢）
-  seq.json               本设备单调序号（entry_id 生成）
+  identity.py            设备身份：credentials.json（凭据）、seq.json（单调序号，entry_id 生成）
   outbox.json            离线待推送队列
-  journal.py / render.py 本地日记写入与渲染
+  journal.py             本地日记渲染与写入
   sync.py                同步：写后即时 push / 离线队列 / full_sync / 长轮询扇出 / 报告同步
-  cli/                   交互界面与命令
+  cli.py                交互界面：命令路由/查看/清屏/日期解析、启动 full_sync、长连接后台线程
 
 Docs/                    设计与深度说明文档（仓库级）
 tests/                   测试（仓库级：server hub / client sync / ai analysis …）

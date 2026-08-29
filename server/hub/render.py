@@ -1,12 +1,18 @@
-"""日记文件渲染：两端共用同一视觉格式。
+"""日记文件格式：渲染与解析（两端共用同一视觉格式与标记）。
 
 每天仍是一个 `Records/YYYY-MM-DD.md` 容器。每条记录前带一个隐藏的
 `<!-- myrecord-entry:<entry_id> -->` 标记，删除位置写
 `<!-- myrecord-tombstone:<entry_id> -->` 占位（不含正文）。这些标记在
 Markdown 渲染中不可见，仅用于对账与去重。`<summary>` 区域由服务端独占写。
+
+本模块同时负责把每日日记文件渲染成文件文本（render_*），以及把文件文本
+解析回条目列表（parse_day_file，兼容旧 `agentrecord-*` 标记）。
 """
 
 import datetime
+import hashlib
+import json
+import re
 
 ENTRY_MARKER_PREFIX = "<!-- myrecord-entry:"
 TOMBSTONE_MARKER_PREFIX = "<!-- myrecord-tombstone:"
@@ -56,3 +62,67 @@ def render_day_file(
         blocks.append(tombstone_block(tombstone["entry_id"]))
     body = "".join(blocks) if blocks else "（当日暂无记录）\n"
     return day_header(date, summary) + body + "\n"
+
+
+# ---------- 解析 ----------
+
+
+_ENTRY_MARKER = re.compile(
+    rf"^{re.escape(ENTRY_MARKER_PREFIX)}([^>]+) -->", re.MULTILINE
+)
+_TOMBSTONE_MARKER = re.compile(
+    rf"^{re.escape(TOMBSTONE_MARKER_PREFIX)}([^>]+) -->", re.MULTILINE
+)
+_RECORD = re.compile(
+    r"^\*\*(\d{2}:\d{2})(?: ([^\n]*?))?:\*\*\s?(.*?)"
+    r"(?=^\*\*\d{2}:\d{2}(?: [^\n]*?)?:\*\*|\Z)",
+    re.MULTILINE | re.DOTALL,
+)
+
+
+def _ts_from(date: str, hhmm: str) -> int:
+    hour, minute = (int(part) for part in hhmm.split(":"))
+    year, month, day = (int(part) for part in date.split("-"))
+    base = datetime.datetime(year, month, day, hour, minute)
+    return int(base.timestamp())
+
+
+def legacy_entry_id(date: str, index: int) -> str:
+    payload = json.dumps(
+        {"date": date, "index": index}, ensure_ascii=False, sort_keys=True
+    )
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:8]
+    return f"legacy-{date.replace('-', '')}-{index:03d}-{digest}"
+
+
+def parse_day_file(date: str, content: str) -> dict:
+    """返回 {"entries": [...], "tombstones": [entry_id, ...]}。"""
+    markers = [
+        (m.start(), m.group(1)) for m in _ENTRY_MARKER.finditer(content)
+    ]
+    markers.sort(key=lambda item: item[0])
+    tombstones = [m.group(1) for m in _TOMBSTONE_MARKER.finditer(content)]
+    records = list(_RECORD.finditer(content))
+
+    entries = []
+    marker_index = 0
+    for index, match in enumerate(records, 1):
+        entry_id = None
+        if marker_index < len(markers) and markers[marker_index][0] < match.start():
+            entry_id = markers[marker_index][1]
+            marker_index += 1
+        if entry_id is None:
+            entry_id = legacy_entry_id(date, index)
+        tag = (match.group(2) or "").strip()
+        text = match.group(3).strip()
+        entries.append(
+            {
+                "entry_id": entry_id,
+                "date": date,
+                "ts": _ts_from(date, match.group(1)),
+                "tag": tag,
+                "speaker": "quoted_ai" if "[AI回复]" in tag else "user",
+                "text": text,
+            }
+        )
+    return {"entries": entries, "tombstones": tombstones}

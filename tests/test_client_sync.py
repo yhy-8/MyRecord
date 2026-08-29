@@ -18,7 +18,7 @@ from server.hub.store import Store
 from server.hub.server import serve
 
 from client import config as client_config
-from client import credentials as client_credentials
+from client import identity as client_identity
 from client import journal
 from client import sync
 from client.sync import SyncClient
@@ -82,7 +82,7 @@ class ClientSyncE2ETestBase(unittest.TestCase):
                 client_config, "load", return_value=_client_settings(records, analysis)
             ),
             patch.object(
-                client_credentials,
+                client_identity,
                 "require",
                 return_value={"device_id": device, "token": token},
             ),

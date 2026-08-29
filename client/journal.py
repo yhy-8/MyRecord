@@ -1,13 +1,51 @@
-"""客户端本地日记：每天一个 Records/YYYY-MM-DD.md 容器，本地渲染。
+"""客户端本地日记：本地渲染 + 按天写入与对账。
 
-本地写入永不因同步失败回滚；对账（apply_delta）只做补齐与 tombstone 移除，
-不把已删条目推回。
+每天一个 Records/YYYY-MM-DD.md 容器。每条记录前带一个隐藏的
+`<!-- myrecord-entry:<entry_id> -->` 标记，删除位置写 tombstone 占位（不含正文）。
+`<summary>` 区域由服务端独占写。本地写入永不因同步失败回滚；对账（apply_delta）
+只做补齐与 tombstone 移除，不把已删条目推回。
 """
 
+import datetime
+import os
 import re
 
-from . import config, render
+from . import config
 from .file_lock import file_lock
+
+ENTRY_MARKER_PREFIX = "<!-- myrecord-entry:"
+TOMBSTONE_MARKER_PREFIX = "<!-- myrecord-tombstone:"
+
+_DEFAULT_SUMMARY = "暂无今日总结。"
+
+
+# ---------- 渲染格式 ----------
+
+
+def entry_block(entry: dict) -> str:
+    tag = (entry.get("tag") or "").strip()
+    hhmm = datetime.datetime.fromtimestamp(int(entry.get("ts", 0))).strftime("%H:%M")
+    entry_id = entry["entry_id"]
+    if tag:
+        header = f"**{hhmm} {tag}:** {entry.get('text', '')}"
+    else:
+        header = f"**{hhmm}:** {entry.get('text', '')}"
+    return f"{ENTRY_MARKER_PREFIX}{entry_id} -->\n{header}\n"
+
+
+def tombstone_block(entry_id: str) -> str:
+    return (
+        f"{TOMBSTONE_MARKER_PREFIX}{entry_id} -->\n"
+        f"> 此位置原有记录已删除。（entry_id: {entry_id}）\n"
+    )
+
+
+def day_header(date: str, summary: str = "") -> str:
+    text = summary.strip() or _DEFAULT_SUMMARY
+    return f"# {date}\n\n<summary>\n{text}\n</summary>\n\n---\n## 原始记录流\n\n"
+
+
+# ---------- 本地写入与对账 ----------
 
 
 def records_dir():
@@ -22,7 +60,7 @@ def ensure_day_file(date: str) -> None:
     path = day_path(date)
     path.parent.mkdir(parents=True, exist_ok=True)
     if not path.exists():
-        path.write_text(render.day_header(date), encoding="utf-8")
+        path.write_text(day_header(date), encoding="utf-8")
 
 
 def append_record(entry: dict) -> None:
@@ -32,12 +70,17 @@ def append_record(entry: dict) -> None:
         ensure_day_file(date)
         path = day_path(date)
         with path.open("a", encoding="utf-8") as handle:
-            handle.write(render.entry_block(entry) + "\n")
+            handle.write(entry_block(entry) + "\n")
 
 
 def day_entry_ids(content: str) -> set[str]:
-    return set(re.findall(r"^" + re.escape(render.ENTRY_MARKER_PREFIX) + r"([^>]+) -->",
-                          content, re.MULTILINE))
+    return set(
+        re.findall(
+            r"^" + re.escape(ENTRY_MARKER_PREFIX) + r"([^>]+) -->",
+            content,
+            re.MULTILINE,
+        )
+    )
 
 
 def apply_delta(entries: list[dict], tombstones: list[dict]) -> None:
@@ -53,7 +96,7 @@ def apply_delta(entries: list[dict], tombstones: list[dict]) -> None:
             existing = day_entry_ids(content)
             missing = [e for e in day_entries if e["entry_id"] not in existing]
             if missing:
-                body = "".join(render.entry_block(e) for e in missing)
+                body = "".join(entry_block(e) for e in missing)
                 with path.open("a", encoding="utf-8") as handle:
                     handle.write(body + "\n")
         for tombstone in tombstones:
@@ -61,7 +104,7 @@ def apply_delta(entries: list[dict], tombstones: list[dict]) -> None:
 
 
 def _apply_tombstone(entry_id: str) -> None:
-    prefix = re.escape(render.ENTRY_MARKER_PREFIX)
+    prefix = re.escape(ENTRY_MARKER_PREFIX)
     pattern = re.compile(
         rf"^{prefix}{re.escape(entry_id)} -->\n" r"[^\n]*\n",
         re.MULTILINE,
@@ -71,8 +114,11 @@ def _apply_tombstone(entry_id: str) -> None:
         match = pattern.search(content)
         if not match:
             continue
-        rebuilt = content[: match.start()] + render.tombstone_block(entry_id) + content[match.end():]
+        rebuilt = (
+            content[: match.start()]
+            + tombstone_block(entry_id)
+            + content[match.end():]
+        )
         tmp = path.with_name(path.name + ".apply.tmp")
         tmp.write_text(rebuilt, encoding="utf-8")
-        import os
         os.replace(tmp, path)

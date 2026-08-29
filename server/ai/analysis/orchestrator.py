@@ -11,8 +11,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .. import journal, settings
-from ..agents import retrospective, reviewer
-from ..agents.base import AgentPipelineError, invoke_agent, is_json_container
+from ..agents import (
+    REVIEWER_SPEC,
+    RETROSPECTIVE_SPEC,
+    AgentPipelineError,
+    invoke_agent,
+    is_json_container,
+    validate_reviewer,
+    validate_retrospective,
+)
 from ..ai_client import (
     CONFIG_ERROR_MARKER,
     call_ai,
@@ -267,7 +274,7 @@ def _review_body(
     revision_context = None
     for attempt in range(2):
         payload, telemetry = _call_agent(
-            reviewer.SPEC,
+            REVIEWER_SPEC,
             "审查这一份正文，并按最小对象返回结论和一段修改意见。",
             review_input,
             model_config,
@@ -278,7 +285,7 @@ def _review_body(
         if not isinstance(payload, dict):
             raise AgentPipelineError("Reviewer 未返回 JSON 对象")
         try:
-            passed, feedback = reviewer.validate(payload)
+            passed, feedback = validate_reviewer(payload)
         except AgentPipelineError:
             if attempt or int(telemetry.get("protocol_retries", 0) or 0):
                 raise
@@ -360,7 +367,7 @@ def _retrospective_section(
     last_feedback = ""
     for attempt in range(1, revision_limit + 2):
         result, _ = _call_agent(
-            retrospective.SPEC,
+            RETROSPECTIVE_SPEC,
             task,
             base_input,
             model_config,
@@ -369,12 +376,12 @@ def _retrospective_section(
             revision_context=revision_context,
         )
         try:
-            body = retrospective.validate(result)
+            body = validate_retrospective(result)
         except AgentPipelineError as error:
             logger.warning(
                 "agent_validation_failed run=%s agent=%s reason=%s",
                 run_id,
-                retrospective.SPEC.name,
+                RETROSPECTIVE_SPEC.name,
                 str(error),
             )
             if attempt > revision_limit:
