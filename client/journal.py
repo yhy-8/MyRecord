@@ -1,7 +1,7 @@
 """客户端本地日记：本地渲染 + 按天写入与对账。
 
 每天一个 Records/YYYY-MM-DD.md 容器。每条记录前带一个隐藏的
-`<!-- myrecord-entry:<entry_id> -->` 标记，删除位置写 tombstone 占位（不含正文）。
+`<!-- myrecord-id:<id> -->` 标记，删除位置写 tombstone 占位（不含正文）。
 `<summary>` 区域由服务端独占写。本地写入永不因同步失败回滚；对账（apply_delta）
 只做补齐与 tombstone 移除，不把已删条目推回。
 """
@@ -13,9 +13,9 @@ import re
 from . import config
 from .file_lock import file_lock
 
-ENTRY_MARKER_PREFIX = "<!-- myrecord-entry:"
+ENTRY_MARKER_PREFIX = "<!-- myrecord-id:"
 DEVICE_MARKER_PREFIX = "<!-- myrecord-device:"
-TOMBSTONE_MARKER_PREFIX = "<!-- myrecord-tombstone:"
+TOMBSTONE_MARKER_PREFIX = "<!-- myrecord-tombstone-id:"
 
 _DEFAULT_SUMMARY = "暂无今日总结。"
 
@@ -41,10 +41,8 @@ def entry_block(entry: dict) -> str:
 
 
 def tombstone_block(entry_id: str) -> str:
-    return (
-        f"{TOMBSTONE_MARKER_PREFIX}{entry_id} -->\n"
-        f"> 此位置原有记录已删除。（entry_id: {entry_id}）\n"
-    )
+    """只写一行 tombstone 占位（不含正文）。"""
+    return f"{TOMBSTONE_MARKER_PREFIX}{entry_id} -->\n"
 
 
 def day_header(date: str, summary: str = "") -> str:

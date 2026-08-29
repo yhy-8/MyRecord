@@ -1,8 +1,8 @@
 """日记文件格式：渲染与解析（两端共用同一视觉格式与标记）。
 
 每天仍是一个 `Records/YYYY-MM-DD.md` 容器。每条记录前带一个隐藏的
-`<!-- myrecord-entry:<entry_id> -->` 标记，删除位置写
-`<!-- myrecord-tombstone:<entry_id> -->` 占位（不含正文）。这些标记在
+`<!-- myrecord-id:<id> -->` 标记，删除位置写
+`<!-- myrecord-tombstone-id:<id> -->` 占位（不含正文）。这些标记在
 Markdown 渲染中不可见，仅用于对账与去重。`<summary>` 区域由服务端独占写。
 
 本模块同时负责把每日日记文件渲染成文件文本（render_*），以及把文件文本
@@ -14,9 +14,9 @@ import hashlib
 import json
 import re
 
-ENTRY_MARKER_PREFIX = "<!-- myrecord-entry:"
+ENTRY_MARKER_PREFIX = "<!-- myrecord-id:"
 DEVICE_MARKER_PREFIX = "<!-- myrecord-device:"
-TOMBSTONE_MARKER_PREFIX = "<!-- myrecord-tombstone:"
+TOMBSTONE_MARKER_PREFIX = "<!-- myrecord-tombstone-id:"
 
 _DEFAULT_SUMMARY = "暂无今日总结。"
 
@@ -45,10 +45,8 @@ def entry_block(entry: dict) -> str:
 
 
 def tombstone_block(entry_id: str) -> str:
-    return (
-        f"{TOMBSTONE_MARKER_PREFIX}{entry_id} -->\n"
-        f"> 此位置原有记录已删除。（entry_id: {entry_id}）\n"
-    )
+    """只写一行 tombstone 占位（不含正文）。"""
+    return f"{TOMBSTONE_MARKER_PREFIX}{entry_id} -->\n"
 
 
 def day_header(date: str, summary: str = "") -> str:
@@ -85,9 +83,11 @@ _TOMBSTONE_MARKER = re.compile(
 )
 _RECORD = re.compile(
     r"^\*\*(\d{2}:\d{2})(?: ([^\n]*?))?:\*\*\s?(.*?)"
-    r"(?=^\*\*\d{2}:\d{2}(?: [^\n]*?)?:\*\*|\Z)",
+    r"(?=^\*\*\d{2}:\d{2}(?: [^\n]*?)?:\*\*|^\s*<!-- myrecord-|\Z)",
     re.MULTILINE | re.DOTALL,
 )
+# 记录正文在遇到下一条的标记行（`<!-- myrecord-* -->`）或下一条时间行处截止，
+# 不会把下一条的设备/删除标记注释吞进本条正文——AI 只应看到 `**HH:MM [设备名]:** 正文`。
 
 
 def _ts_from(date: str, hhmm: str) -> int:
