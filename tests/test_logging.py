@@ -27,11 +27,14 @@ class LoggingTests(unittest.TestCase):
             self.assertTrue((log_dir / "MyRecord.log.1").exists())
             self.assertFalse(stale_archive.exists())
 
-            application_logger = logging.getLogger("MyRecord")
-            for handler in list(application_logger.handlers):
-                if getattr(handler, "baseFilename", None):
-                    application_logger.removeHandler(handler)
-                    handler.close()
+            # configure_logging 把同一 handler 挂到 MyRecord 与 server 两个根；全部清掉，
+            # 避免残留指向已删除临时目录的 handler 污染后续 e2e 测试。
+            for root_name in ("MyRecord", "server"):
+                root_logger = logging.getLogger(root_name)
+                for handler in list(root_logger.handlers):
+                    if getattr(handler, "baseFilename", None):
+                        root_logger.removeHandler(handler)
+                        handler.close()
 
 
 if __name__ == "__main__":

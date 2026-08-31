@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 
 from .. import journal, settings
+from ...hub import render as _format  # 日记格式单一来源（标记/记录正则/总结区域）
 
 
 def _log_without_summary(content: str) -> str:
@@ -200,11 +201,7 @@ def _monthly_supporting_reports(
     return "\n\n".join(sections) or "（没有可用的同期周报）"
 
 
-_RECORD_PATTERN = re.compile(
-    r"^\*\*(\d{2}:\d{2})(?: ([^\n]*?))?:\*\*\s?(.*?)"
-    r"(?=^\*\*\d{2}:\d{2}(?: [^\n]*?)?:\*\*|^\s*<!--|\Z)",
-    re.MULTILINE | re.DOTALL,
-)
+_RECORD_PATTERN = _format.RECORD_PATTERN  # 单一来源：见 server/hub/render.py
 _MARKED_RECORD_PATTERN = re.compile(
     rf"^{re.escape(journal.RECORD_MARKER)}\s*\n"
     r"\*\*(\d{2}:\d{2})(?: ([^\n]*?))?:\*\*\s?(.*?)"

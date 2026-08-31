@@ -1,7 +1,9 @@
 """原始日记的读取、追加、查找和总结区域更新。
 
-每天一个 Markdown 文件及其内容格式由本模块统一维护。分析代码只能通过
-这里提供的接口写入日记，避免未来 Agent 直接改动原始记录流。
+每天一个 Markdown 文件及其内容格式（标记常量、day_header、extract_summary、
+记录正则）由 server/hub/render.py 统一维护，本模块只保留 AI 分析链路的
+本地写入动作，并一律复用该单一格式来源，避免两套格式定义漂移。分析代码只能
+通过这里提供的接口写入日记，避免未来 Agent 直接改动原始记录流。
 """
 
 import datetime
@@ -11,16 +13,19 @@ import re
 import uuid
 from pathlib import Path
 
+from ..hub import render  # 日记格式权威：标记/day_header/extract_summary/DEFAULT_SUMMARY
 from . import settings
 from .file_lock import FileLock
 
 
-RECORD_MARKER = "<!-- myrecord-record -->"
-ESCAPED_RECORD_MARKER = "<!-- myrecord-record-text -->"
+# 与渲染/解析共用同一定义（单一来源），供 AI 链路与测试引用。
+RECORD_MARKER = render.RECORD_MARKER
+ESCAPED_RECORD_MARKER = render.ESCAPED_RECORD_MARKER
+DEFAULT_SUMMARY = render.DEFAULT_SUMMARY
 
 
 def _dated_diary_files() -> list[Path]:
-    """Return only canonical ``YYYY-MM-DD.md`` diary files."""
+    """仅返回规范的 ``YYYY-MM-DD.md`` 日记文件。"""
     files = []
     for path in settings.DIARY_DIR.glob("*.md"):
         try:
@@ -40,7 +45,7 @@ def _acquire_journal_lock() -> FileLock:
 
 
 def resolve_date(arg: str) -> str:
-    """解析常用日期参数，返回 YYYY-MM-DD，无法解析时返回空字符串。"""
+    """解析常用日期参数，返回 YYYY-MM-DD；无法解析时返回空字符串。"""
     today = datetime.date.today()
     arg = arg.strip()
 
@@ -53,7 +58,9 @@ def resolve_date(arg: str) -> str:
 
     aliases = {"today": 0, "今天": 0, "yesterday": 1, "昨天": 1}
     if arg.lower() in aliases:
-        return (today - datetime.timedelta(days=aliases[arg.lower()])).strftime("%Y-%m-%d")
+        return (today - datetime.timedelta(days=aliases[arg.lower()])).strftime(
+            "%Y-%m-%d"
+        )
 
     if arg.lower() in ("last", "prev", "上一个", "最近"):
         files = sorted(_dated_diary_files(), reverse=True)
@@ -85,16 +92,12 @@ def resolve_date(arg: str) -> str:
 
 
 def extract_summary(text: str) -> str:
-    match = re.search(r"<summary>(.*?)</summary>", text, re.DOTALL)
-    return match.group(1).strip() if match else "(无总结)"
+    """从日记文本提取 <summary> 正文；缺失时返回占位符。"""
+    return render.extract_summary(text)
 
 
 def _diary_file_for(submitted_at: datetime.datetime) -> Path:
     return settings.DIARY_DIR / f"{submitted_at:%Y-%m-%d}.md"
-
-
-def get_today_file() -> Path:
-    return _diary_file_for(datetime.datetime.now())
 
 
 def init_file_if_not_exists(
@@ -105,13 +108,9 @@ def init_file_if_not_exists(
     file_path = _diary_file_for(submitted_at)
     if file_path.exists():
         return file_path
-    template = (
-        f"# {submitted_at:%Y-%m-%d}\n\n"
-        "<summary>\n暂无今日总结。\n</summary>\n\n"
-        "---\n"
-        "## 原始记录流\n\n"
+    file_path.write_text(
+        render.day_header(f"{submitted_at:%Y-%m-%d}", ""), encoding="utf-8"
     )
-    file_path.write_text(template, encoding="utf-8")
     return file_path
 
 
@@ -139,9 +138,7 @@ def append_log(
                     f"**{submitted_time} {tag}:** {content}\n\n"
                 )
             else:
-                file.write(
-                    f"{RECORD_MARKER}\n**{submitted_time}:** {content}\n\n"
-                )
+                file.write(f"{RECORD_MARKER}\n**{submitted_time}:** {content}\n\n")
     finally:
         lock.release()
 
@@ -180,52 +177,11 @@ def append_reference(
     append_log(content, "[引用]", submitted_at=submitted_at)
 
 
-def update_summary_for_date(
-    date: str,
-    summary_text: str,
-    *,
-    expected_content_hash: str | None = None,
-) -> str:
-    file_path = settings.DIARY_DIR / f"{date}.md"
-    lock = _acquire_journal_lock()
-    try:
-        if not file_path.exists():
-            return f"找不到 {date} 的记录。"
-        content = file_path.read_text(encoding="utf-8")
-        if expected_content_hash is not None:
-            actual_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
-            if actual_hash != expected_content_hash:
-                return f"{date} 的记录在总结生成期间发生变化，未写入过时总结。"
-        if not re.search(r"<summary>.*?</summary>", content, re.DOTALL):
-            return f"{date} 的记录缺少 <summary> 区域。"
-
-        new_content = re.sub(
-            r"<summary>.*?</summary>",
-            lambda _match: f"<summary>\n{summary_text}\n</summary>",
-            content,
-            count=1,
-            flags=re.DOTALL,
-        )
-        temp_path = file_path.with_suffix(
-            file_path.suffix + f".{uuid.uuid4().hex}.tmp"
-        )
-        try:
-            temp_path.write_text(new_content, encoding="utf-8")
-            temp_path.replace(file_path)
-        finally:
-            try:
-                temp_path.unlink(missing_ok=True)
-            except OSError:
-                pass
-        return f"{date} 的总结已写入文档顶部。"
-    finally:
-        lock.release()
-
-
 def delete_last_record() -> bool:
-    file_path = get_today_file()
+    """删除今日日记的最后一条记录（含多行引用），只删记录不删头部。"""
     lock = _acquire_journal_lock()
     try:
+        file_path = _diary_file_for(datetime.datetime.now())
         if not file_path.exists():
             return False
         content = file_path.read_text(encoding="utf-8")
@@ -253,9 +209,7 @@ def delete_last_record() -> bool:
             file_path.suffix + f".{uuid.uuid4().hex}.tmp"
         )
         try:
-            temp_path.write_text(
-                content[:start].rstrip() + "\n\n", encoding="utf-8"
-            )
+            temp_path.write_text(content[:start].rstrip() + "\n\n", encoding="utf-8")
             temp_path.replace(file_path)
         finally:
             try:
@@ -263,5 +217,47 @@ def delete_last_record() -> bool:
             except OSError:
                 pass
         return True
+    finally:
+        lock.release()
+
+
+def update_summary_for_date(
+    date: str,
+    summary_text: str,
+    *,
+    expected_content_hash: str | None = None,
+) -> str:
+    """安全地把总结写入某日文档顶部的 <summary> 区域。"""
+    file_path = settings.DIARY_DIR / f"{date}.md"
+    lock = _acquire_journal_lock()
+    try:
+        if not file_path.exists():
+            return f"找不到 {date} 的记录。"
+        content = file_path.read_text(encoding="utf-8")
+        if expected_content_hash is not None:
+            actual_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+            if actual_hash != expected_content_hash:
+                return f"{date} 的记录在总结生成期间发生变化，未写入过时总结。"
+        if not re.search(r"<summary>.*?</summary>", content, re.DOTALL):
+            return f"{date} 的记录缺少 <summary> 区域。"
+        new_content = re.sub(
+            r"<summary>.*?</summary>",
+            lambda _match: f"<summary>\n{summary_text}\n</summary>",
+            content,
+            count=1,
+            flags=re.DOTALL,
+        )
+        temp_path = file_path.with_suffix(
+            file_path.suffix + f".{uuid.uuid4().hex}.tmp"
+        )
+        try:
+            temp_path.write_text(new_content, encoding="utf-8")
+            temp_path.replace(file_path)
+        finally:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        return f"{date} 的总结已写入文档顶部。"
     finally:
         lock.release()

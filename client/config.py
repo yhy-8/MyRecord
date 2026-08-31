@@ -8,7 +8,6 @@ _DEFAULTS = {
     "server_url": "http://localhost:8765",
     "records_dir": "./Records",
     "analysis_dir": "./AnalysisReports",
-    "log_dir": "./Log",
     "longpoll_timeout_seconds": 25,
     "verify": "",
 }
@@ -33,7 +32,7 @@ def load() -> dict:
         if key in raw:
             merged[key] = raw[key]
     base = config_path().parent
-    for key in ("records_dir", "analysis_dir", "log_dir"):
+    for key in ("records_dir", "analysis_dir"):
         p = Path(str(merged[key]))
         merged[key] = (base / p) if not p.is_absolute() else p
     return {"client": merged}

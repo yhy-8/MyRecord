@@ -18,7 +18,12 @@ ENTRY_MARKER_PREFIX = "<!-- myrecord-id:"
 DEVICE_MARKER_PREFIX = "<!-- myrecord-device:"
 TOMBSTONE_MARKER_PREFIX = "<!-- myrecord-tombstone-id:"
 
-_DEFAULT_SUMMARY = "暂无今日总结。"
+# AI 写入日记时使用的可保留记录标记（与 id/device/tombstone 标记并存）。
+RECORD_MARKER = "<!-- myrecord-record -->"
+ESCAPED_RECORD_MARKER = "<!-- myrecord-record-text -->"
+
+DEFAULT_SUMMARY = "暂无今日总结。"
+_SUMMARY_RE = re.compile(r"<summary>(.*?)</summary>", re.DOTALL)
 
 
 def _fmt_hhmm(ts: int) -> str:
@@ -50,8 +55,14 @@ def tombstone_block(entry_id: str) -> str:
 
 
 def day_header(date: str, summary: str = "") -> str:
-    text = summary.strip() or _DEFAULT_SUMMARY
+    text = summary.strip() or DEFAULT_SUMMARY
     return f"# {date}\n\n<summary>\n{text}\n</summary>\n\n---\n## 原始记录流\n\n"
+
+
+def extract_summary(text: str) -> str:
+    """读取日记文本里的 <summary> 正文；缺失时返回占位符。"""
+    match = _SUMMARY_RE.search(text)
+    return match.group(1).strip() if match else "(无总结)"
 
 
 def render_day_file(
@@ -81,7 +92,7 @@ _DEVICE_MARKER = re.compile(
 _TOMBSTONE_MARKER = re.compile(
     rf"^{re.escape(TOMBSTONE_MARKER_PREFIX)}([^>]+) -->", re.MULTILINE
 )
-_RECORD = re.compile(
+RECORD_PATTERN = re.compile(
     r"^\*\*(\d{2}:\d{2})(?: ([^\n]*?))?:\*\*\s?(.*?)"
     r"(?=^\*\*\d{2}:\d{2}(?: [^\n]*?)?:\*\*|^\s*<!--|\Z)",
     re.MULTILINE | re.DOTALL,
@@ -117,7 +128,7 @@ def parse_day_file(date: str, content: str) -> dict:
     ]
     dev_markers.sort(key=lambda item: item[0])
     tombstones = [m.group(1) for m in _TOMBSTONE_MARKER.finditer(content)]
-    records = list(_RECORD.finditer(content))
+    records = list(RECORD_PATTERN.finditer(content))
 
     entries = []
     marker_index = 0

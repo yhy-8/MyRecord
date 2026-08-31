@@ -9,8 +9,8 @@ import subprocess
 import sys
 import threading
 import time
-from pathlib import Path
 
+from rich.console import Console
 from rich.panel import Panel
 
 from . import identity, journal
@@ -80,7 +80,7 @@ def show_day(arg: str) -> None:
     """查看本地日记（不提供报告查看）。"""
     date = resolve_date(arg)
     if not date:
-        print("[黄色][!] 无法解析日期。[/黄色]")
+        Console().print("[yellow][!][/yellow] 无法解析日期。")
         return
     path = journal.day_path(date)
     if not path.exists():
@@ -233,7 +233,7 @@ def _longpoll_loop(client: SyncClient) -> None:
                 client.sync_reports()
             # 冲刷离线队列（空队列时 send_pending 直接返回，不产生请求）
             client.send_pending()
-        except (SyncError, Exception):
+        except SyncError:
             # 离线/服务端不可达：静默等待，保留离线队列
             time.sleep(5)
         time.sleep(0.5)
@@ -250,7 +250,7 @@ def run_interactive() -> None:
         client.full_sync()
         print("启动同步完成：本地已与云端对账一致。")
     except SyncError as error:
-        print(f"[yellow][!][/yellow] {error}（本地照常记录，上线后自动同步）")
+        Console().print(f"[yellow][!][/yellow] {error}（本地照常记录，上线后自动同步）")
 
     _banner()
     print(_help_text())
