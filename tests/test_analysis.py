@@ -59,9 +59,9 @@ class AnalysisWorkflowTests(unittest.TestCase):
         self.ai_calls.append(prompt)
         if "[程序 Agent 任务:" not in prompt:
             return "测试总结", True
-        if "任务:retrospective]" in prompt:
+        if "任务:report]" in prompt:
             return AIResponse(
-                "**工作进展**\n- 完成记录模块重构。\n\n**遇到的问题**\n- 修复同步丢帧。",
+                "## 本周回顾\n- 完成记录模块重构。[1]\n\n## 遇到的问题\n- 修复同步丢帧。[2]",
                 True,
                 {
                     "usage": {
@@ -73,7 +73,7 @@ class AnalysisWorkflowTests(unittest.TestCase):
                     }
                 },
             )
-        return AIResponse('{"approved":true,"feedback":""}', True)
+        raise AssertionError("不再存在其他 Agent：reviewer / retrospective 已取消")
 
     def write_diary(self, date: str):
         path = settings.DIARY_DIR / f"{date}.md"
@@ -170,9 +170,9 @@ class AnalysisWorkflowTests(unittest.TestCase):
         self.assertFalse(success)
         self.assertNotIn("过时总结", diary.read_text(encoding="utf-8"))
 
-    # ---- 周报 / 月报（不再探索）----
+    # ---- 周报 / 月报（单次 Report Agent，不校验）----
 
-    def test_weekly_report_is_summary_only_with_bullet_retrospective(self):
+    def test_weekly_report_is_single_pass_with_citation(self):
         day = datetime.date(2026, 7, 14)
         diary = self.write_diary(day.isoformat())
         original = diary.read_bytes()
@@ -181,34 +181,40 @@ class AnalysisWorkflowTests(unittest.TestCase):
         )
         self.assertTrue(success)
         content = path.read_text(encoding="utf-8")
-        self.assertIn("## 整理与回顾", content)
-        self.assertIn("**工作进展**", content)
-        self.assertIn("**遇到的问题**", content)
-        self.assertNotIn("领域探索与研究", content)
-        self.assertNotIn("探索", content)
+        self.assertIn("分析周报", content)
+        self.assertIn("使用模型：mock", content)
+        self.assertIn("Token 用量", content)
+        self.assertIn("本周回顾", content)
+        self.assertIn("[1]", content)
         self.assertEqual(original, diary.read_bytes())
 
-    def test_weekly_report_has_no_planner_or_researcher_or_search_stages(self):
+    def test_weekly_report_is_single_report_agent_no_reviewer(self):
         day = datetime.date(2026, 7, 14)
         self.write_diary(day.isoformat())
         _, success, _ = orchestrator.generate_analysis_report(
             "weekly", day, {"name": "mock"}
         )
         self.assertTrue(success)
-        self.assertFalse(any("research_planner" in p for p in self.ai_calls))
-        self.assertFalse(any("researcher" in p for p in self.ai_calls))
-        self.assertTrue(any("retrospective" in p for p in self.ai_calls))
-        self.assertTrue(any("reviewer" in p for p in self.ai_calls))
+        report_calls = [p for p in self.ai_calls if "[程序 Agent 任务:report]" in p]
+        self.assertEqual(1, len(report_calls))
+        self.assertFalse(any("reviewer" in p for p in self.ai_calls))
+        self.assertFalse(any("retrospective" in p for p in self.ai_calls))
 
-    def test_weekly_report_uses_readable_dates_without_internal_ids(self):
+    def test_weekly_report_input_labels_records_with_date_and_line(self):
         day = datetime.date(2026, 7, 14)
         self.write_diary(day.isoformat())
         _, success, path = orchestrator.generate_analysis_report(
             "weekly", day, {"name": "mock"}
         )
         self.assertTrue(success)
+        report_prompt = next(
+            p for p in self.ai_calls if "[程序 Agent 任务:report]" in p
+        )
+        self.assertIn("2026-07-14", report_prompt)  # 按日期分隔
+        self.assertIn("line", report_prompt)        # 行号标注
+        self.assertIn("\"n\": 1", report_prompt)   # 全局引用编号
         content = path.read_text(encoding="utf-8")
-        self.assertIn("> 记录依据：2026-07-14", content)
+        self.assertNotIn("记录依据", content)        # 不再有旧页脚
         self.assertNotIn("R-2026", content)
 
     def test_weekly_report_without_records_fails_cleanly(self):
@@ -220,25 +226,29 @@ class AnalysisWorkflowTests(unittest.TestCase):
         self.assertIsNone(path)
         self.assertIn("没有日记记录", message)
 
-    def test_monthly_report_reads_monthly_supporting_retrospectives(self):
+    def test_monthly_report_single_pass_reads_only_period_records(self):
         day = datetime.date(2026, 7, 14)
         self.write_diary(day.isoformat())
         _, success, path = orchestrator.generate_analysis_report(
             "monthly", day, {"name": "mock"}
         )
         self.assertTrue(success)
+        report_prompt = next(
+            p for p in self.ai_calls if "[程序 Agent 任务:report]" in p
+        )
+        self.assertIn("2026-07-14", report_prompt)
+        self.assertNotIn("周报", report_prompt)  # 不读取周期周报/历史报告
         content = path.read_text(encoding="utf-8")
-        self.assertIn("## 整理与回顾", content)
-        self.assertIn("**工作进展**", content)
-        self.assertNotIn("领域探索与研究", content)
+        self.assertIn("分析月报", content)
 
-    def test_monthly_report_reuses_weekly_retrospective_section(self):
+    def test_monthly_report_does_not_reuse_weekly_report(self):
         week_anchor = datetime.date(2026, 7, 14)
         self.write_diary(week_anchor.isoformat())
         _, weekly_ok, _ = orchestrator.generate_analysis_report(
             "weekly", week_anchor, {"name": "mock"}
         )
         self.assertTrue(weekly_ok)
+        self.ai_calls.clear()
 
         month_anchor = datetime.date(2026, 7, 20)
         self.write_diary(month_anchor.isoformat())
@@ -246,34 +256,21 @@ class AnalysisWorkflowTests(unittest.TestCase):
             "monthly", month_anchor, {"name": "mock"}
         )
         self.assertTrue(monthly_ok)
-        self.assertIn("**工作进展**", path.read_text(encoding="utf-8"))
-
-    def test_retrospective_accepts_bullet_structured_output(self):
-        from server.ai.agents import validate_retrospective
-
-        bullets = (
-            "**工作进展**\n- 完成记录模块重构。\n\n**遇到的问题**\n- 修复同步丢帧。"
+        report_prompt = next(
+            p for p in self.ai_calls if "[程序 Agent 任务:report]" in p
         )
-        self.assertEqual(bullets, validate_retrospective(bullets))
+        self.assertNotIn("周报", report_prompt)  # 月报不再复用旧周报板块
+        self.assertIn("分析月报", path.read_text(encoding="utf-8"))
 
-    def test_retrospective_reviewer_can_request_one_content_revision(self):
+    def test_report_has_no_reviewer_or_revision_loop(self):
         day = datetime.date(2026, 7, 14)
         self.write_diary(day.isoformat())
-
-        def approve_after_reject(prompt, model_cfg, **kwargs):
-            self.ai_calls.append(prompt)
-            if "任务:retrospective]" in prompt:
-                return "回顾正文", True
-            return '{"approved":false,"feedback":"删去无依据判断"}', True
-
-        with patch.object(orchestrator, "call_ai", side_effect=approve_after_reject):
-            message, success, _ = orchestrator.generate_analysis_report(
-                "weekly", day, {"name": "mock"}
-            )
-
-        # 有限修订耗尽后整个报告失败，旧文件保持不存在。
-        self.assertFalse(success)
-        self.assertIn("未通过审查", message)
+        _, success, _ = orchestrator.generate_analysis_report(
+            "weekly", day, {"name": "mock"}
+        )
+        self.assertTrue(success)  # 单次即成功，无审查/修订循环
+        self.assertFalse(any("reviewer" in p for p in self.ai_calls))
+        self.assertFalse(any("修订" in p for p in self.ai_calls))
 
 
 if __name__ == "__main__":

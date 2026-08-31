@@ -18,7 +18,6 @@ ModelDict = dict[str, Any]
 
 
 _RETRY_DEFAULTS = {
-    "agent_revision_limit": 1,
     "daily_summary_retry_limit": 2,
     "empty_response_retry_limit": 1,
     "transient_http_retry_limit": 2,
@@ -34,7 +33,6 @@ _POSITIVE_RETRY_SETTINGS = {
     "automation_content_retry_interval_minutes",
 }
 _MAXIMUM_RETRY_SETTINGS = {
-    "agent_revision_limit": 1,
     "daily_summary_retry_limit": 2,
     "empty_response_retry_limit": 1,
 }

@@ -111,11 +111,11 @@ class ModelSettingsTests(unittest.TestCase):
         with patch.object(
             settings,
             "CONFIG",
-            {"retry": {"agent_revision_limit": 0}},
+            {"retry": {"empty_response_retry_limit": 0}},
         ):
             policy = settings.retry_policy()
 
-        self.assertEqual(0, policy["agent_revision_limit"])
+        self.assertEqual(0, policy["empty_response_retry_limit"])
         self.assertEqual(2, policy["daily_summary_retry_limit"])
         self.assertEqual(2, policy["transient_http_retry_limit"])
         self.assertEqual(60, policy["automation_content_retry_interval_minutes"])
@@ -127,14 +127,6 @@ class ModelSettingsTests(unittest.TestCase):
             {"retry": {"automation_content_failure_limit": 0}},
         ):
             with self.assertRaisesRegex(RuntimeError, "必须是正整数"):
-                settings.retry_policy()
-
-        with patch.object(
-            settings,
-            "CONFIG",
-            {"retry": {"agent_revision_limit": 2}},
-        ):
-            with self.assertRaisesRegex(RuntimeError, "不能大于 1"):
                 settings.retry_policy()
 
         with patch.object(

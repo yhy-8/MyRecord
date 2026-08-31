@@ -1,4 +1,4 @@
-"""Orchestrate summary-only weekly and monthly reports."""
+"""单次 Report Agent 直接生成完整周报 / 月报。"""
 
 import datetime
 import hashlib
@@ -12,13 +12,10 @@ from pathlib import Path
 
 from .. import journal, settings
 from ..agents import (
-    REVIEWER_SPEC,
-    RETROSPECTIVE_SPEC,
+    REPORT_SPEC,
     AgentPipelineError,
     invoke_agent,
     is_json_container,
-    validate_reviewer,
-    validate_retrospective,
 )
 from ..ai_client import (
     CONFIG_ERROR_MARKER,
@@ -29,17 +26,12 @@ from .context import (
     _analysis_report_path,
     _existing_logs,
     _log_without_summary,
-    _monthly_supporting_reports,
     _period_records,
-    _recent_summary_context,
-    _record_chunks,
-    _referenced_source_records,
 )
 
 
 logger = logging.getLogger(__name__)
 _MAX_AGENT_INPUT_CHARACTERS = 120000
-_MAX_RECORD_CHUNK_CHARACTERS = 30000
 
 
 @dataclass
@@ -169,77 +161,34 @@ def summarize_diary(date: str, model_config: settings.ModelDict) -> tuple[str, b
     return summary, True
 
 
-def _revision_context(
-    attempt: int,
-    previous_output: object,
-    feedback: object,
-    *,
-    source: str,
-    maximum_attempts: int | None = None,
-) -> dict:
-    """Build a bounded correction suffix without internal telemetry."""
-    if maximum_attempts is None:
-        maximum_attempts = settings.retry_policy()["agent_revision_limit"] + 1
-
-    def model_visible(value: object) -> object:
-        if isinstance(value, dict):
-            return {
-                key: model_visible(item)
-                for key, item in value.items()
-                if not str(key).startswith("_")
-            }
-        if isinstance(value, list):
-            return [model_visible(item) for item in value]
-        if isinstance(value, tuple):
-            return tuple(model_visible(item) for item in value)
-        return value
-
-    return {
-        "attempt": attempt,
-        "maximum_attempts": maximum_attempts,
-        "feedback_source": source,
-        "problems_to_fix": model_visible(feedback),
-        "rejected_previous_output": model_visible(previous_output),
-    }
-
-
-def _call_agent(
-    spec,
+def _call_report_agent(
     task: str,
     input_data: dict,
     model_config: settings.ModelDict,
     usage: UsageAccumulator,
     run_id: str,
-    *,
-    revision_context: dict | None = None,
-) -> tuple[dict | str, dict]:
-    logger.info("agent_start run=%s agent=%s", run_id, spec.name)
+) -> str:
+    logger.info("agent_start run=%s agent=%s", run_id, REPORT_SPEC.name)
     input_size = len(json.dumps(input_data, ensure_ascii=False))
-    revision_size = (
-        len(json.dumps(revision_context, ensure_ascii=False))
-        if revision_context
-        else 0
-    )
-    if input_size + revision_size > _MAX_AGENT_INPUT_CHARACTERS:
+    if input_size > _MAX_AGENT_INPUT_CHARACTERS:
         raise AgentPipelineError(
-            f"{spec.name} 输入超过安全上限（{input_size + revision_size} > "
+            f"{REPORT_SPEC.name} 输入超过安全上限（{input_size} > "
             f"{_MAX_AGENT_INPUT_CHARACTERS} 字符）"
         )
     try:
-        result, telemetry = invoke_agent(
-            spec,
+        body, telemetry = invoke_agent(
+            REPORT_SPEC,
             task,
             input_data,
             model_config,
             call_ai,
-            revision_context=revision_context,
         )
     except AgentPipelineError as error:
         usage.observe(error.telemetry)
         logger.warning(
             "agent_failed run=%s agent=%s error_type=%s",
             run_id,
-            spec.name,
+            REPORT_SPEC.name,
             error.__class__.__name__,
         )
         raise
@@ -248,236 +197,42 @@ def _call_agent(
         "agent_completed run=%s agent=%s duration_ms=%s total_tokens=%s "
         "cached_tokens=%s cache_miss_tokens=%s",
         run_id,
-        spec.name,
+        REPORT_SPEC.name,
         telemetry.get("duration_ms", 0),
         telemetry.get("usage", {}).get("total_tokens", 0),
         telemetry.get("usage", {}).get("cached_tokens", 0),
         telemetry.get("usage", {}).get("cache_miss_tokens", 0),
     )
-    return result, telemetry
+    return body
 
 
-def _review_body(
-    mode: str,
-    text: str,
-    review_context: dict,
-    model_config: settings.ModelDict,
-    usage: UsageAccumulator,
-    run_id: str,
-) -> tuple[bool, str, dict]:
-    """Review once, allowing one Reviewer-only schema correction."""
-    review_input = {
-        "mode": mode,
-        "text": text,
-        "materials": review_context,
-    }
-    revision_context = None
-    for attempt in range(2):
-        payload, telemetry = _call_agent(
-            REVIEWER_SPEC,
-            "审查这一份正文，并按最小对象返回结论和一段修改意见。",
-            review_input,
-            model_config,
-            usage,
-            run_id,
-            revision_context=revision_context,
+def _report_input(period: dict, records: list[dict]) -> dict:
+    """按日期分隔 + 行号标注 + 全局引用编号，作为唯一事实源交给 Report Agent。"""
+    labeled = []
+    for index, record in enumerate(records, 1):
+        labeled.append(
+            {
+                "n": index,
+                "date": record.get("date", ""),
+                "line": record.get("line", 0),
+                "time": record.get("time", ""),
+                "tag": record.get("tag", ""),
+                "text": record.get("text", ""),
+            }
         )
-        if not isinstance(payload, dict):
-            raise AgentPipelineError("Reviewer 未返回 JSON 对象")
-        try:
-            passed, feedback = validate_reviewer(payload)
-        except AgentPipelineError:
-            if attempt or int(telemetry.get("protocol_retries", 0) or 0):
-                raise
-            revision_context = _revision_context(
-                2,
-                payload,
-                "修正 approved/feedback 字段、类型和一致性",
-                source="Reviewer 协议校验",
-                maximum_attempts=2,
-            )
-            continue
-        return passed, feedback, payload
-    raise RuntimeError("unreachable")
+    return {"period": period, "records": labeled}
 
 
-def _model_record(record: dict) -> dict:
-    """Expose semantic fields to models, never controller fingerprints or paths."""
-    visible = {
-        key: record[key]
-        for key in ("date", "time", "tag", "speaker", "text", "text_part")
-        if key in record
-    }
-    return visible
-
-
-def _retrospective_input(
-    period: dict,
-    current_records: list[dict],
-    referenced_records: list[dict],
-    recent_summaries: str,
-    weekly_retrospectives: str,
-    *,
-    chunk: dict | None = None,
-) -> dict:
-    value = {
-        "period": period,
-        "facts": {
-            "current_records": [_model_record(item) for item in current_records],
-            "referenced_records": [
-                _model_record(item) for item in referenced_records
-            ],
-        },
-        "context": {
-            "recent_summaries": recent_summaries,
-            "weekly_retrospectives": weekly_retrospectives,
-        },
-        "trust_boundaries": {
-            "facts.current_records": "当期原始记录，是当期事实的主要依据",
-            "facts.referenced_records": "用户显式引用的历史记录",
-            "context.recent_summaries": "派生辅助上下文，不能单独证明当期事实",
-            "context.weekly_retrospectives": "派生辅助上下文，只帮助月报整理",
-        },
-    }
-    if chunk:
-        value["chunk"] = chunk
-    return value
-
-
-def _record_dates(records: list[dict]) -> list[str]:
-    return list(dict.fromkeys(str(record.get("date", "")) for record in records))
-
-
-def _record_basis(records: list[dict]) -> str:
-    dates = [date for date in _record_dates(records) if date]
-    return "> 记录依据：" + (", ".join(dates) if dates else "无可显示日期")
-
-
-def _retrospective_section(
-    base_input: dict,
-    source_records: list[dict],
-    model_config: settings.ModelDict,
-    usage: UsageAccumulator,
-    run_id: str,
-    *,
-    task: str = "生成整理与回顾板块。",
-) -> str:
-    revision_limit = settings.retry_policy()["agent_revision_limit"]
-    revision_context = None
-    last_feedback = ""
-    for attempt in range(1, revision_limit + 2):
-        result, _ = _call_agent(
-            RETROSPECTIVE_SPEC,
-            task,
-            base_input,
-            model_config,
-            usage,
-            run_id,
-            revision_context=revision_context,
+def _report_task(kind: str) -> str:
+    if kind == "weekly":
+        return (
+            "根据中控提供的本周期完整原始记录流，一次性生成整份周报正文。"
+            "覆盖本周做了什么、关注点、进展、问题与想法变化，全部以记录流为唯一事实来源。"
         )
-        try:
-            body = validate_retrospective(result)
-        except AgentPipelineError as error:
-            logger.warning(
-                "agent_validation_failed run=%s agent=%s reason=%s",
-                run_id,
-                RETROSPECTIVE_SPEC.name,
-                str(error),
-            )
-            if attempt > revision_limit:
-                raise
-            revision_context = _revision_context(
-                attempt + 1,
-                result,
-                str(error),
-                source="中控确定性校验",
-                maximum_attempts=revision_limit + 1,
-            )
-            continue
-
-        passed, last_feedback, _ = _review_body(
-            "retrospective_review",
-            body,
-            base_input,
-            model_config,
-            usage,
-            run_id,
-        )
-        if passed:
-            return body + "\n\n" + _record_basis(source_records)
-        if attempt > revision_limit:
-            raise AgentPipelineError("整理与回顾未通过审查: " + last_feedback)
-        revision_context = _revision_context(
-            attempt + 1,
-            body,
-            last_feedback,
-            source="Reviewer 实质审查",
-            maximum_attempts=revision_limit + 1,
-        )
-    raise AgentPipelineError("整理与回顾修订次数耗尽: " + last_feedback)
-
-
-def _retrospective_with_input_budget(
-    period: dict,
-    current_records: list[dict],
-    referenced_records: list[dict],
-    recent_summaries: str,
-    weekly_retrospectives: str,
-    model_config: settings.ModelDict,
-    usage: UsageAccumulator,
-    run_id: str,
-) -> str:
-    base_input = _retrospective_input(
-        period,
-        current_records,
-        referenced_records,
-        recent_summaries,
-        weekly_retrospectives,
+    return (
+        "根据中控提供的本周期完整原始记录流，一次性生成整份月报正文。"
+        "覆盖本月做了什么、关注点、进展、问题与想法变化，全部以记录流为唯一事实来源。"
     )
-    source_records = [*current_records, *referenced_records]
-    if len(json.dumps(base_input, ensure_ascii=False)) <= _MAX_AGENT_INPUT_CHARACTERS:
-        return _retrospective_section(
-            base_input, source_records, model_config, usage, run_id
-        )
-
-    fixed_input = _retrospective_input(
-        period, [], [], recent_summaries, weekly_retrospectives
-    )
-    if len(json.dumps(fixed_input, ensure_ascii=False)) >= _MAX_AGENT_INPUT_CHARACTERS:
-        raise AgentPipelineError("Retrospective 固定辅助上下文超过安全上限")
-    chunks = _record_chunks(source_records, _MAX_RECORD_CHUNK_CHARACTERS)
-    current_source_ids = {record["source_id"] for record in current_records}
-    sections = []
-    for index, chunk_records in enumerate(chunks, 1):
-        chunk_current = [
-            item for item in chunk_records if item["source_id"] in current_source_ids
-        ]
-        chunk_referenced = [
-            item for item in chunk_records if item["source_id"] not in current_source_ids
-        ]
-        chunk_input = _retrospective_input(
-            period,
-            chunk_current,
-            chunk_referenced,
-            recent_summaries,
-            weekly_retrospectives,
-            chunk={"index": index, "total": len(chunks)},
-        )
-        sections.append(
-            _retrospective_section(
-                chunk_input,
-                chunk_records,
-                model_config,
-                usage,
-                run_id,
-                task=(
-                    "生成整理与回顾板块。"
-                    f"当前只处理第 {index}/{len(chunks)} 个原文分块；"
-                    "不得声称覆盖未提供的分块。"
-                ),
-            )
-        )
-    return "\n\n".join(sections)
 
 
 def _model_label(model_config: settings.ModelDict) -> str:
@@ -513,11 +268,8 @@ def generate_analysis_report(
     kind: str,
     anchor: datetime.date,
     model_config: settings.ModelDict,
-    *,
-    origin: str = "manual",
-    trigger: str | None = None,
 ) -> tuple[str, bool, Path | None]:
-    """Generate one report from a frozen input snapshot and in-memory state."""
+    """单次 Report Agent 直接生成完整周报 / 月报（手动/自动同一流程、同一路径）。"""
     if kind == "weekly":
         start = anchor - datetime.timedelta(days=anchor.weekday())
         end = start + datetime.timedelta(days=6)
@@ -529,12 +281,8 @@ def generate_analysis_report(
         report_name = f"{start:%Y年%m月} 分析月报"
     else:
         return "分析报告只支持 weekly 或 monthly。", False, None
-    if origin not in {"manual", "auto"}:
-        return f"未知报告来源: {origin}", False, None
-    trigger = trigger or ("manual" if origin == "manual" else "scheduled")
-    if trigger not in {"manual", "scheduled", "retry"}:
-        return f"未知触发方式: {trigger}", False, None
-    report_path = _analysis_report_path(kind, start, end, origin)
+
+    report_path = _analysis_report_path(kind, start, end)
     report_lock = FileLock.acquire(settings.ANALYSIS_DIR / ".report.lock")
     if report_lock is None:
         return "另一个分析报告正在生成，请稍后重试。", False, None
@@ -549,11 +297,9 @@ def generate_analysis_report(
             "end": end.isoformat(),
         }
         logger.info(
-            "analysis_started run=%s kind=%s origin=%s trigger=%s period=%s..%s",
+            "analysis_started run=%s kind=%s period=%s..%s",
             run_id,
             kind,
-            origin,
-            trigger,
             start,
             end,
         )
@@ -567,39 +313,24 @@ def generate_analysis_report(
         records = _period_records(logs)
         if not records:
             return "日记中没有可识别的标准记录。", False, None
-        referenced_records = _referenced_source_records(logs)
-        recent_summaries = _recent_summary_context(start)
-        weekly_retrospectives = (
-            _monthly_supporting_reports(start, end)
-            if kind == "monthly"
-            else "（周报不读取下级周期报告）"
-        )
-        retrospective_markdown = _retrospective_with_input_budget(
-            period,
-            records,
-            referenced_records,
-            recent_summaries,
-            weekly_retrospectives,
+
+        input_data = _report_input(period, records)
+        body = _call_report_agent(
+            _report_task(kind),
+            input_data,
             model_config,
             usage,
             run_id,
         )
-        body = "## 整理与回顾\n\n" + retrospective_markdown
+        if not body:
+            return "报告正文为空。", False, None
 
-        origin_label = "手动" if origin == "manual" else "自动"
-        trigger_label = {
-            "manual": "手动生成",
-            "scheduled": "系统调度",
-            "retry": "自动任务重试",
-        }[trigger]
         final_content = (
             f"# {report_name}\n\n"
             f"> 生成时间：{datetime.datetime.now():%Y-%m-%d %H:%M}\n"
             f"> 使用模型：{_model_label(model_config)}\n"
             f"> 生成耗时：{_duration_label(time.perf_counter() - generation_started)}\n"
             f"> Token 用量：{_token_label(usage.totals())}\n"
-            f"> 报告来源：{origin_label}\n"
-            f"> 触发方式：{trigger_label}\n"
             f"> 原始日记范围：{start:%Y-%m-%d} 至 {end:%Y-%m-%d}\n"
             f"> 分析运行：{run_id}\n\n"
             + body

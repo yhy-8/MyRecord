@@ -143,14 +143,19 @@ class JournalTests(unittest.TestCase):
         self.assertEqual(1, len(remaining))
         self.assertIn("标记后", remaining[0]["text"])
 
-    def test_record_source_id_changes_when_same_position_content_changes(self):
+    def test_record_source_id_is_date_line_based(self):
+        # 新设计：source_id = R-日期-行号（按位置定位、与内容无关），行号为日期文件中 1-based 行号。
         first = _period_records([("2026-07-15", "**09:00:** 原内容")])[0]
-        unchanged = _period_records([("2026-07-15", "**09:00:** 原内容")])[0]
         changed = _period_records([("2026-07-15", "**09:00:** 新内容")])[0]
+        second_line = _period_records(
+            [("2026-07-15", "**09:00:** A\n\n**10:00:** B")]
+        )[1]
 
-        self.assertEqual(first["source_id"], unchanged["source_id"])
-        self.assertNotEqual(first["source_id"], changed["source_id"])
-        self.assertRegex(first["source_id"], r"^R-20260715-001-[0-9a-f]{12}$")
+        self.assertEqual("R-20260715-1", first["source_id"])
+        self.assertEqual(1, first["line"])
+        self.assertEqual(first["source_id"], changed["source_id"])  # 位置决定，不随内容变
+        self.assertEqual("R-20260715-3", second_line["source_id"])  # 第 3 行
+        self.assertEqual(3, second_line["line"])
 
     def test_summary_replacement_preserves_backslashes_literally(self):
         path = settings.DIARY_DIR / "2026-07-15.md"

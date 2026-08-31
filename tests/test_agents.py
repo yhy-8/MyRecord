@@ -2,169 +2,77 @@ import unittest
 
 from server.ai.agents import (
     AGENTS,
-    RETROSPECTIVE_SPEC,
-    REVIEWER_SPEC,
+    REPORT_SPEC,
     AgentPipelineError,
     _prompt,
     invoke_agent,
-    validate_reviewer,
-    validate_retrospective,
+    is_json_container,
 )
 from server.ai.ai_client import AIResponse
 
 
 class AgentModuleTests(unittest.TestCase):
-    def test_agents_have_separate_responsibilities(self):
-        self.assertEqual({"retrospective", "reviewer"}, set(AGENTS))
-        self.assertTrue(AGENTS["reviewer"].can_read_raw)
-        self.assertTrue(AGENTS["retrospective"].can_read_raw)
+    def test_agents_have_only_the_single_report_agent(self):
+        # 已取消 retrospective / reviewer：现在只有单个 Report Agent。
+        self.assertEqual({"report"}, set(AGENTS))
+        self.assertTrue(AGENTS["report"].can_read_raw)
 
-    def test_agent_prompt_requires_one_minimal_json_task(self):
-        prompt = _prompt(REVIEWER_SPEC, "审查正文", {"text": "正文"})
+    def test_report_agent_prompt_mentions_citation_and_no_source_table(self):
+        prompt = _prompt(REPORT_SPEC, "生成周报正文", {"records": [{"n": 1, "date": "2026-07-14", "line": 23, "text": "内容"}]})
         self.assertIn("只负责当前这一项语义任务", prompt)
         self.assertIn("完整覆盖本任务所需信息的前提下保持简洁", prompt)
-        self.assertIn("一个最小 JSON 对象", prompt)
-        self.assertIn("不得自行增加数组", prompt)
+        self.assertIn("数字引用", prompt)
+        self.assertIn("不要生成文末来源表", prompt)
+        self.assertIn("R-", prompt)  # 明确禁止输出 R- 来源标识
 
-    def test_agent_invocation_uses_structured_output_for_minimal_object(self):
+    def test_report_invocation_is_plain_text_with_thinking_budget(self):
         calls = []
 
         def fake_call(prompt, model, **kwargs):
             calls.append(kwargs)
             return AIResponse(
-                '{"approved":true,"feedback":""}',
-                True,
-                {"usage": {"total_tokens": 3}},
+                "## 本周回顾\n- 完成记录模块重构。[1]", True
             )
 
-        payload, telemetry = invoke_agent(
-            REVIEWER_SPEC,
-            "审查这一份正文，并按最小对象返回结论和一段修改意见。",
-            {"text": "正文"},
+        body, _ = invoke_agent(
+            REPORT_SPEC,
+            "生成周报正文",
+            {"records": [{"n": 1, "date": "2026-07-14", "line": 23, "text": "内容"}]},
             {"name": "mock"},
             fake_call,
         )
 
-        self.assertEqual({"approved": True, "feedback": ""}, payload)
-        self.assertEqual(3, telemetry["usage"]["total_tokens"])
-        self.assertEqual(
-            [
-                {
-                    "structured_output": True,
-                    "thinking": True,
-                    "max_tokens": 16384,
-                }
-            ],
-            calls,
-        )
-
-    def test_agent_invocation_unwraps_one_outer_json_fence(self):
-        payload, _ = invoke_agent(
-            REVIEWER_SPEC,
-            "审查这一份正文，并按最小对象返回结论和一段修改意见。",
-            {"text": "正文"},
-            {"name": "mock"},
-            lambda *args, **kwargs: AIResponse(
-                '```json\n{"approved":true,"feedback":""}\n```', True
-            ),
-        )
-        self.assertEqual({"approved": True, "feedback": ""}, payload)
-
-    def test_json_protocol_error_gets_one_bounded_retry(self):
-        responses = iter(
-            [
-                AIResponse("not json", True, {"usage": {"total_tokens": 2}}),
-                AIResponse(
-                    '{"approved":true,"feedback":""}',
-                    True,
-                    {"usage": {"total_tokens": 3}},
-                ),
-            ]
-        )
-        prompts = []
-
-        def fake_call(prompt, model, **kwargs):
-            prompts.append(prompt)
-            return next(responses)
-
-        payload, telemetry = invoke_agent(
-            REVIEWER_SPEC, "审查正文", {}, {"name": "mock"}, fake_call
-        )
-
-        self.assertEqual({"approved": True, "feedback": ""}, payload)
-        self.assertEqual(2, len(prompts))
-        self.assertIn("协议重试", prompts[1])
-        self.assertEqual(1, telemetry["protocol_retries"])
-        self.assertEqual(5, telemetry["usage"]["total_tokens"])
-
-    def test_retrospective_invocation_is_plain_text_with_thinking_budget(self):
-        calls = []
-
-        def fake_call(prompt, model, **kwargs):
-            calls.append(kwargs)
-            return AIResponse("纯文本正文", True)
-
-        body, _ = invoke_agent(
-            RETROSPECTIVE_SPEC, "生成正文", {}, {"name": "mock"}, fake_call
-        )
-
-        self.assertEqual("纯文本正文", body)
+        self.assertEqual("## 本周回顾\n- 完成记录模块重构。[1]", body)
         self.assertEqual(
             [{"structured_output": False, "thinking": True, "max_tokens": 65536}],
             calls,
         )
 
-    def test_retrospective_accepts_structured_bullet_output(self):
-        # 新版整理与回顾要求分点排版，允许 Markdown 无序列表。
-        bullets = (
-            "**工作进展**\n"
-            "- 完成记录模块重构。\n"
-            "- 修复同步丢帧问题。\n"
-            "\n"
-            "**遇到的问题**\n"
-            "- 周报探索耗时过长，已移除。"
-        )
-        self.assertEqual(bullets, validate_retrospective(bullets))
-        self.assertEqual(
-            "正文第一段\n\n正文第二段",
-            validate_retrospective("正文第一段\n\n正文第二段"),
-        )
+    def test_report_invocation_reports_token_telemetry(self):
+        def fake_call(prompt, model, **kwargs):
+            return AIResponse(
+                "正文",
+                True,
+                {"usage": {"total_tokens": 12, "prompt_tokens": 5}},
+            )
 
-    def test_retrospective_rejects_only_structural_violations(self):
-        with self.assertRaisesRegex(AgentPipelineError, "不得自行输出标题"):
-            validate_retrospective("### 模型自拟标题\n正文")
-        with self.assertRaisesRegex(AgentPipelineError, "纯文本"):
-            validate_retrospective(["第一段", "第二段"])
-        with self.assertRaisesRegex(AgentPipelineError, "不得自行输出 URL"):
-            validate_retrospective("正文 https://example.com")
-        with self.assertRaisesRegex(AgentPipelineError, "不得输出 JSON"):
-            validate_retrospective('{"text":"正文"}')
-
-    def test_reviewer_uses_minimal_json_decision(self):
-        self.assertEqual(
-            (True, ""), validate_reviewer({"approved": True, "feedback": ""})
+        _, telemetry = invoke_agent(
+            REPORT_SPEC, "生成", {"records": []}, {"name": "mock"}, fake_call
         )
-        self.assertEqual(
-            (False, "这一判断没有记录支持"),
-            validate_reviewer(
-                {"approved": False, "feedback": "这一判断没有记录支持"}
-            ),
-        )
+        self.assertEqual(12, telemetry["usage"]["total_tokens"])
 
-    def test_all_agent_contracts_reject_model_owned_arrays(self):
+    def test_report_invocation_raises_on_unfinished_output(self):
+        def fake_call(prompt, model, **kwargs):
+            return AIResponse("正文\n输出截断: 达到长度上限", False)
+
         with self.assertRaises(AgentPipelineError):
-            validate_reviewer({"approved": True, "feedback": []})
+            invoke_agent(
+                REPORT_SPEC, "生成", {"records": []}, {"name": "mock"}, fake_call
+            )
 
-    def test_revision_prompt_preserves_original_request_as_prefix(self):
-        revised = _prompt(
-            RETROSPECTIVE_SPEC,
-            "生成",
-            {"records": ["内容"]},
-            {"feedback": "删去无依据判断"},
-        )
-        self.assertIn("【本次任务】", revised)
-        self.assertIn("删去无依据判断", revised)
-        self.assertIn("【中控修订请求】", revised)
+    def test_is_json_container(self):
+        self.assertTrue(is_json_container('{"a": 1}'))
+        self.assertFalse(is_json_container("正文"))
 
 
 if __name__ == "__main__":

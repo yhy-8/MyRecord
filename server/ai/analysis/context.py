@@ -1,8 +1,11 @@
-"""Report input preparation, source resolution, and period paths."""
+"""报告输入准备：按日期分隔的原始记录流 + 行号标注，以及周期报告路径。
+
+原始日记是唯一事实源。周报/月报只取各自时间范围内的**完整原始记录流**（按日期分隔的
+`Records/YYYY-MM-DD.md`），每条记录标注其在所属日期文件中的行号，并据此得到稳定记录 ID
+`R-YYYYMMDD-行号`。本模块不提供任何派生引用（不读近期总结、不同期周报、引用历史记录）。
+"""
 
 import datetime
-import hashlib
-import json
 import re
 from pathlib import Path
 
@@ -11,6 +14,7 @@ from ...hub import render as _format  # 日记格式单一来源（标记/记录
 
 
 def _log_without_summary(content: str) -> str:
+    """把 `<summary>` 区域替换为固定占位（仅供每日总结提示用；报告不依赖总结）。"""
     return re.sub(
         r"<summary>.*?</summary>",
         "<summary>（已省略）</summary>",
@@ -30,104 +34,29 @@ def _date_span(start: datetime.date, end: datetime.date) -> list[str]:
 
 
 def _existing_logs(start: datetime.date, end: datetime.date) -> list[tuple[str, str]]:
+    """返回时间范围内完整原始日记文件（原始内容，不剥离总结区域）。"""
     logs = []
     for date in _date_span(start, end):
         path = settings.DIARY_DIR / f"{date}.md"
         if path.exists():
-            logs.append((date, _log_without_summary(path.read_text(encoding="utf-8"))))
+            logs.append((date, path.read_text(encoding="utf-8")))
     return logs
 
 
-def _referenced_source_records(
-    logs: list[tuple[str, str]], max_characters: int = 30000
-) -> list[dict]:
-    """Parse referenced diaries into addressable records within a bounded context."""
-    reference_pattern = re.compile(
-        r"^\*\*\d{2}:\d{2} \[引用\]:\*\* \[[^\]]+\]\(<([^>]+)>\)",
-        re.MULTILINE,
-    )
-    allowed_root = settings.DIARY_DIR.resolve()
-    seen_paths = set()
-    seen_source_ids = set()
-    records: list[dict] = []
-    size = 0
-
-    for _, content in logs:
-        for relative_path in reference_pattern.findall(content):
-            source_path = (settings.DIARY_DIR / relative_path).resolve()
-            if source_path in seen_paths or source_path.suffix.lower() != ".md":
-                continue
-            if not source_path.is_relative_to(allowed_root):
-                continue
-            if not source_path.is_file():
-                continue
-            try:
-                source_date = datetime.date.fromisoformat(source_path.stem).isoformat()
-            except ValueError:
-                continue
-            try:
-                source_content = source_path.read_text(encoding="utf-8")
-            except (OSError, UnicodeError):
-                continue
-            parsed = _period_records(
-                [(source_date, _log_without_summary(source_content)[:12000])]
-            )
-            for record in parsed:
-                if record["source_id"] in seen_source_ids:
-                    continue
-                record_size = len(json.dumps(record, ensure_ascii=False))
-                if size + record_size > max_characters:
-                    return records
-                records.append(record)
-                seen_source_ids.add(record["source_id"])
-                size += record_size
-            seen_paths.add(source_path)
-            if len(seen_paths) == 10:
-                return records
-    return records
-
-
-def _recent_summary_context(
-    before: datetime.date, days: int = 30, max_characters: int = 20000
-) -> str:
-    start = before - datetime.timedelta(days=days)
-    sections = []
-    size = 0
-    dates = _date_span(start, before - datetime.timedelta(days=1))
-    for date in reversed(dates):
-        path = settings.DIARY_DIR / f"{date}.md"
-        if not path.exists():
-            continue
-        summary = journal.extract_summary(path.read_text(encoding="utf-8"))
-        if summary not in ("(无总结)", "暂无今日总结。"):
-            section = f"### {date}\n{summary}"
-            if size + len(section) > max_characters:
-                break
-            sections.append(section)
-            size += len(section)
-    sections.reverse()
-    return "\n\n".join(sections) or "（没有可用的历史总结）"
-
-
 def _analysis_report_path(
-    kind: str, start: datetime.date, end: datetime.date, origin: str
+    kind: str, start: datetime.date, end: datetime.date
 ) -> Path:
-    suffix = {"manual": "manual", "auto": "auto"}[origin]
     if kind == "weekly":
         return (
             settings.ANALYSIS_DIR
             / "Weekly"
-            / f"{start:%Y-%m-%d}_to_{end:%Y-%m-%d}_{suffix}.md"
+            / f"{start:%Y-%m-%d}_to_{end:%Y-%m-%d}.md"
         )
-    return settings.ANALYSIS_DIR / "Monthly" / f"{start:%Y-%m}_{suffix}.md"
+    return settings.ANALYSIS_DIR / "Monthly" / f"{start:%Y-%m}.md"
 
 
-def analysis_report_path(
-    kind: str, anchor: datetime.date, origin: str = "manual"
-) -> Path | None:
-    """返回报告确定路径，供生成前确认是否覆盖。"""
-    if origin not in ("manual", "auto"):
-        return None
+def analysis_report_path(kind: str, anchor: datetime.date) -> Path | None:
+    """返回报告确定路径，供生成前确认是否覆盖（手动/自动共用同一路径）。"""
     if kind == "weekly":
         start = anchor - datetime.timedelta(days=anchor.weekday())
         end = start + datetime.timedelta(days=6)
@@ -137,68 +66,7 @@ def analysis_report_path(
         end = next_month - datetime.timedelta(days=1)
     else:
         return None
-    return _analysis_report_path(kind, start, end, origin)
-
-
-def _monthly_supporting_reports(
-    start: datetime.date, end: datetime.date, max_characters: int = 30000
-) -> str:
-    """Read only retrospective sections from complete in-month weekly reports."""
-    candidates: dict[tuple[datetime.date, datetime.date], Path] = {}
-    weekly_dir = settings.ANALYSIS_DIR / "Weekly"
-    for path in sorted(weekly_dir.glob("*.md")):
-        match = re.fullmatch(
-            r"(\d{4}-\d{2}-\d{2})_to_(\d{4}-\d{2}-\d{2})_(?:manual|auto)",
-            path.stem,
-        )
-        if not match:
-            continue
-        try:
-            report_start = datetime.date.fromisoformat(match.group(1))
-            report_end = datetime.date.fromisoformat(match.group(2))
-        except ValueError:
-            continue
-        if (
-            report_start.weekday() != 0
-            or report_end != report_start + datetime.timedelta(days=6)
-            or report_start < start
-            or report_end > end
-        ):
-            continue
-        period = (report_start, report_end)
-        previous = candidates.get(period)
-        if previous is None or path.stem.endswith("_manual"):
-            candidates[period] = path
-
-    sections = []
-    size = 0
-    for period in sorted(candidates):
-        report_start, report_end = period
-        path = candidates[period]
-        try:
-            content = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeError):
-            continue
-        # 周报/月报现在只有单一“整理与回顾”板块；提取到报告末尾。
-        retrospective_match = re.search(
-            r"^## 整理与回顾\s*\n(.*?)(?=\Z)",
-            content,
-            re.MULTILINE | re.DOTALL,
-        )
-        if not retrospective_match:
-            continue
-        retrospective_text = retrospective_match.group(1).strip()
-        if not retrospective_text:
-            continue
-        section = (
-            f"### {report_start:%Y-%m-%d} 至 {report_end:%Y-%m-%d}\n"
-            f"{retrospective_text[:12000]}"
-        )
-        if size + len(section) > max_characters:
-            break
-        sections.append(section)
-        size += len(section)
-    return "\n\n".join(sections) or "（没有可用的同期周报）"
+    return _analysis_report_path(kind, start, end)
 
 
 _RECORD_PATTERN = _format.RECORD_PATTERN  # 单一来源：见 server/hub/render.py
@@ -217,7 +85,11 @@ _VALID_RECORD_MARKER_PATTERN = re.compile(
 
 
 def _period_records(logs: list[tuple[str, str]]) -> list[dict]:
-    """Parse immutable report input into addressable journal records."""
+    """解析时间范围内的完整原始记录流。
+
+    每条记录自带：date / time / tag / speaker / text，以及 **line**（该记录在所属日期文件中的
+    1-based 行号，定位到其可视头部行 `**HH:MM:**`）和稳定 ID `source_id=R-YYYYMMDD-行号`。
+    """
     records = []
     for date, content in logs:
         first_marker = _VALID_RECORD_MARKER_PATTERN.search(content)
@@ -229,7 +101,7 @@ def _period_records(logs: list[tuple[str, str]]) -> list[dict]:
                 *_RECORD_PATTERN.finditer(content[:marker_index]),
                 *_MARKED_RECORD_PATTERN.finditer(content[marker_index:]),
             ]
-        for index, match in enumerate(matches, 1):
+        for match in matches:
             tag = (match.group(2) or "").strip()
             speaker = "quoted_ai" if "[AI回复]" in tag else "user"
             text = match.group(3).strip()
@@ -239,71 +111,16 @@ def _period_records(logs: list[tuple[str, str]]) -> list[dict]:
                 text,
                 flags=re.MULTILINE,
             )
-            fingerprint = hashlib.sha256(
-                json.dumps(
-                    {
-                        "date": date,
-                        "time": match.group(1),
-                        "tag": tag,
-                        "speaker": speaker,
-                        "text": text,
-                    },
-                    ensure_ascii=False,
-                    sort_keys=True,
-                ).encode("utf-8")
-            ).hexdigest()[:12]
+            line = content[: match.start()].count("\n") + 1
             records.append(
                 {
-                    "source_id": (
-                        f"R-{date.replace('-', '')}-{index:03d}-{fingerprint}"
-                    ),
-                    "path": f"{date}.md",
+                    "source_id": f"R-{date.replace('-', '')}-{line}",
                     "date": date,
                     "time": match.group(1),
-                    "record_index": index,
+                    "line": line,
                     "tag": tag,
                     "speaker": speaker,
                     "text": text,
                 }
             )
     return records
-
-
-def _record_chunks(records: list[dict], max_characters: int = 24000) -> list[list[dict]]:
-    if max_characters < 1000:
-        raise ValueError("记录分块上限不能小于 1000 字符")
-    chunks: list[list[dict]] = []
-    current: list[dict] = []
-    current_size = 0
-    for record in records:
-        serialized_size = len(json.dumps(record, ensure_ascii=False))
-        parts = [record]
-        if serialized_size > max_characters:
-            text = str(record.get("text", ""))
-            overhead = len(
-                json.dumps({**record, "text": "", "text_part": "1/1"}, ensure_ascii=False)
-            )
-            part_size = max(1, max_characters - overhead - 32)
-            text_parts = [
-                text[index : index + part_size]
-                for index in range(0, len(text), part_size)
-            ] or [""]
-            parts = [
-                {
-                    **record,
-                    "text": text_part,
-                    "text_part": f"{index}/{len(text_parts)}",
-                }
-                for index, text_part in enumerate(text_parts, 1)
-            ]
-        for part in parts:
-            size = len(json.dumps(part, ensure_ascii=False))
-            if current and current_size + size > max_characters:
-                chunks.append(current)
-                current = []
-                current_size = 0
-            current.append(part)
-            current_size += size
-    if current:
-        chunks.append(current)
-    return chunks

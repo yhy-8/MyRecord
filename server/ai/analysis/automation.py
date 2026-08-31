@@ -18,9 +18,6 @@ from ..file_lock import FileLock
 from .context import (
     _analysis_report_path,
     _existing_logs,
-    _monthly_supporting_reports,
-    _recent_summary_context,
-    _referenced_source_records,
 )
 from .orchestrator import (
     generate_analysis_report,
@@ -224,17 +221,10 @@ def _content_failure_key(
         elif task in {"weekly_report", "monthly_report"}:
             start = datetime.date.fromisoformat(target["start"])
             end = datetime.date.fromisoformat(target["end"])
-            if task == "weekly_report":
-                supporting_reports = "（周报不读取下级周期报告）"
-            else:
-                supporting_reports = _monthly_supporting_reports(start, end)
             logs = _existing_logs(start, end)
             payload.update(
                 period={"start": start.isoformat(), "end": end.isoformat()},
                 logs=logs,
-                referenced_sources=_referenced_source_records(logs),
-                recent_summaries=_recent_summary_context(start),
-                supporting_reports=supporting_reports,
             )
         return hashlib.sha256(
             json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
@@ -411,12 +401,12 @@ def _task_missing(
     if task == "weekly_report":
         start = datetime.date.fromisoformat(target["start"])
         end = datetime.date.fromisoformat(target["end"])
-        path = _analysis_report_path("weekly", start, end, "auto")
+        path = _analysis_report_path("weekly", start, end)
         return bool(_existing_logs(start, end)) and not path.exists()
     if task == "monthly_report":
         start = datetime.date.fromisoformat(target["start"])
         end = datetime.date.fromisoformat(target["end"])
-        path = _analysis_report_path("monthly", start, end, "auto")
+        path = _analysis_report_path("monthly", start, end)
         return bool(_existing_logs(start, end)) and not path.exists()
     return False
 
@@ -543,20 +533,15 @@ def _run_pending_task(
     if retry_trigger and task in state.get("errors", {}):
         _retry_one_task(task, now, state, model)
         return
-    trigger = (
-        "retry"
-        if retry_trigger or task in state.get("errors", {})
-        else "scheduled"
-    )
     if task == "daily_summary":
         _run_daily_summaries(now.date(), state, model, target=target)
     elif task == "weekly_report":
         _run_weekly_reports(
-            now.date(), state, model, trigger=trigger, target=target
+            now.date(), state, model, target=target
         )
     elif task == "monthly_report":
         _run_monthly_reports(
-            now.date(), state, model, trigger=trigger, target=target
+            now.date(), state, model, target=target
         )
 
 
@@ -697,7 +682,6 @@ def _run_weekly_reports(
     state: dict,
     model_config: settings.ModelDict,
     *,
-    trigger: str = "scheduled",
     target: dict[str, str] | None = None,
 ) -> None:
     if target:
@@ -705,7 +689,7 @@ def _run_weekly_reports(
         end = datetime.date.fromisoformat(target["end"])
     else:
         start, end = _latest_week_period(today)
-    path = _analysis_report_path("weekly", start, end, "auto")
+    path = _analysis_report_path("weekly", start, end)
     if not _existing_logs(start, end) or path.exists():
         _clear_task_error(state, "weekly_report")
         _save_automation_state(state)
@@ -713,11 +697,9 @@ def _run_weekly_reports(
     _set_current_task(
         state,
         "weekly_report",
-        f"正在生成 {start:%Y-%m-%d} 至 {end:%Y-%m-%d} 自动周报",
+        f"正在生成 {start:%Y-%m-%d} 至 {end:%Y-%m-%d} 周报",
     )
-    message, success, _ = generate_analysis_report(
-        "weekly", start, model_config, origin="auto", trigger=trigger
-    )
+    message, success, _ = generate_analysis_report("weekly", start, model_config)
     if success:
         _clear_task_error(state, "weekly_report")
     else:
@@ -735,7 +717,6 @@ def _run_monthly_reports(
     state: dict,
     model_config: settings.ModelDict,
     *,
-    trigger: str = "scheduled",
     target: dict[str, str] | None = None,
 ) -> None:
     if target:
@@ -743,15 +724,13 @@ def _run_monthly_reports(
         end = datetime.date.fromisoformat(target["end"])
     else:
         start, end = _latest_month_period(today)
-    path = _analysis_report_path("monthly", start, end, "auto")
+    path = _analysis_report_path("monthly", start, end)
     if not _existing_logs(start, end) or path.exists():
         _clear_task_error(state, "monthly_report")
         _save_automation_state(state)
         return
-    _set_current_task(state, "monthly_report", f"正在生成 {start:%Y-%m} 自动月报")
-    message, success, _ = generate_analysis_report(
-        "monthly", start, model_config, origin="auto", trigger=trigger
-    )
+    _set_current_task(state, "monthly_report", f"正在生成 {start:%Y-%m} 月报")
+    message, success, _ = generate_analysis_report("monthly", start, model_config)
     if success:
         _clear_task_error(state, "monthly_report")
     else:
@@ -792,11 +771,11 @@ def _retry_one_task(
         _run_daily_summaries(now.date(), state, model, target=target)
     elif task == "weekly_report":
         _run_weekly_reports(
-            now.date(), state, model, trigger="retry", target=target
+            now.date(), state, model, target=target
         )
     elif task == "monthly_report":
         _run_monthly_reports(
-            now.date(), state, model, trigger="retry", target=target
+            now.date(), state, model, target=target
         )
 
 
