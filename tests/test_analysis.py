@@ -6,7 +6,26 @@ from unittest.mock import patch
 
 from server.ai import settings
 from server.ai.ai_client import AIResponse
-from server.ai.analysis import orchestrator
+from server.ai.analysis import context, orchestrator
+
+
+class LegacyReadTests(unittest.TestCase):
+    """旧数据向后兼容：AI 读取正文时不得把旧 agentrecord-* 标记混入文本。"""
+
+    def test_period_records_ignore_old_markers(self):
+        old = (
+            "# 2024-01-01\n\n<summary>\n暂无今日总结。\n</summary>\n\n---\n"
+            "## 原始记录流\n\n"
+            "<!-- agentrecord-record -->\n**08:00:** 今天去爬山\n\n"
+            "<!-- agentrecord-record-text -->\n**09:00 [引用]:** 引用了一篇文档\n"
+        )
+        records = context._period_records([("2024-01-01", old)])
+        self.assertEqual(len(records), 2)
+        for record in records:
+            self.assertNotIn("<!--", record["text"])
+            self.assertNotIn("agentrecord", record["text"])
+        self.assertEqual(records[0]["tag"], "")
+        self.assertEqual(records[1]["tag"], "[引用]")
 
 
 class AnalysisWorkflowTests(unittest.TestCase):

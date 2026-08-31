@@ -93,5 +93,5 @@ python -m server.main cert             生成自签证书（服务端直连 TLS�
 - 链接凭证是**单一共享 token**（服务端只存 scrypt 哈希），凭证不绑定设备；设备由各端自报本机名区分。
 - 支持服务端直连自签证书 TLS（`cert` 生成，`config.yaml` 填 `server.tls`），客户端 `verify` 校验收信。
 - 模型密钥只在服务端；不入数据空间、不入日志。
-- 日记文件统一使用 `<!-- myrecord-* -->` 条目/删除标记；不再兼容旧 `agentrecord-*`。
-  迁移前数据先就地转新格式：`python migrate_markers.py [Records 目录]`。
+- 日记文件统一使用 `<!-- myrecord-* -->` 条目/删除标记。旧数据（`agentrecord-*` 与远古裸记录）
+  原生向后兼容：解析时无 entry_id 自动生成 legacy id，标记注释不会混入正文，AI 只读文本。

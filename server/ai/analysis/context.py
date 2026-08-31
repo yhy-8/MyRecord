@@ -202,7 +202,7 @@ def _monthly_supporting_reports(
 
 _RECORD_PATTERN = re.compile(
     r"^\*\*(\d{2}:\d{2})(?: ([^\n]*?))?:\*\*\s?(.*?)"
-    r"(?=^\*\*\d{2}:\d{2}(?: [^\n]*?)?:\*\*|\Z)",
+    r"(?=^\*\*\d{2}:\d{2}(?: [^\n]*?)?:\*\*|^\s*<!--|\Z)",
     re.MULTILINE | re.DOTALL,
 )
 _MARKED_RECORD_PATTERN = re.compile(

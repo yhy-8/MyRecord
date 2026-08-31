@@ -103,11 +103,15 @@ class RenderParserTest(unittest.TestCase):
         legacy = (
             "# 2024-01-01\n\n<summary>\n暂无今日总结。\n</summary>\n\n---\n## 原始记录流\n\n"
             "<!-- agentrecord-record -->\n**08:00:** 旧记录\n\n"
-            "**09:00 [引用]:** 引用记录\n"
+            "<!-- agentrecord-record-text -->\n**09:00 [引用]:** 引用记录\n"
         )
         parsed = parse_day_file("2024-01-01", legacy)
         self.assertEqual(len(parsed["entries"]), 2)
         self.assertTrue(parsed["entries"][0]["entry_id"].startswith("legacy-"))
+        # 旧标记是注释，不允许混入正文；AI 只应读到纯文本。
+        for entry in parsed["entries"]:
+            self.assertNotIn("<!--", entry["text"])
+            self.assertNotIn("agentrecord", entry["text"])
 
 
 class StoreDeviceTests(unittest.TestCase):

@@ -20,6 +20,19 @@ def _store(data_dir: Path) -> tuple[Store, Path]:
     return store, data_dir
 
 
+def _admin_retry_result(retry_callable) -> tuple[bool, str]:
+    """归一化重试结果：retry_callable 返回 (message, ok)，统一为 (ok, message)。
+
+    服务端 http.hub 的 _admin_retry 按 (ok, message) 解包，因此这里必须把
+    automation.retry_failed_automatic_tasks() 的 (message, ok) 顺序交换过来。
+    """
+    try:
+        message, ok = retry_callable()
+        return ok, message
+    except Exception as error:
+        return False, f"重试失败: {error}"
+
+
 def _command_run(args: argparse.Namespace) -> int:
     cfg = config.load()
     server_cfg = cfg["server"]
@@ -71,11 +84,7 @@ def _command_run(args: argparse.Namespace) -> int:
         store.render_records(data_dir / "Records", data_dir / "Trash")
 
     def admin_retry():
-        try:
-            ok, message = ai_analysis.retry_failed_automatic_tasks()
-            return ok, message
-        except Exception as error:
-            return False, f"重试失败: {error}"
+        return _admin_retry_result(ai_analysis.retry_failed_automatic_tasks)
 
     def admin_set_model(name):
         from .ai import settings as ai_settings

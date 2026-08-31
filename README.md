@@ -117,8 +117,9 @@ python -m client
 - 传输建议启用 TLS：自签证书直连即可（无需反向代理），`python -m server.main cert` 一键生成，
   客户端 `config.yaml` 的 `verify` 校验收信。无凭证/离线时仍可本地记录，上线后按内容一致 id 自动合并。
 - 模型密钥只在服务端；不入数据空间、不入日志。
-- 日记文件的条目/删除标记统一采用 `<!-- myrecord-* -->` 格式。迁移前的旧数据（`agentrecord-*`）
-  需先就地转新格式：`python migrate_markers.py [Records 目录]`。
+- 日记文件的条目/删除标记统一采用 `<!-- myrecord-* -->` 格式。旧数据（`agentrecord-*`，含远古
+  无标记的裸 `**HH:MM:** 正文`）无需迁移，解析器原生向后兼容：无 entry_id 的记录自动生成 legacy id，
+  AI 只读取正文文本，任何旧标记都不会混入正文。
 
 ## 文档结构（总体 / 客户端 / 服务端）
 
