@@ -62,9 +62,9 @@ python -m server.main cert             生成自签证书（服务端直连 TLS�
 | `ai/settings.py` | 运行配置、目录与模型选择（`current_model` / `models`） |
 | `ai/ai_client.py` | OpenAI 兼容模型请求、HTTP/thinking/JSON 输出、Token 遥测、错误分类 |
 | `ai/journal.py` | 原始日记读写与 `<summary>` 区域更新（AI 只能通过这里写日记） |
-| `ai/agents/` | 单模块：AgentSpec、纯文本协议、确定性校验；单次 Report Agent 生成完整报告正文 |
+| `ai/agents/` | 单模块：AgentSpec、纯文本协议；单次 Report Agent 生成完整报告正文 |
 | `ai/analysis/context.py` | 周期范围、按日期分隔并标注行号的记录流、全局引用编号、报告路径 |
-| `ai/analysis/orchestrator.py` | 单次 Report Agent、[N]↔R-日期-行号 映射、确定性校验、来源表、Token 累计、审计头部、原子交付报告 |
+| `ai/analysis/orchestrator.py` | 单次 Report Agent、[N] 全局引用编号、Token 累计、审计头部、原子交付报告；来源表与引用校验为暂缓项（权威说明见 `../Docs/设计基线.md` §8） |
 | `ai/analysis/automation.py` | 缺失检测、持久队列、前置屏障、重试时间、系统调度安装 |
 | `ai/file_lock.py`、`ai/logging_config.py` | 跨进程互斥、有界诊断日志 |
 
