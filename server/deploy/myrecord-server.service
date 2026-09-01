@@ -1,11 +1,11 @@
 # MyRecord 服务端中枢 systemd 单元（裸机 root 运行，明文存储）。
-# 安装（在独立 server 工程内）：
-#   sudo cp server/deploy/myrecord-server.service /etc/systemd/system/
-#   修改 ExecStart 的解释器路径与 WorkingDirectory 为独立 server 工程绝对路径
-#   sudo systemctl daemon-reload && sudo systemctl start myrecord-server
-# 注意：本服务**不启用开机自启动**（无 [Install] 段，需手动 start；
-# 不要执行 systemctl enable）。如需开机自启请自行添加 [Install] 并 enable。
-
+#
+# 推荐一键安装（在独立 server 工程内）：
+#   sudo python -m server.main deploy
+# 该命令会自动带出当前解释器与工程根、按需生成自签证书，写入本单元并
+# systemctl daemon-reload && systemctl enable --now myrecord-server。
+#
+# 以下是 deploy 自动生成的等价内容（供手动/审阅参照）。
 [Unit]
 Description=MyRecord server hub (sync + AI reports + fanout)
 After=network-online.target
@@ -13,10 +13,11 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-# 按实际解释器与工程路径修改；WorkingDirectory 应指向独立 server/ 工程根
-#（即含 server/ 子目录的父目录，使 `python -m server.main run` 可解析）。
-ExecStart=/home/a/miniconda3/envs/aiagent/bin/python -m server.main run
-WorkingDirectory=/mnt/d盘/工具/编程/已完成编程/AgentRecord
+ExecStart=/usr/bin/python3 -m server.main run
+WorkingDirectory=/srv/myrecord
 Restart=on-failure
 RestartSec=3
 User=root
+
+[Install]
+WantedBy=multi-user.target

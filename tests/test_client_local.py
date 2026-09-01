@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from client import config as client_config
 from client import identity
 from client import __main__ as client_main
 
@@ -72,6 +73,15 @@ class ClientEntryIdTests(unittest.TestCase):
     def test_device_name_prefers_override(self):
         with patch.object(identity, "load", return_value={"token": "t", "device_id": "vivo y78"}):
             self.assertEqual("vivo y78", identity.device_name())
+
+
+class ClientConfigTests(unittest.TestCase):
+    def test_default_server_url_is_https(self):
+        """默认服务端地址必须为 https（自签证书直连，TLS 强制）。"""
+        missing = Path(tempfile.mkdtemp(prefix="cfg-")) / "config.yaml"
+        with patch.object(client_config, "config_path", return_value=missing):
+            value = client_config.load()
+        self.assertEqual("https://localhost:8765", value["client"]["server_url"])
 
 
 class ClientMainTests(unittest.TestCase):

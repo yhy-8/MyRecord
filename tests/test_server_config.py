@@ -82,7 +82,7 @@ class ServerConfigTests(unittest.TestCase):
         """TLS 留空时默认指向 <data_dir>/tls/server.crt/.key（cert 生成位置）。"""
         config_file = self.root / "config.yaml"
         config_file.write_text(
-            "server:\n  data_dir: ./data\n  tls:\n    certfile: \"\"\n    keyfile: \"\"\n",
+            "server:\n  data_dir: ./data\n",
             encoding="utf-8",
         )
         with patch.object(config, "config_path", return_value=config_file):
@@ -98,19 +98,25 @@ class ServerConfigTests(unittest.TestCase):
             tls["keyfile"],
         )
 
-    def test_load_respects_explicit_tls_paths(self):
-        """显式配置的 TLS 路径不被缺省默认覆盖。"""
+    def test_load_ignores_tls_paths_in_config(self):
+        """config.yaml 不再配置证书路径：无论写什么，一律由 data_dir 推导缺省 TLS 位置。"""
         config_file = self.root / "config.yaml"
         config_file.write_text(
-            "server:\n  tls:\n    certfile: /custom/cert.crt\n    keyfile: /custom/key.key\n",
+            "server:\n  data_dir: ./data\n  tls:\n    certfile: /custom/cert.crt\n    keyfile: /custom/key.key\n",
             encoding="utf-8",
         )
         with patch.object(config, "config_path", return_value=config_file):
             value = config.load()
 
         tls = value["server"]["tls"]
-        self.assertEqual("/custom/cert.crt", tls["certfile"])
-        self.assertEqual("/custom/key.key", tls["keyfile"])
+        self.assertEqual(
+            str((self.root / "data" / "tls" / "server.crt").resolve()),
+            tls["certfile"],
+        )
+        self.assertEqual(
+            str((self.root / "data" / "tls" / "server.key").resolve()),
+            tls["keyfile"],
+        )
 
 
 if __name__ == "__main__":

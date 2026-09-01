@@ -63,19 +63,22 @@ pip install -r server/requirements.txt
 python -m server.main run
 ```
 
-或使用 systemd（`server/deploy/myrecord-server.service`，启动后按注释修改解释器路径与
-`WorkingDirectory` 为独立 server 工程绝对路径）。
+或一键安装为 systemd 服务（需 root，自动带出解释器与工程根、按需生成证书）：
+
+```bash
+sudo python -m server.main deploy
+```
 
 常用服务端子命令：
 
 ```text
 python -m server.main run                    启动同步+AI 服务
-python -m server.main token create                 签发/重签唯一链接凭证（覆盖旧 token）
-python -m server.main token list                   查看当前唯一凭证状态
-python -m server.main token rotate                 重新签发（覆盖旧 token）
-python -m server.main token revoke                 停用凭证（所有端失去同步）
+python -m server.main token create                 签发/重签唯一链接凭证（覆盖旧 token，需二次确认）
+python -m server.main token list                   查看当前唯一凭证状态（含生成时间）
 python -m server.main import --records 路径  导入旧版 Records
 python -m server.main render                 重渲染当天 Records
+python -m server.main cert                   生成自签证书（服务端直连 TLS）
+python -m server.main deploy                 一键安装并启动 systemd 服务（需 root）
 ```
 
 ### 2. 客户端

@@ -19,13 +19,12 @@ python -m server.main run
 
 ```text
 python -m server.main run            启动同步+AI 服务
-python -m server.main token create                 签发/重签唯一链接凭证（覆盖旧 token）
-python -m server.main token list                   查看当前唯一凭证状态
-python -m server.main token rotate                 重新签发（覆盖旧 token）
-python -m server.main token revoke                 停用凭证（所有端失去同步）
+python -m server.main token create                 签发/重签唯一链接凭证（覆盖旧 token，需二次确认）
+python -m server.main token list                   查看当前唯一凭证状态（含生成时间）
 python -m server.main import --records 路径    导入旧版 Records
 python -m server.main render          重渲染当天 Records
 python -m server.main cert             生成自签证书（服务端直连 TLS，`--ip` 可指定 SAN）
+python -m server.main deploy            一键安装并启动 systemd 服务（需 root）
 ```
 
 ## 角色：与客户端的协作
@@ -76,9 +75,15 @@ python -m server.main cert             生成自签证书（服务端直连 TLS�
 
 ## 部署
 
+一键安装并启动为 systemd 服务（需 root，自动带出当前解释器与工程根，证书缺失时自动生成）：
+
+```bash
+sudo python -m server.main deploy
+```
+
 `server/deploy/`：
 
-- `myrecord-server.service` — systemd 单元（安装/启停说明见文件头注释）。
+- `myrecord-server.service` — systemd 单元（`deploy` 自动生成/写入；此文件为等价参照）。
 - `backup.sh` — 备份 `data` 空间为 tar（保留最近 N 份）。
 - `restore.sh` — 从备份恢复 `data` 空间。
 

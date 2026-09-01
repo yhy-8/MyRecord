@@ -54,7 +54,16 @@ class ServerMainAdminRetryGlueTests(unittest.TestCase):
 
 
 def _data_dir_config(data_dir: Path) -> dict:
-    return {"server": {"data_dir": str(data_dir)}}
+    """与真实 server.config.load 一致：包含由 data_dir 推导出的缺省 TLS 路径。"""
+    return {
+        "server": {
+            "data_dir": str(data_dir),
+            "tls": {
+                "certfile": str(data_dir / "tls" / "server.crt"),
+                "keyfile": str(data_dir / "tls" / "server.key"),
+            },
+        }
+    }
 
 
 class ServerMainTokenTests(unittest.TestCase):
@@ -69,10 +78,18 @@ class ServerMainTokenTests(unittest.TestCase):
         server_main.config.load = self._orig_load
         self.tmp.cleanup()
 
-    def _capture(self, argv):
+    def _capture(self, argv, stdin_sides=None):
         out = io.StringIO()
-        with patch("sys.stdout", out):
+        patchers = [patch("sys.stdout", out)]
+        if stdin_sides is not None:
+            patchers.append(patch("builtins.input", side_effect=stdin_sides))
+        for p in patchers:
+            p.start()
+        try:
             rc = server_main.main(argv)
+        finally:
+            for p in patchers:
+                p.stop()
         return rc, out.getvalue()
 
     @staticmethod
@@ -82,11 +99,11 @@ class ServerMainTokenTests(unittest.TestCase):
                 return line[len("token: "):].strip()
         return None
 
-    def test_token_single_credential_create_list_revoke(self):
+    def test_token_create_and_list(self):
         # 单一链接凭证：create 无需 --device，签发唯一 token
         rc, text = self._capture(["token", "create"])
         self.assertEqual(0, rc)
-        self.assertIn("device_id: sync", text)
+        self.assertIn("链接凭证已签发", text)
         self.assertIn("token: ", text)
         token = self._token_from(text)
         self.assertIsNotNone(token)
@@ -97,41 +114,96 @@ class ServerMainTokenTests(unittest.TestCase):
 
         rc, listing = self._capture(["token", "list"])
         self.assertEqual(0, rc)
-        self.assertIn("sync", listing)
+        self.assertIn("已配置", listing)
+        self.assertIn("生成于", listing)  # list 附带凭证生成时间
 
-        rc, _ = self._capture(["token", "revoke"])
+    def test_token_list_unconfigured(self):
+        rc, text = self._capture(["token", "list"])
         self.assertEqual(0, rc)
-        fresh = Store(self.data_dir / "state.json")
-        self.assertFalse(fresh.verify_device("whatever", token))
-        self.assertNotIn("sync", fresh.device_ids())
-
-    def test_token_rotate_overwrites_old_token(self):
-        rc, first_text = self._capture(["token", "create"])
-        self.assertEqual(0, rc)
-        token1 = self._token_from(first_text)
-        self.assertIsNotNone(token1)
-
-        rc, second_text = self._capture(["token", "rotate"])
-        self.assertEqual(0, rc)
-        token2 = self._token_from(second_text)
-
-        store = Store(self.data_dir / "state.json")
-        self.assertNotEqual(token1, token2)
-        # 覆盖：旧 token 立即失效，只有新 token 有效
-        self.assertFalse(store.verify_device("sync", token1))
-        self.assertTrue(store.verify_device("sync", token2))
-
-    def test_token_revoke_without_valid_credential_returns_error(self):
-        err = io.StringIO()
-        with patch("sys.stdout", io.StringIO()), patch("sys.stderr", err):
-            rc = server_main.main(["token", "revoke"])
-        self.assertEqual(1, rc)
-        self.assertIn("无有效链接凭证", err.getvalue())
+        self.assertIn("未配置", text)
 
     def test_token_create_needs_no_device_arg(self):
         rc, text = self._capture(["token", "create"])
         self.assertEqual(0, rc)
         self.assertIn("token: ", text)
+
+    def test_token_create_overwrite_requires_confirmation(self):
+        rc, _ = self._capture(["token", "create"])
+        self.assertEqual(0, rc)
+
+        # 已存在凭证：不输入 yes → 取消，不覆盖
+        err = io.StringIO()
+        with patch("sys.stdout", io.StringIO()), patch("sys.stderr", err), patch(
+            "builtins.input", return_value="no"
+        ):
+            rc = server_main.main(["token", "create"])
+        self.assertEqual(1, rc)
+        self.assertIn("已取消", err.getvalue())
+
+    def test_token_create_overwrite_confirms_and_replaces(self):
+        rc, first_text = self._capture(["token", "create"])
+        self.assertEqual(0, rc)
+        token1 = self._token_from(first_text)
+        self.assertIsNotNone(token1)
+
+        # 输入 yes 确认覆盖 → 签发新 token，旧 token 立即失效
+        rc, second_text = self._capture(["token", "create"], stdin_sides=["yes"])
+        self.assertEqual(0, rc)
+        token2 = self._token_from(second_text)
+
+        store = Store(self.data_dir / "state.json")
+        self.assertNotEqual(token1, token2)
+        self.assertFalse(store.verify_device("sync", token1))
+        self.assertTrue(store.verify_device("sync", token2))
+
+
+class ServerMainDeployTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.data_dir = self.root / "data"
+        self._orig_load = server_main.config.load
+        server_main.config.load = lambda: _data_dir_config(self.data_dir)
+        # 预置证书文件，让 deploy 跳过自动生成
+        tls = self.data_dir / "tls"
+        tls.mkdir(parents=True, exist_ok=True)
+        (tls / "server.crt").write_text("fakepem", encoding="utf-8")
+        (tls / "server.key").write_text("fakepem", encoding="utf-8")
+
+    def tearDown(self):
+        server_main.config.load = self._orig_load
+        self.tmp.cleanup()
+
+    def test_render_systemd_includes_interpreter_workdir_and_install(self):
+        text = server_main._render_systemd("/usr/bin/python3", Path("/srv/myrecord"))
+        self.assertIn("ExecStart=/usr/bin/python3 -m server.main run", text)
+        self.assertIn("WorkingDirectory=/srv/myrecord", text)
+        self.assertIn("WantedBy=multi-user.target", text)
+
+    def test_deploy_requires_root(self):
+        err = io.StringIO()
+        with patch("server.main.os.geteuid", return_value=1000), patch(
+            "sys.stdout", io.StringIO()
+        ), patch("sys.stderr", err), patch("server.main.subprocess.run") as run:
+            rc = server_main.main(["deploy"])
+        self.assertEqual(2, rc)
+        self.assertIn("root", err.getvalue())
+        run.assert_not_called()
+
+    def test_deploy_installs_and_starts_systemd(self):
+        unit_path = self.root / "systemd" / "myrecord-server.service"
+        with patch("server.main.os.geteuid", return_value=0), patch(
+            "server.main._SYSTEMD_UNIT_PATH", unit_path
+        ), patch("sys.stdout", io.StringIO()), patch("server.main.subprocess.run") as run:
+            rc = server_main.main(["deploy"])
+        self.assertEqual(0, rc)
+
+        unit = unit_path.read_text(encoding="utf-8")
+        import sys as _sys
+        self.assertIn(f"ExecStart={_sys.executable} -m server.main run", unit)
+        calls = [c.args[0] for c in run.call_args_list]
+        self.assertEqual(["systemctl", "daemon-reload"], calls[0])
+        self.assertEqual(["systemctl", "enable", "--now", "myrecord-server"], calls[1])
 
 
 class ServerMainRenderImportTests(unittest.TestCase):

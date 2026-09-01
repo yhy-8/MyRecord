@@ -8,7 +8,6 @@ _DEFAULTS = {
     "host": "0.0.0.0",
     "port": 8765,
     "data_dir": "./data",
-    "tls": {"certfile": "", "keyfile": ""},
 }
 
 
@@ -46,23 +45,10 @@ def load() -> dict:
         merged["data_dir"] = data_dir
     else:
         merged["data_dir"] = (config_path().parent / data_dir).resolve()
-    tls = merged.get("tls")
-    if not isinstance(tls, dict):
-        merged["tls"] = {"certfile": "", "keyfile": ""}
-    else:
-        merged["tls"] = {
-            "certfile": str(tls.get("certfile") or ""),
-            "keyfile": str(tls.get("keyfile") or ""),
-        }
-    base_dir = config_path().parent
-    for key in ("certfile", "keyfile"):
-        raw = merged["tls"][key]
-        if raw and not _is_absolute_path(Path(raw)):
-            merged["tls"][key] = str((base_dir / raw).resolve())
-    # TLS 缺省指向本项目 `cert` 生成的证书（<data_dir>/tls/server.*），无需手动填路径；
-    # 证书文件确实缺失时由 run 的强制 TLS 检查拦截（提示先执行 cert）。
-    if not merged["tls"]["certfile"]:
-        merged["tls"]["certfile"] = str(Path(merged["data_dir"]) / "tls" / "server.crt")
-    if not merged["tls"]["keyfile"]:
-        merged["tls"]["keyfile"] = str(Path(merged["data_dir"]) / "tls" / "server.key")
+    # TLS 证书路径不再由 config.yaml 配置：`python -m server.main cert` 统一生成到
+    # <data_dir>/tls/server.crt/.key，这里固定指向该缺省位置，免除用户手动填写/分离保管。
+    merged["tls"] = {
+        "certfile": str(Path(merged["data_dir"]) / "tls" / "server.crt"),
+        "keyfile": str(Path(merged["data_dir"]) / "tls" / "server.key"),
+    }
     return {"server": merged, "raw": value if isinstance(value, dict) else {}}

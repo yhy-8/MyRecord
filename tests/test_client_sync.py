@@ -347,5 +347,23 @@ class ReportSyncTest(ClientSyncE2ETestBase):
             self._stop(pat)
 
 
+class VerifyWarningSuppressionTest(unittest.TestCase):
+    """verify 留空（跳过校验）时抑制 urllib3 的 InsecureRequestWarning，避免污染交互终端。"""
+
+    def test_empty_verify_disables_insecure_warning_and_returns_false(self):
+        with patch.object(client_config, "load", return_value={"client": {"verify": ""}}):
+            with patch("urllib3.disable_warnings") as disable:
+                client = SyncClient(server_url="https://localhost:8765")
+                self.assertFalse(client._verify())
+        disable.assert_called_once()
+
+    def test_verify_path_returns_it_without_disabling_warning(self):
+        with patch.object(client_config, "load", return_value={"client": {"verify": "/path/ca.crt"}}):
+            with patch("urllib3.disable_warnings") as disable:
+                client = SyncClient(server_url="https://localhost:8765")
+                self.assertEqual("/path/ca.crt", client._verify())
+        disable.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

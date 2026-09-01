@@ -130,28 +130,6 @@ class StoreDeviceTests(unittest.TestCase):
         self.assertFalse(store.verify_device("any-name", token1))
         self.assertTrue(store.verify_device("any-name", token2))
 
-    def test_rotate_token(self):
-        data = _tmp_data_dir() / "state.json"
-        store = Store(data)
-        token1 = auth.new_token()
-        token2 = auth.new_token()
-        device = store.register_device("dev", token1)
-        self.assertTrue(store.verify_device(device, token1))
-        self.assertTrue(store.rotate_token(device, token2))
-        self.assertFalse(store.verify_device(device, token1))
-        self.assertTrue(store.verify_device(device, token2))
-        self.assertFalse(store.rotate_token("missing", token2))
-
-    def test_revoke_device(self):
-        data = _tmp_data_dir() / "state.json"
-        store = Store(data)
-        token = auth.new_token()
-        device = store.register_device("dev", token)
-        self.assertFalse(store.revoke_device("missing"))
-        self.assertTrue(store.revoke_device(device))
-        self.assertFalse(store.verify_device(device, token))
-        self.assertNotIn(device, store.device_ids())
-
     def test_device_ids_only_include_active(self):
         data = _tmp_data_dir() / "state.json"
         store = Store(data)
@@ -159,8 +137,22 @@ class StoreDeviceTests(unittest.TestCase):
         store.register_device("a", auth.new_token())  # 单一凭证：覆盖旧 token
         ids = store.device_ids()
         self.assertEqual(["a"], ids)  # 只剩当前唯一凭证
-        store.revoke_device("a")
-        self.assertEqual([], store.device_ids())
+
+    def test_active_credential_includes_created_at(self):
+        data = _tmp_data_dir() / "state.json"
+        store = Store(data)
+        # 未签发：无有效凭证
+        self.assertIsNone(store.active_credential())
+
+        token = auth.new_token()
+        device = store.register_device("dev", token)
+        cred = store.active_credential()
+        self.assertEqual("dev", cred["device_id"])
+        self.assertGreater(cred["created_at"], 0)
+
+        # 重签覆盖旧信息：device_id 与 created_at 随之更新
+        store.register_device("new", token)
+        self.assertEqual("new", store.active_credential()["device_id"])
 
     def test_snapshot_excludes_token_hashes(self):
         data = _tmp_data_dir() / "state.json"

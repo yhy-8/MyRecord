@@ -4,6 +4,7 @@ import argparse
 import datetime
 import os
 import ssl
+import subprocess
 import sys
 from pathlib import Path
 
@@ -106,18 +107,10 @@ def _command_run(args: argparse.Namespace) -> int:
     port = int(server_cfg["port"])
     certfile = server_cfg["tls"]["certfile"]
     keyfile = server_cfg["tls"]["keyfile"]
-    if not (certfile and keyfile):
-        print(
-            "[!] 禁止明文传输：服务端只能在 TLS 下运行。\n"
-            "请先执行 `python -m server.main cert` 生成自签证书，再在\n"
-            "server/config.yaml 的 server.tls.certfile / keyfile 填入路径。",
-            file=sys.stderr,
-        )
-        return 2
     if not (Path(certfile).is_file() and Path(keyfile).is_file()):
         print(
             f"[!] TLS 证书/密钥不存在：{certfile}, {keyfile}\n"
-            "请先执行 `python -m server.main cert` 生成自签证书。",
+            "请先执行 `python -m server.main cert --ip 服务端IP` 生成自签证书。",
             file=sys.stderr,
         )
         return 2
@@ -162,32 +155,44 @@ def _command_run(args: argparse.Namespace) -> int:
 _CRED_LABEL = "sync"  # 唯一链接凭证的内部标签（单一凭证模型，无多设备）
 
 
-def _command_token(args: argparse.Namespace) -> int:
-    """管理唯一链接凭证。
+def _confirm_overwrite_credential() -> bool:
+    """重签前的二次确认：已存在有效凭证时，覆盖会让旧凭证立即失效。"""
+    try:
+        answer = input("已存在有效链接凭证，重新签发将覆盖并作废旧凭证。输入 yes 确认：")
+    except EOFError:
+        return False
+    return answer.strip().lower() == "yes"
 
-    服务端只存在唯一一个 token；create 与 rotate 等价（签发并覆盖旧 token）。
-    不再需要 --device：凭证不绑定设备，设备由各端自报本机名区分。
+
+def _command_token(args: argparse.Namespace) -> int:
+    """管理唯一链接凭证（仅 create / list 两个子命令）。
+
+    - create：签发唯一 token；已有有效凭证时重签会覆盖并作废旧 token，需输入 yes 二次确认。
+    - list：查看是否已配置有效凭证。
+    不再提供 rotate/revoke：凭证是连接许可，重签即等价于 rotate；无多设备/多凭证
+    分离的需求。凭证不绑定设备，设备由各端自报本机名区分。
     """
     store, _ = _store(Path(config.load()["server"]["data_dir"]))
     if args.action == "list":
-        active = store.device_ids()
-        if active:
-            print(f"有效链接凭证：{active[0]}")
+        cred = store.active_credential()
+        if cred:
+            created = cred.get("created_at") or 0
+            if created:
+                stamp = datetime.datetime.fromtimestamp(created).strftime("%Y-%m-%d %H:%M:%S")
+                print(f"有效链接凭证：已配置（生成于 {stamp}）")
+            else:
+                print("有效链接凭证：已配置（生成时间未知）")
         else:
-            print("当前无有效链接凭证（先执行 token create）。")
+            print("有效链接凭证：未配置（先执行 token create）。")
         return 0
-    if args.action in ("create", "rotate"):
+    if args.action == "create":
+        if store.device_ids() and not _confirm_overwrite_credential():
+            print("已取消。", file=sys.stderr)
+            return 1
         token = auth.new_token()
         store.register_device(_CRED_LABEL, token)  # 覆盖并删除旧 token
-        print(f"device_id: {_CRED_LABEL}")
+        print("链接凭证已签发。令牌只显示一次，请妥善保存（服务端只存哈希）。")
         print(f"token: {token}")
-        print("令牌只显示一次，请妥善保存（服务端只存哈希）。签发会覆盖并作废旧凭证。")
-        return 0
-    if args.action == "revoke":
-        if not store.revoke_device(_CRED_LABEL):
-            print("当前无有效链接凭证可停用。", file=sys.stderr)
-            return 1
-        print(f"已停用链接凭证 {_CRED_LABEL}（所有客户端无法再同步）。")
         return 0
     print(f"未知操作: {args.action}", file=sys.stderr)
     return 2
@@ -232,12 +237,16 @@ def _command_render(args: argparse.Namespace) -> int:
     return 0
 
 
-def _command_cert(args: argparse.Namespace) -> int:
-    """生成自签证书（CA 能力）用于服务端直连 TLS。
+def _generate_cert(
+    data_dir: Path,
+    cn: str = "",
+    ips: list[str] | None = None,
+    dns: list[str] | None = None,
+) -> tuple[Path, Path]:
+    """生成自签证书（CA 能力，有效期 10 年）到 <data_dir>/tls/，返回 (certfile, keyfile)。
 
-    输出到 <data_dir>/tls/server.crt 与 server.key；证书本身可作 CA，
-    客户端 config.yaml 的 verify 指向 .crt 即可校验收信。可指定 --cn 与
-    --ip/--dns 作为 SAN，确保客户端连接的地址被证书覆盖。
+    固定输出 server.crt / server.key，与 server config 的缺省 TLS 位置一致。
+    证书本身可作 CA，客户端 config.yaml 的 verify 指向 .crt 即可校验收信。
     """
     try:
         import ipaddress
@@ -247,26 +256,20 @@ def _command_cert(args: argparse.Namespace) -> int:
         from cryptography.hazmat.primitives.asymmetric import rsa
         from cryptography.x509.oid import NameOID
     except ImportError:
-        print(
-            "需要 cryptography：`pip install cryptography`（server/requirements.txt 已含）",
-            file=sys.stderr,
-        )
-        return 2
+        raise RuntimeError("需要 cryptography：`pip install cryptography`（server/requirements.txt 已含）")
 
-    cfg = config.load()
-    data_dir = Path(cfg["server"]["data_dir"])
+    import socket
+
     tls_dir = data_dir / "tls"
     tls_dir.mkdir(parents=True, exist_ok=True)
     certfile = tls_dir / "server.crt"
     keyfile = tls_dir / "server.key"
 
-    import socket
-
-    cn = args.cn or socket.gethostname()
+    cn = cn or socket.gethostname()
     names = [x509.DNSName(cn)]
-    for dns in args.dns or []:
-        names.append(x509.DNSName(dns))
-    for ip in args.ip or []:
+    for dns_name in dns or []:
+        names.append(x509.DNSName(dns_name))
+    for ip in ips or []:
         names.append(x509.IPAddress(ipaddress.ip_address(ip)))
 
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -294,12 +297,75 @@ def _command_cert(args: argparse.Namespace) -> int:
     )
     certfile.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
     os.chmod(keyfile, 0o600)
+    return certfile, keyfile
 
-    print("已生成自签证书（CA 能力，有效期 10 年）：")
-    print(f"  cert: {certfile}")
-    print(f"  key : {keyfile}")
-    print("服务端已默认指向上述路径（server.tls 留空即自动使用缺省），直接 run 即可启用 HTTPS。")
-    print("客户端 config.yaml 设 server_url=https://<地址>:8765、verify=该 .crt 证书路径（含本机名 SAN，建议 --ip 加服务器 IP）。")
+
+def _command_cert(args: argparse.Namespace) -> int:
+    """生成自签证书（CA 能力）用于服务端直连 TLS。产物固定为 <data_dir>/tls/server.*。"""
+    data_dir = Path(config.load()["server"]["data_dir"])
+    try:
+        certfile, keyfile = _generate_cert(data_dir, cn=args.cn, ips=args.ip, dns=args.dns)
+    except RuntimeError as error:
+        print(str(error), file=sys.stderr)
+        return 2
+    print("已生成自签证书（客户端 verify 指向 cert 即可校验收信）：")
+    print(f"  {certfile}")
+    print(f"  {keyfile}")
+    return 0
+
+
+_SYSTEMD_UNIT_PATH = Path("/etc/systemd/system/myrecord-server.service")
+
+
+def _render_systemd(interpreter: str, project_root: Path) -> str:
+    """渲染 systemd 单元：解释器路径 + 工程根（使 `python -m server.main run` 可解析）。"""
+    return (
+        "[Unit]\n"
+        "Description=MyRecord server hub (sync + AI reports + fanout)\n"
+        "After=network-online.target\n"
+        "Wants=network-online.target\n"
+        "\n"
+        "[Service]\n"
+        "Type=simple\n"
+        f"ExecStart={interpreter} -m server.main run\n"
+        f"WorkingDirectory={project_root}\n"
+        "Restart=on-failure\n"
+        "RestartSec=3\n"
+        "User=root\n"
+        "\n"
+        "[Install]\n"
+        "WantedBy=multi-user.target\n"
+    )
+
+
+def _command_deploy(args: argparse.Namespace) -> int:
+    """一键安装并启动 systemd 服务（需 root）。
+
+    自动带出当前解释器与工程根，无需手改单元文件。若 TLS 证书缺失则先自动生成。
+    """
+    if not hasattr(os, "geteuid") or os.geteuid() != 0:
+        print(
+            "[!] 需要 root 权限：请用 sudo 运行，例如：sudo python -m server.main deploy",
+            file=sys.stderr,
+        )
+        return 2
+    cfg = config.load()
+    data_dir = Path(cfg["server"]["data_dir"])
+    certfile = Path(cfg["server"]["tls"]["certfile"])
+    if not certfile.is_file():
+        try:
+            _generate_cert(data_dir)
+        except RuntimeError as error:
+            print(f"[!] 生成自签证书失败：{error}", file=sys.stderr)
+            return 2
+    project_root = Path(__file__).resolve().parent.parent
+    dest = _SYSTEMD_UNIT_PATH
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(_render_systemd(sys.executable, project_root), encoding="utf-8")
+    subprocess.run(["systemctl", "daemon-reload"], check=True)
+    subprocess.run(["systemctl", "enable", "--now", "myrecord-server"], check=True)
+    print(f"已安装并启动服务：{dest}")
+    print("服务名：myrecord-server（systemctl status myrecord-server 查看状态）。")
     return 0
 
 
@@ -307,11 +373,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="server")
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("run", help="启动 hub 服务")
-    token = sub.add_parser("token", help="链接凭证管理（单一共享 token）")
-    token.add_argument("action", choices=["create", "rotate", "revoke", "list"])
+    token = sub.add_parser("token", help="链接凭证管理（create/list）")
+    token.add_argument("action", choices=["create", "list"])
     imp = sub.add_parser("import", help="导入旧版 Records 目录")
     imp.add_argument("--records", required=True)
     sub.add_parser("render", help="重新渲染当天 Records")
+    sub.add_parser("deploy", help="一键安装并启动 systemd 服务（需 root）")
     cert = sub.add_parser("cert", help="生成自签证书（服务端直连 TLS）")
     cert.add_argument("--cn", default="", help="证书 CN（默认本机名）")
     cert.add_argument("--ip", action="append", default=[], help="SAN IP，可多次（如服务器公网/局域网 IP）")
@@ -330,6 +397,8 @@ def main(argv: list[str] | None = None) -> int:
         return _command_import(args)
     if command == "render":
         return _command_render(args)
+    if command == "deploy":
+        return _command_deploy(args)
     if command == "cert":
         return _command_cert(args)
     print(f"未知命令: {command}", file=sys.stderr)

@@ -10,6 +10,7 @@ import uuid
 from pathlib import Path
 
 import requests
+import urllib3
 
 from . import config, identity, journal
 from .file_lock import file_lock
@@ -71,10 +72,16 @@ class SyncClient:
     def _verify(self):
         """TLS 服务器证书校验：返回路径或 False。
 
-        - 空/未配置 → False（跳过校验，适用于 http 明文或仅内网信任）
+        - 空/未配置 → False（跳过校验，适用于自签证书的直连信任）；此时同时
+          抑制 urllib3 的 InsecureRequestWarning，否则每次 HTTPS 请求都会把
+          该警告打进 stderr，污染交互终端并在长连接循环里反复刷屏。
         - 某路径 → 交给 requests 校验该 CA/自签证书
         """
-        return config.load()["client"].get("verify") or False
+        verify = config.load()["client"].get("verify")
+        if not verify:
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+            return False
+        return verify
 
     def _headers(self):
         cred = identity.load()

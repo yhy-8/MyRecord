@@ -33,6 +33,9 @@ python -m client
 长轮询挂起秒数。相对路径以 `client/` 为基准；默认 `../Records`、`../AnalysisReports`
 指向 `client` 的**同级目录（项目根）**，把记录/报告与代码包 `client/` 分开存放。
 本地数据目录不入服务端中枢。（已移除旧的每 1 分钟定时轮询间隔。）
+`server_url` 默认 `https://localhost:8765`（服务端强制 TLS）；`verify` 留空时不校验证书，
+设为服务端 `server.crt` 路径时严格校验收信。每台客户端启动不会打印 urllib3 的
+`InsecureRequestWarning`，避免污染交互终端。
 
 ## 命令（统一 8 个）
 

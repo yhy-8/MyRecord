@@ -5,7 +5,7 @@ from pathlib import Path
 import yaml
 
 _DEFAULTS = {
-    "server_url": "http://localhost:8765",
+    "server_url": "https://localhost:8765",
     "records_dir": "../Records",
     "analysis_dir": "../AnalysisReports",
     "longpoll_timeout_seconds": 25,

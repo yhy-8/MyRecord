@@ -99,24 +99,6 @@ class Store:
                     return True
             return False
 
-    def rotate_token(self, device_id: str, token: str) -> bool:
-        with self._lock:
-            record = self.data["devices"].get(device_id)
-            if not record or record.get("active") is not True:
-                return False
-            record["token_hash"] = auth.hash_token(token)
-            self._save()
-            return True
-
-    def revoke_device(self, device_id: str) -> bool:
-        with self._lock:
-            record = self.data["devices"].get(device_id)
-            if not record:
-                return False
-            record["active"] = False
-            self._save()
-            return True
-
     def device_ids(self) -> list[str]:
         with self._lock:
             return sorted(
@@ -124,6 +106,17 @@ class Store:
                 for device_id, record in self.data["devices"].items()
                 if record.get("active") is True
             )
+
+    def active_credential(self) -> dict | None:
+        """返回当前唯一有效链接凭证的信息（device_id + created_at），无则 None。"""
+        with self._lock:
+            for device_id, record in self.data["devices"].items():
+                if record.get("active") is True:
+                    return {
+                        "device_id": device_id,
+                        "created_at": int(record.get("created_at") or 0),
+                    }
+            return None
 
     # ---------- 条目 ----------
 
