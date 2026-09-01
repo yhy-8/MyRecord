@@ -32,7 +32,7 @@ def _help_text() -> str:
         "/sync         立即手动同步一次（推送离线队列、拉取对账、同步报告）\n"
         "/d            在线删除当天最新一条（需联网，服务端确认，入垃圾桶）\n"
         "/status       查看服务端 AI 自动任务状态\n"
-        "/retry        按队列重试服务端 AI 自动任务\n"
+        "/retry        直接重试全部失败的服务端自动任务（顺序无关）\n"
         "/model        永久切换服务端 AI 模型\n"
         "普通输入       立即写入当天记录并即时同步到云端（长连接保持中）\n"
     )
@@ -98,6 +98,32 @@ def _handle_view(arg: str) -> None:
     show_day(date)
 
 
+def _print_automation_status(automation: dict) -> None:
+    """展示自动任务逐任务状态（ok/failed/pending/blocked）。"""
+    from rich.console import Console
+
+    tasks = automation.get("tasks") or {}
+    if not tasks:
+        return
+    console = Console()
+    labels = {
+        "daily_summary": "日总结",
+        "weekly_report": "周报",
+        "monthly_report": "月报",
+    }
+    status_text = {
+        "ok": "完成",
+        "failed": "失败（待重试）",
+        "blocked": "已达重试上限",
+        "pending": "待生成",
+    }
+    console.print("自动任务:")
+    for task, record in tasks.items():
+        st = record.get("status", "") if isinstance(record, dict) else ""
+        label = labels.get(task, task)
+        console.print(f"  {label}: {status_text.get(st, st)}")
+
+
 def _handle_status(client: SyncClient) -> None:
     from rich.console import Console
 
@@ -114,9 +140,7 @@ def _handle_status(client: SyncClient) -> None:
     ai = status.get("ai") or {}
     if ai.get("current_model"):
         console.print(f"AI 模型: {ai['current_model']}")
-    automation = status.get("automation") or {}
-    if automation.get("errors"):
-        console.print(f"[yellow][!][/yellow] 自动任务异常: {automation['errors']}")
+    _print_automation_status(status.get("automation") or {})
 
 
 def _handle_sync(client: SyncClient) -> None:

@@ -70,10 +70,10 @@ python -m server.main run
 
 ```text
 python -m server.main run                    启动同步+AI 服务
-python -m server.main token create --device 标签   签发/重签唯一链接凭证（覆盖旧 token）
+python -m server.main token create                 签发/重签唯一链接凭证（覆盖旧 token）
 python -m server.main token list                   查看当前唯一凭证状态
-python -m server.main token rotate --device 标签     重新签发（覆盖旧 token）
-python -m server.main token revoke --device 标签     停用凭证（所有端失去同步）
+python -m server.main token rotate                 重新签发（覆盖旧 token）
+python -m server.main token revoke                 停用凭证（所有端失去同步）
 python -m server.main import --records 路径  导入旧版 Records
 python -m server.main render                 重渲染当天 Records
 ```
@@ -133,7 +133,7 @@ python -m client
 
 | 层级 | 文档 | 内容 |
 |---|---|---|
-| **设计基线（唯一权威）** | [`Docs/设计基线.md`](./Docs/设计基线.md) | 整合全部设计：架构、同步、鉴权/TLS、存储、日志、云端 AI 分析（单次 Report Agent + [N] 引用；来源表与引用校验暂缓）、自动化 |
+| **设计基线（唯一权威）** | [`Docs/设计基线.md`](./Docs/设计基线.md) | 整合全部设计：架构、同步、鉴权/TLS、存储、日志、云端 AI 分析（单次 Report Agent + [N] 引用；来源表与引用校验当前不实现）、自动化 |
 | 总体工作配合说明 | 本文件（README.md） | 两端如何协作、仓库代码总览、启动/运行/测试 |
 | 客户端说明 | [`client/README.md`](./client/README.md) | client/ 每个文件/模块的职责与命令 |
 | 服务端说明 | [`server/README.md`](./server/README.md) | server/ 每个文件/模块的职责、协议与部署 |
@@ -147,7 +147,7 @@ python -m client
 
 ## 文档
 
-- [`Docs/设计基线.md`](./Docs/设计基线.md) — **唯一权威设计基线**：整合所有设计（含单次 Report Agent、[N] 引用、无 AI 审核的报告生成；来源表与引用校验暂缓）
+- [`Docs/设计基线.md`](./Docs/设计基线.md) — **唯一权威设计基线**：整合所有设计（含单次 Report Agent、[N] 引用、无 AI 审核的报告生成；来源表与引用校验当前不实现）
 - [`Docs/代码结构.md`](./Docs/代码结构.md) — 历史结构说明（代码模块职责、数据流、entry_id、同步协议）
 - [`Docs/部署指南.md`](./Docs/部署指南.md) — 简明部署步骤（服务端 + 凭证 + TLS + 客户端 + 备份）
 

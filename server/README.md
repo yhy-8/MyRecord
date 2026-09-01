@@ -19,10 +19,10 @@ python -m server.main run
 
 ```text
 python -m server.main run            启动同步+AI 服务
-python -m server.main token create --device 标签   签发/重签唯一链接凭证（覆盖旧 token）
+python -m server.main token create                 签发/重签唯一链接凭证（覆盖旧 token）
 python -m server.main token list                   查看当前唯一凭证状态
-python -m server.main token rotate --device 标签     重新签发（覆盖旧 token）
-python -m server.main token revoke --device 标签     停用凭证（所有端失去同步）
+python -m server.main token rotate                 重新签发（覆盖旧 token）
+python -m server.main token revoke                 停用凭证（所有端失去同步）
 python -m server.main import --records 路径    导入旧版 Records
 python -m server.main render          重渲染当天 Records
 python -m server.main cert             生成自签证书（服务端直连 TLS，`--ip` 可指定 SAN）
@@ -30,7 +30,7 @@ python -m server.main cert             生成自签证书（服务端直连 TLS�
 
 ## 角色：与客户端的协作
 
-- **同步**：暴露 `push / pull / longpoll / delete / status / reports` HTTP 接口
+- **同步**：暴露 `push / pull / longpoll / delete / status / reports / health` HTTP 接口
   （见 `hub/server.py`）。客户端以**长连接（长轮询）**挂起在 `longpoll`，服务端有新条目/
   报告时立即返回（扇出）；客户端只在启动/手动 `/sync` 做完整对账，不会密集轮询。
 - **云端 AI**：自动任务写入 `<summary>` 与周/月报告（`AnalysisReports/`），客户端通过
@@ -53,7 +53,7 @@ python -m server.main cert             生成自签证书（服务端直连 TLS�
 | `hub/server.py` | HTTP 同步服务（stdlib ThreadingHTTPServer）：`/api/sync/push`、`/api/sync/pull`、`/api/sync/longpoll`、`/api/entries/delete`、`/api/status`、`/api/reports`、`/api/admin/*`；Bearer + device_id 鉴权 |
 | `hub/store.py` | 权威条目存储：append-only 合并（按 entry_id 去重）、tombstone、垃圾桶、设备令牌、全局 `version` 同步游标、`wait_for_change`（长轮询等待）、拉取 `pull(version)` |
 | `hub/auth.py` | 链接凭证令牌哈希（scrypt，加盐、常量时间），只存哈希，不落明文 |
-| `hub/render.py` | 日记文件格式（两端共用）：渲染 entry 标记、tombstone 占位、`<summary>` 区域，并反向解析文件为条目列表（兼容新旧 entry 标记） |
+| `hub/render.py` | 日记文件格式（服务端权威；客户端独立镜像同款格式，由测试锁齐）：渲染 entry 标记、tombstone 占位、`<summary>` 区域，并反向解析文件为条目列表（兼容新旧 entry 标记） |
 
 ### 云端 AI（ai/）
 
@@ -64,7 +64,7 @@ python -m server.main cert             生成自签证书（服务端直连 TLS�
 | `ai/journal.py` | 原始日记读写与 `<summary>` 区域更新（AI 只能通过这里写日记） |
 | `ai/agents/` | 单模块：AgentSpec、纯文本协议；单次 Report Agent 生成完整报告正文 |
 | `ai/analysis/context.py` | 周期范围、按日期分隔并标注行号的记录流、全局引用编号、报告路径 |
-| `ai/analysis/orchestrator.py` | 单次 Report Agent、[N] 全局引用编号、Token 累计、审计头部、原子交付报告；来源表与引用校验为暂缓项（权威说明见 `../Docs/设计基线.md` §8） |
+| `ai/analysis/orchestrator.py` | 单次 Report Agent、[N] 全局引用编号、Token 累计、审计头部、原子交付报告；来源表与引用校验当前不实现（权威说明见 `../Docs/设计基线.md` §8） |
 | `ai/analysis/automation.py` | 简调度器：每 15 分钟缺失检测、失败后 30 分钟重试、按失败次数上限停止、每任务状态持久化 |
 | `ai/file_lock.py`、`ai/logging_config.py` | 跨进程互斥、有界诊断日志 |
 

@@ -140,7 +140,8 @@ def _command_run(args: argparse.Namespace) -> int:
     import time
 
     def automation_daemon():
-        """后台：每分钟执行一次自动任务（日总结→周报→月报），与原来定时语义一致。"""
+        """后台：每分钟检查一次；run_due_automatic_tasks 内部按 15 分钟检测缺失并
+        独立执行到期任务（日/周/月互不依赖、顺序无关）。"""
         while True:
             try:
                 run_ai_cycle()

@@ -177,17 +177,6 @@ class ModelConfig:
         raise KeyError(f"未找到匹配模型 '{name_or_index}'")
 
     @classmethod
-    def next_after(cls, name: str) -> ModelDict:
-        models = cls.models()
-        if not models:
-            raise RuntimeError("config.yaml 中未配置任何模型")
-        index = next(
-            (index for index, model in enumerate(models) if model["name"] == name),
-            0,
-        )
-        return dict(models[(index + 1) % len(models)])
-
-    @classmethod
     def select(cls, name: str) -> ModelDict:
         """持久化统一模型选择，同时保留配置文件中的注释与原有排版。"""
         model = cls.get_model(name)
