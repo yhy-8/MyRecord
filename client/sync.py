@@ -103,6 +103,43 @@ class SyncClient:
             raise SyncError(f"服务端返回 {resp.status_code}。")
         return resp.json()
 
+    # ---------- 连接探测 ----------
+
+    def probe(self) -> dict:
+        """区分「能否连到服务端」与「是否持有凭据」两个独立维度。
+
+        - connected: 网络/TLS 是否可建立（用无需鉴权的 /api/health 探测）。
+        - has_credentials: 本地是否已写入凭据 token（能否修改数据的前提）。
+        - error: connected=False 时的失败原因。
+
+        过去启动时无条件打印「已连接服务端」，把「仅配置了服务器地址」误当成
+        「已连接」；服务端未启动也显示已连接。这里先真实探测，避免误报。
+        能连上服务端不代表有改数据的凭据；有凭据也不代表当前在线——两者独立。
+        """
+        connected = False
+        error = ""
+        try:
+            resp = requests.get(
+                self.base_url + "/api/health",
+                timeout=5.0,
+                verify=self._verify(),
+            )
+            connected = resp.status_code == 200
+            if not connected:
+                error = f"服务端返回 {resp.status_code}"
+        except requests.RequestException as exc:
+            # 用简明原因，避免完整异常串（含 host/port、可能换行）撑破界面。
+            error = {
+                requests.exceptions.ConnectTimeout: "连接超时",
+                requests.exceptions.ReadTimeout: "读取超时（无响应）",
+                requests.exceptions.ConnectionError: "连接被拒绝或网络不可达",
+            }.get(type(exc), type(exc).__name__)
+        return {
+            "connected": connected,
+            "has_credentials": bool(identity.load()),
+            "error": error,
+        }
+
     # ---------- 对账应用 ----------
 
     def _apply_delta(self, delta: dict) -> None:

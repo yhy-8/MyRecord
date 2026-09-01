@@ -309,18 +309,45 @@ def _longpoll_loop(client: SyncClient) -> None:
         time.sleep(0.5)
 
 
+def _report_startup_status(client: SyncClient, status: dict) -> None:
+    """按「能否连到服务端」与「是否持有凭据」两个独立维度分别播报启动状态。
+
+    过去无条件打印「已连接服务端」，把「仅配置了地址」误当成「已连接」，
+    服务端未启动也显示已连接；这里先真实探测（/api/health），再区分：
+      - 连接：网络/TLS 能否建立（连得上不代表有改数据权限）
+      - 凭据：是否持有 token（有凭据才能修改中心数据）
+    """
+    console = Console()
+    if status["connected"]:
+        console.print(f"[green][*][/green] 已连接服务端：{client.base_url}（网络可达）")
+    else:
+        reason = f"（{status['error']}）" if status.get("error") else ""
+        console.print(f"[red][!][/red] 无法连接服务端：{client.base_url}{reason}")
+    if status["has_credentials"]:
+        console.print("[green][*][/green] 凭据：已配置，可同步与修改数据")
+    else:
+        console.print("[yellow][!][/yellow] 凭据：未配置，仅本地记录；上线前请先写入 credentials.json")
+
+
 def run_interactive() -> None:
     # 不要求凭据：无凭据时仅本地记录，上线拿到凭据后再同步（本地优先）
     client = SyncClient()
-    print("已连接服务端：" + client.base_url)
+
+    # 启动先真实探测，再按两维度分别播报：能否连到服务端、是否持有凭据。
+    # 过去无条件打印「已连接服务端」，服务端未启动也显示已连接，属误报。
+    status = client.probe()
+    _report_startup_status(client, status)
 
     # 启动时一次性链接云端并完整同步（拉取对账 + 冲刷离线队列 + 同步报告）
-    # 无凭据或离线都只是无法同步，不影响本地记录
-    try:
-        client.full_sync()
-        print("启动同步完成：本地已与云端对账一致。")
-    except SyncError as error:
-        Console().print(f"[yellow][!][/yellow] {error}（本地照常记录，上线后自动同步）")
+    # 仅在「服务端可达 + 持凭据」时才可能成功；其余情况本地优先，暂不复现同一失败。
+    if status["connected"] and status["has_credentials"]:
+        try:
+            client.full_sync()
+            print("启动同步完成：本地已与云端对账一致。")
+        except SyncError as error:
+            Console().print(f"[yellow][!][/yellow] {error}（本地照常记录，上线后自动同步）")
+    else:
+        print("本地照常记录；联网且凭据就绪后，可用 /sync 同步到云端。")
 
     _banner()
     _show_help()

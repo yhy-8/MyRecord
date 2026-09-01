@@ -158,6 +158,7 @@ class ClientCLICommandRoutingTests(unittest.TestCase):
             journal.append_record = Mock()
             client = Mock()
             client.base_url = "http://127.0.0.1:1"
+            client.probe.return_value = {"connected": True, "has_credentials": True, "error": ""}
             client.status.return_value = {
                 "version": 3,
                 "entry_count": 2,
@@ -199,6 +200,7 @@ class ClientCLICommandRoutingTests(unittest.TestCase):
             journal.append_record = Mock()
             SyncClient.return_value = Mock()
             SyncClient.return_value.base_url = "http://127.0.0.1:1"
+            SyncClient.return_value.probe.return_value = {"connected": True, "has_credentials": True, "error": ""}
 
             with patch("builtins.input", side_effect=[EOFError]):
                 cli_app.run_interactive()
@@ -223,6 +225,7 @@ class ClientCLISlashDispatchTests(unittest.TestCase):
             journal.append_record = Mock()
             SyncClient.return_value = Mock()
             SyncClient.return_value.base_url = "http://127.0.0.1:1"
+            SyncClient.return_value.probe.return_value = {"connected": True, "has_credentials": True, "error": ""}
             cli_app.run_interactive()
             return journal
 

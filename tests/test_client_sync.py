@@ -269,6 +269,62 @@ class FullSyncTest(ClientSyncE2ETestBase):
             self._stop(pa)
 
 
+class ProbeTest(ClientSyncE2ETestBase):
+    """probe 区分「能否连到服务端」与「是否持有凭据」两个独立维度。"""
+
+    def test_probe_connected_and_has_credentials(self):
+        client, pat = self._new_client(self.device_a, self.token_a, _tmp_dir("cli-probe-"))
+        try:
+            result = client.probe()
+            self.assertTrue(result["connected"])
+            self.assertTrue(result["has_credentials"])
+            self.assertFalse(result["error"])
+        finally:
+            self._stop(pat)
+
+    def test_probe_disconnected_but_has_credentials(self):
+        # 指向无人监听的端口：网络不可达，但凭据仍在——两维度独立。
+        offline, pat = self._new_client(
+            self.device_a, self.token_a, _tmp_dir("cli-probe-off-"),
+            server_url="http://127.0.0.1:1",
+        )
+        try:
+            result = offline.probe()
+            self.assertFalse(result["connected"])
+            self.assertTrue(result["has_credentials"])
+            self.assertTrue(result["error"])
+        finally:
+            self._stop(pat)
+
+    def test_probe_connected_but_no_credentials(self):
+        # 服务端可达，但本地无凭据：连得上不代表有改数据权限。
+        root = _tmp_dir("cli-probe-nocred-")
+        records = root / "Records"
+        analysis = root / "AnalysisReports"
+        state = root / "state"
+        records.mkdir(parents=True, exist_ok=True)
+        analysis.mkdir(parents=True, exist_ok=True)
+        state.mkdir(parents=True, exist_ok=True)
+        patches = [
+            patch.object(sync, "_state_path", return_value=state / "state.json"),
+            patch.object(sync, "_outbox_path", return_value=state / "outbox.json"),
+            patch.object(
+                client_config, "load", return_value=_client_settings(records, analysis)
+            ),
+            patch.object(client_identity, "load", return_value={}),  # 无凭据
+            patch.object(client_identity, "device_name", return_value=self.device_a),
+        ]
+        for p in patches:
+            p.start()
+        try:
+            result = SyncClient(server_url=self.base).probe()
+            self.assertTrue(result["connected"])
+            self.assertFalse(result["has_credentials"])
+        finally:
+            for p in patches:
+                p.stop()
+
+
 class ReportSyncTest(ClientSyncE2ETestBase):
     """服务端暴露的报告被客户端拉到本地 AnalysisReports。"""
 
