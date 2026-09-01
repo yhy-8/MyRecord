@@ -96,7 +96,6 @@ def show_day(arg: str) -> None:
     if not path.exists():
         print(f"（{date} 还没有记录。）")
         return
-    print(f"===== {date} =====")
     Console().print(Markdown(_render_day_markdown(path.read_text(encoding="utf-8"))))
 
 
