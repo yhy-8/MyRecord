@@ -12,8 +12,8 @@ python -m server.main run
 ```
 
 > 入口统一为 `python -m server.main run`（`server/main.py`）。
-> 启动后自带**每分钟后台线程**按“日总结 → 周报 → 月报”依赖顺序执行自动任务；该线程属
-> 服务端调度，与客户端同步无关。
+> 启动后自带**后台调度线程**：每 15 分钟检测缺失，并独立执行到期任务（日总结 / 周报 / 月报
+> 互不依赖、无顺序要求）。该线程属服务端调度，与客户端同步无关。
 
 ## 子命令
 
@@ -65,7 +65,7 @@ python -m server.main cert             生成自签证书（服务端直连 TLS�
 | `ai/agents/` | 单模块：AgentSpec、纯文本协议；单次 Report Agent 生成完整报告正文 |
 | `ai/analysis/context.py` | 周期范围、按日期分隔并标注行号的记录流、全局引用编号、报告路径 |
 | `ai/analysis/orchestrator.py` | 单次 Report Agent、[N] 全局引用编号、Token 累计、审计头部、原子交付报告；来源表与引用校验为暂缓项（权威说明见 `../Docs/设计基线.md` §8） |
-| `ai/analysis/automation.py` | 缺失检测、持久队列、前置屏障、重试时间、系统调度安装 |
+| `ai/analysis/automation.py` | 简调度器：每 15 分钟缺失检测、失败后 30 分钟重试、按失败次数上限停止、每任务状态持久化 |
 | `ai/file_lock.py`、`ai/logging_config.py` | 跨进程互斥、有界诊断日志 |
 
 ## 配置

@@ -27,6 +27,7 @@ from .context import (
     _existing_logs,
     _log_without_summary,
     _period_records,
+    _period_span,
 )
 
 
@@ -270,17 +271,15 @@ def generate_analysis_report(
     model_config: settings.ModelDict,
 ) -> tuple[str, bool, Path | None]:
     """单次 Report Agent 直接生成完整周报 / 月报（手动/自动同一流程、同一路径）。"""
-    if kind == "weekly":
-        start = anchor - datetime.timedelta(days=anchor.weekday())
-        end = start + datetime.timedelta(days=6)
-        report_name = f"{start:%Y-%m-%d} 至 {end:%Y-%m-%d} 分析周报"
-    elif kind == "monthly":
-        start = anchor.replace(day=1)
-        next_month = (start.replace(day=28) + datetime.timedelta(days=4)).replace(day=1)
-        end = next_month - datetime.timedelta(days=1)
-        report_name = f"{start:%Y年%m月} 分析月报"
-    else:
+    span = _period_span(kind, anchor)
+    if span is None:
         return "分析报告只支持 weekly 或 monthly。", False, None
+    start, end = span
+    report_name = (
+        f"{start:%Y-%m-%d} 至 {end:%Y-%m-%d} 分析周报"
+        if kind == "weekly"
+        else f"{start:%Y年%m月} 分析月报"
+    )
 
     report_path = _analysis_report_path(kind, start, end)
     report_lock = FileLock.acquire(settings.ANALYSIS_DIR / ".report.lock")

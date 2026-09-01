@@ -19,21 +19,16 @@ ModelDict = dict[str, Any]
 
 _RETRY_DEFAULTS = {
     "daily_summary_retry_limit": 2,
+    "weekly_report_retry_limit": 2,
+    "monthly_report_retry_limit": 2,
     "empty_response_retry_limit": 1,
     "transient_http_retry_limit": 2,
     "transient_http_backoff_seconds": 1,
-    "automation_content_failure_limit": 2,
-    "automation_network_retry_minutes": 5,
-    "automation_content_retry_interval_minutes": 60,
 }
 _POSITIVE_RETRY_SETTINGS = {
     "transient_http_backoff_seconds",
-    "automation_content_failure_limit",
-    "automation_network_retry_minutes",
-    "automation_content_retry_interval_minutes",
 }
 _MAXIMUM_RETRY_SETTINGS = {
-    "daily_summary_retry_limit": 2,
     "empty_response_retry_limit": 1,
 }
 

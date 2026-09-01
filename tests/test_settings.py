@@ -117,24 +117,26 @@ class ModelSettingsTests(unittest.TestCase):
 
         self.assertEqual(0, policy["empty_response_retry_limit"])
         self.assertEqual(2, policy["daily_summary_retry_limit"])
+        self.assertEqual(2, policy["weekly_report_retry_limit"])
+        self.assertEqual(2, policy["monthly_report_retry_limit"])
         self.assertEqual(2, policy["transient_http_retry_limit"])
-        self.assertEqual(60, policy["automation_content_retry_interval_minutes"])
 
     def test_retry_policy_rejects_invalid_numeric_controls(self):
         with patch.object(
             settings,
             "CONFIG",
-            {"retry": {"automation_content_failure_limit": 0}},
+            {"retry": {"transient_http_backoff_seconds": 0}},
         ):
             with self.assertRaisesRegex(RuntimeError, "必须是正整数"):
                 settings.retry_policy()
 
+        # 任务重试次数可为 0（不重试）；负值非法
         with patch.object(
             settings,
             "CONFIG",
-            {"retry": {"daily_summary_retry_limit": 3}},
+            {"retry": {"daily_summary_retry_limit": -1}},
         ):
-            with self.assertRaisesRegex(RuntimeError, "不能大于 2"):
+            with self.assertRaisesRegex(RuntimeError, "非负整数"):
                 settings.retry_policy()
 
         with patch.object(

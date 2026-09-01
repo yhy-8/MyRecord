@@ -43,6 +43,18 @@ def _existing_logs(start: datetime.date, end: datetime.date) -> list[tuple[str, 
     return logs
 
 
+def _period_span(kind: str, anchor: datetime.date) -> tuple[datetime.date, datetime.date] | None:
+    """返回 `anchor` 所在自然周 / 自然月的 [start, end]。"""
+    if kind == "weekly":
+        start = anchor - datetime.timedelta(days=anchor.weekday())
+        return start, start + datetime.timedelta(days=6)
+    if kind == "monthly":
+        start = anchor.replace(day=1)
+        next_month = (start.replace(day=28) + datetime.timedelta(days=4)).replace(day=1)
+        return start, next_month - datetime.timedelta(days=1)
+    return None
+
+
 def _analysis_report_path(
     kind: str, start: datetime.date, end: datetime.date
 ) -> Path:
@@ -53,20 +65,6 @@ def _analysis_report_path(
             / f"{start:%Y-%m-%d}_to_{end:%Y-%m-%d}.md"
         )
     return settings.ANALYSIS_DIR / "Monthly" / f"{start:%Y-%m}.md"
-
-
-def analysis_report_path(kind: str, anchor: datetime.date) -> Path | None:
-    """返回报告确定路径，供生成前确认是否覆盖（手动/自动共用同一路径）。"""
-    if kind == "weekly":
-        start = anchor - datetime.timedelta(days=anchor.weekday())
-        end = start + datetime.timedelta(days=6)
-    elif kind == "monthly":
-        start = anchor.replace(day=1)
-        next_month = (start.replace(day=28) + datetime.timedelta(days=4)).replace(day=1)
-        end = next_month - datetime.timedelta(days=1)
-    else:
-        return None
-    return _analysis_report_path(kind, start, end)
 
 
 _RECORD_PATTERN = _format.RECORD_PATTERN  # 单一来源：见 server/hub/render.py

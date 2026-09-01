@@ -28,14 +28,14 @@ models:
 
 current_model: "deepseek-v4-pro"
 
+# 三种 AI 内容各自的自动重试次数（重试 limit 次，共执行 limit+1 次；默认 2）。
 retry:
   daily_summary_retry_limit: 2
+  weekly_report_retry_limit: 2
+  monthly_report_retry_limit: 2
   empty_response_retry_limit: 1
   transient_http_retry_limit: 2
   transient_http_backoff_seconds: 1
-  automation_content_failure_limit: 2
-  automation_network_retry_minutes: 5
-  automation_content_retry_interval_minutes: 60
 
 automation:
   enabled: true
