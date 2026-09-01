@@ -183,7 +183,7 @@ class ServerMainDeployTests(unittest.TestCase):
 
     def test_deploy_requires_root(self):
         err = io.StringIO()
-        with patch("server.main.os.geteuid", return_value=1000), patch(
+        with patch("server.main.os.geteuid", return_value=1000, create=True), patch(
             "sys.stdout", io.StringIO()
         ), patch("sys.stderr", err), patch("server.main.subprocess.run") as run:
             rc = server_main.main(["deploy"])
@@ -193,7 +193,7 @@ class ServerMainDeployTests(unittest.TestCase):
 
     def test_deploy_installs_and_starts_systemd(self):
         unit_path = self.root / "systemd" / "myrecord-server.service"
-        with patch("server.main.os.geteuid", return_value=0), patch(
+        with patch("server.main.os.geteuid", return_value=0, create=True), patch(
             "server.main._SYSTEMD_UNIT_PATH", unit_path
         ), patch("sys.stdout", io.StringIO()), patch("server.main.subprocess.run") as run:
             rc = server_main.main(["deploy"])

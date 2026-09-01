@@ -16,6 +16,7 @@ from rich.panel import Panel
 
 from . import identity, journal
 from .sync import SyncClient, SyncError
+from .terminal import safe_input
 
 
 def _banner() -> None:
@@ -27,7 +28,8 @@ def _banner() -> None:
 
 def _help_text() -> str:
     return (
-        "/v [日期]     查看本地日记（不提供报告查看，建议用专用 md 阅读软件）\n"
+        "/v [日期]     查看某天本地日记（默认今天）\n"
+        "              日期：今天/昨天/-N/MM-DD/YYYY-MM-DD\n"
         "/c            清屏\n"
         "/h            帮助\n"
         "/sync         立即手动同步一次（推送离线队列、拉取对账、同步报告）\n"
@@ -54,6 +56,9 @@ def clear_screen() -> None:
         subprocess.run(["cls"], shell=True)
     else:
         print("\033c", end="")
+
+
+
 
 
 def resolve_date(arg: str = "") -> str:
@@ -358,7 +363,7 @@ def run_interactive() -> None:
 
     while True:
         try:
-            raw = input(">> ")
+            raw = safe_input(">> ") if sys.stdin.isatty() else input(">> ")
         except (KeyboardInterrupt, EOFError):
             print("系统退出。")
             break

@@ -318,7 +318,11 @@ _SYSTEMD_UNIT_PATH = Path("/etc/systemd/system/myrecord-server.service")
 
 
 def _render_systemd(interpreter: str, project_root: Path) -> str:
-    """渲染 systemd 单元：解释器路径 + 工程根（使 `python -m server.main run` 可解析）。"""
+    """渲染 systemd 单元：解释器路径 + 工程根（使 `python -m server.main run` 可解析）。
+
+    systemd 单元是 Linux 格式，路径一律用正斜杠；Windows 上 Path 会渲染成反斜杠，
+    这里用 as_posix() 归一化，避免在 Windows 上生成 `WorkingDirectory=\\srv\\...` 之类非法值。
+    """
     return (
         "[Unit]\n"
         "Description=MyRecord server hub (sync + AI reports + fanout)\n"
@@ -328,7 +332,7 @@ def _render_systemd(interpreter: str, project_root: Path) -> str:
         "[Service]\n"
         "Type=simple\n"
         f"ExecStart={interpreter} -m server.main run\n"
-        f"WorkingDirectory={project_root}\n"
+        f"WorkingDirectory={project_root.as_posix()}\n"
         "Restart=on-failure\n"
         "RestartSec=3\n"
         "User=root\n"
