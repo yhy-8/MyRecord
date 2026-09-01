@@ -24,10 +24,10 @@ class ClientIdentityCredentialsTests(unittest.TestCase):
 
     def test_save_then_load_roundtrip(self):
         with patch.object(identity, "credentials_path", return_value=self.path):
-            identity.save("token-123", "device-A")
+            identity.save("token-123")
             value = identity.load()
 
-        self.assertEqual({"device_id": "device-A", "token": "token-123"}, value)
+        self.assertEqual({"token": "token-123"}, value)
 
     def test_load_rejects_malformed_or_incomplete(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -46,8 +46,8 @@ class ClientIdentityCredentialsTests(unittest.TestCase):
 
     def test_require_returns_value_when_configured(self):
         with patch.object(identity, "credentials_path", return_value=self.path):
-            identity.save("t", "d")
-            self.assertEqual({"device_id": "d", "token": "t"}, identity.require())
+            identity.save("t")
+            self.assertEqual({"token": "t"}, identity.require())
 
 
 class ClientEntryIdTests(unittest.TestCase):
@@ -70,9 +70,12 @@ class ClientEntryIdTests(unittest.TestCase):
         with patch.object(identity, "load", return_value={}):
             self.assertTrue(identity.device_name())
 
-    def test_device_name_prefers_override(self):
-        with patch.object(identity, "load", return_value={"token": "t", "device_id": "vivo y78"}):
-            self.assertEqual("vivo y78", identity.device_name())
+    def test_device_name_ignores_override_and_uses_hostname(self):
+        # 配置里不再允许自定义设备名：即使 credentials 残留 device_id，也只用本机名
+        with patch.object(identity, "load", return_value={"token": "t", "device_id": "vivo y78"}), patch.object(
+            identity, "_hostname", return_value="myhost"
+        ):
+            self.assertEqual("myhost", identity.device_name())
 
 
 class ClientConfigTests(unittest.TestCase):

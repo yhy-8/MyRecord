@@ -189,13 +189,21 @@ class SyncClient:
     # ---------- 完整同步（启动 / 手动 /sync） ----------
 
     def full_sync(self) -> None:
-        """完整同步一次：先冲刷离线队列，再拉取对账，再同步报告。
+        """完整同步一次：先冲刷离线队列，再完整对账（重建本地镜像），再同步报告。
 
-        用于客户端启动时链接云端、以及手动 /sync 命令。
+        用于客户端启动时链接云端、以及手动 /sync 命令。完整对账从 version=0
+        重新拉取全部条目与墓碑并重建/补齐本地 Records，而非依赖增量游标——
+        避免「本地文件丢失但游标未回退」时增量 pull 拉不到内容，导致云端有
+        数据却同步不下来。
         """
         self.send_pending()
-        self.pull()
+        self.reconcile()
         self.sync_reports()
+
+    def reconcile(self) -> None:
+        """从服务端权威状态完整对账：拉取全部条目与墓碑，重建/补齐本地镜像。"""
+        delta = self._request("GET", "/api/sync/pull?version=0")
+        self._apply_delta(delta)
 
     # ---------- 拉取 / 长轮询 ----------
 

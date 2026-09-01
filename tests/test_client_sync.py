@@ -87,7 +87,7 @@ class ClientSyncE2ETestBase(unittest.TestCase):
             patch.object(
                 client_identity,
                 "load",
-                return_value={"token": token, "device_id": device},
+                return_value={"token": token},
             ),
             patch.object(client_identity, "device_name", return_value=device),
         ]
@@ -267,6 +267,36 @@ class FullSyncTest(ClientSyncE2ETestBase):
             self.assertIn("周报", target.read_text(encoding="utf-8"))
         finally:
             self._stop(pa)
+
+
+class FullSyncRecoveryTest(ClientSyncE2ETestBase):
+    """回归：本地文件丢失但 state 游标未回退时，/sync 要能从云端版本0重建镜像。
+
+    修复前 full_sync 走增量 pull（version=当前游标），游标已到当前值时拉不到内容，
+    云端有数据却同步不下来；现在 full_sync 走 reconcile（version=0）完整对账。
+    """
+
+    def test_full_sync_recovers_missing_local_day_file(self):
+        root = _tmp_dir("cli-rec-")
+        # 服务端已有内容（某设备此前写入）
+        self.store.append_entries(
+            "MK8",
+            [{"entry_id": "r1", "date": "2024-06-01", "ts": 1717200000, "tag": "", "text": "云端内容"}],
+        )
+        client, pat = self._new_client(self.device_a, self.token_a, root)
+        try:
+            client.full_sync()
+            day_file = root / "Records" / "2024-06-01.md"
+            self.assertTrue(day_file.exists())
+            self.assertIn("云端内容", day_file.read_text(encoding="utf-8"))
+
+            # 本地缓存丢失：删掉 day 文件，但 state 游标仍停留在当前版本
+            day_file.unlink()
+            client.full_sync()
+            self.assertTrue(day_file.exists())
+            self.assertIn("云端内容", day_file.read_text(encoding="utf-8"))
+        finally:
+            self._stop(pat)
 
 
 class ProbeTest(ClientSyncE2ETestBase):

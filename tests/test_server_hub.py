@@ -83,6 +83,16 @@ class StoreTest(unittest.TestCase):
         self.assertEqual(latest["entry_id"], "b-1")
         self.assertIsNone(store.latest_entry_for_date("2024-01-02"))
 
+    def test_wait_for_change_returns_tombstone_after_delete(self):
+        """长轮询等待路径：A 删后，B 的 wait_for_change 返回墓碑（用于扇出删除）。"""
+        data = _tmp_data_dir() / "state.json"
+        store = Store(data)
+        store.append_entries("A", [{"entry_id": "x1", "date": "2024-01-01", "ts": 5, "tag": "", "text": "hi"}])
+        store.tombstone("x1", "A")
+        delta = store.wait_for_change(after_version=0, timeout=0.05)
+        self.assertIn("x1", [t["entry_id"] for t in delta["tombstones"]])
+        self.assertEqual([], delta["entries"])  # x1 已删，不在活跃条目中
+
 
 class RenderParserTest(unittest.TestCase):
     def test_render_and_parse_roundtrip(self):

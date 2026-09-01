@@ -17,12 +17,12 @@ python -m client
 
 客户端**不密集轮询云端**，按以下三条规则与中枢协作：
 
-1. **启动时一次性完整同步**：连上云端，拉取对账（补齐缺失、按删除标记移除）、冲刷离线
-   队列、同步报告。
+1. **启动时一次性完整同步**：连上云端，完整对账（从 `version=0` 重建/补齐本地镜像，
+   覆盖本地文件丢失；按删除标记移除）、冲刷离线队列、同步报告。
 2. **运行期间保持一条长连接（长轮询）**：`/api/sync/longpoll` 一直挂起，服务端有更新
    （扇出）即返回并立即应用；超时立即重新挂起，等效于一条持续的"长链路"。每条记录
    写入即触发 push（写后即时同步），方便、低开销。
-3. **手动同步用 `/sync`**：随时再完整同步一次（推队列 + 拉取 + 同步报告）。
+3. **手动同步用 `/sync`**：随时再完整同步一次（推队列 + 完整对账重建镜像 + 同步报告）。
 
 客户端只在前台交互运行时保持长连接；关闭程序即无任何后台任务。断网时本地照常记录并
 进 `outbox.json` 离线队列，恢复后由启动同步 / 长连接回连 / `/sync` 冲刷补齐。
@@ -56,7 +56,7 @@ python -m client
 |---|---|
 | `__main__.py` | 程序入口：`python -m client` → `run_interactive()` |
 | `config.py` / `config.yaml` | 读取本地配置（服务器地址、数据目录、长轮询秒数） |
-| `identity.py` | 链接凭证与设备身份：读写 `credentials.json`（单一共享 token，可选 device_id 覆盖）；`device_name()` 自报本机名（电脑名/手机名）；`make_entry_id(date,ts,text)` 生成设备无关的确定性 entry_id |
+| `identity.py` | 链接凭证与设备身份：读写 `credentials.json`（单一共享 token）；`device_name()` 直接用本机名（电脑名/手机名，不允许自定义）；`make_entry_id(date,ts,text)` 生成设备无关的确定性 entry_id |
 | `journal.py` | 本地日记渲染与写入：按天 `Records/YYYY-MM-DD.md` 原子追加、对账补齐、tombstone 移除 |
 | `file_lock.py` | 跨进程互斥（`.journal.lock` 等），保证原子写 |
 | `sync.py` | 与中枢的同步客户端：`push_new`（写后即 push）、`send_pending`（冲刷离线队列）、`pull`（拉取对账）、`longpoll`（长连接扇出）、`full_sync`（启动/手动完整同步）、`sync_reports`（同步报告）、`delete_latest`、`status/admin_retry/admin_set_model` |
@@ -65,7 +65,7 @@ python -m client
 ## 本地文件
 
 - `credentials.example.json` 凭据**样板**：复制为 `credentials.json` 并填入服务端签发的 token
-- `credentials.json` 链接凭证（服务端签发的唯一共享 token，可选 device_id 覆盖设备名）
+- `credentials.json` 链接凭证（服务端签发的唯一共享 token）
 - `outbox.json` 离线待推送队列
 - `../Records/` 本地日记、`../AnalysisReports/` 云端报告副本、`Log/` 本地日志
   （默认在 `client/` 的同级目录即项目根，与代码包 `client/` 分开放置）

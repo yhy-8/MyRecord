@@ -35,10 +35,7 @@ def _hostname() -> str:
 
 
 def device_name() -> str:
-    """设备名：优先 credentials.json 里的 device_id（可选覆盖），否则用本机名。"""
-    cred = load()
-    if cred.get("device_id"):
-        return cred["device_id"]
+    """设备名：直接用本机名（不允许在配置里自定义，保持各端自报本机名）。"""
     return _hostname()
 
 
@@ -52,14 +49,12 @@ def load() -> dict:
         return {}
     if not isinstance(value, dict) or not value.get("token"):
         return {}
-    return {"token": value["token"], "device_id": value.get("device_id") or ""}
+    return {"token": value["token"]}
 
 
-def save(token: str, device_id: str = "") -> None:
+def save(token: str) -> None:
     path = credentials_path()
     payload = {"token": token}
-    if device_id:
-        payload["device_id"] = device_id
     tmp = path.with_name(path.name + f".{uuid.uuid4().hex}.tmp")
     try:
         tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")

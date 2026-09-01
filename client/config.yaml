@@ -1,5 +1,5 @@
 # ================= MyRecord 客户端配置 =================
-# 客户端只存：服务器地址 + 本地数据目录；凭据（device_id/token）在 credentials.json。
+# 客户端只存：服务器地址 + 本地数据目录；凭据（token）在 credentials.json。
 # 客户端本地不保存模型密钥，不做本地 AI。AI 全部在服务端。
 # 相对路径以 client/ 为基准；Records / AnalysisReports 默认指向 client 的同级目录
 # （项目根），把记录/报告与代码包 client/ 分开存放。
