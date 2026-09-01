@@ -6,8 +6,8 @@ import yaml
 
 _DEFAULTS = {
     "server_url": "http://localhost:8765",
-    "records_dir": "./Records",
-    "analysis_dir": "./AnalysisReports",
+    "records_dir": "../Records",
+    "analysis_dir": "../AnalysisReports",
     "longpoll_timeout_seconds": 25,
     "verify": "",
 }
@@ -31,8 +31,10 @@ def load() -> dict:
     for key in _DEFAULTS:
         if key in raw:
             merged[key] = raw[key]
+    # 相对路径以 client/ 为基准（默认 ../Records、../AnalysisReports 指向 client 同级目录）。
+    # resolve() 把 `..` 归一化为绝对路径，避免后续文件操作残留 `..`。
     base = config_path().parent
     for key in ("records_dir", "analysis_dir"):
         p = Path(str(merged[key]))
-        merged[key] = (base / p) if not p.is_absolute() else p
+        merged[key] = ((base / p) if not p.is_absolute() else p).resolve()
     return {"client": merged}

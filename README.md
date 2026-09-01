@@ -110,6 +110,9 @@ python -m client
 
 ## 数据与安全
 
+- **客户端本地数据与代码分离**：本地日记 `Records/` 与报告 `AnalysisReports/` 默认放在
+  `client/` 的**同级目录（项目根）**（`client/config.yaml` 的 `../Records`、`../AnalysisReports`），
+  与代码包 `client/` 分开放置；`outbox.json`、`state.json` 等运行态队列仍在代码目录内。
 - **原始日记是唯一事实源**；总结、报告、自动任务状态都是可重建的派生数据。
 - 记录写入永不因同步失败回滚；删改为**垃圾桶语义**（tombstone），不做硬删除，防“已删条目复活”。
 - **加密通信是强制的**：服务端 `run` 未配置 TLS 会拒绝启动（禁止明文）；`python -m server.main cert`

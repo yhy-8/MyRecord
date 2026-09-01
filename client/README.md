@@ -30,8 +30,9 @@ python -m client
 ## 配置
 
 `client/config.yaml`：服务器地址、本地数据目录（Records / AnalysisReports / Log）、
-长轮询挂起秒数。相对路径以 `client/` 为基准。本地数据目录不入服务端中枢。
-（已移除旧的每 1 分钟定时轮询间隔。）
+长轮询挂起秒数。相对路径以 `client/` 为基准；默认 `../Records`、`../AnalysisReports`
+指向 `client` 的**同级目录（项目根）**，把记录/报告与代码包 `client/` 分开存放。
+本地数据目录不入服务端中枢。（已移除旧的每 1 分钟定时轮询间隔。）
 
 ## 命令（统一 8 个）
 
@@ -64,7 +65,8 @@ python -m client
 - `credentials.example.json` 凭据**样板**：复制为 `credentials.json` 并填入服务端签发的 token
 - `credentials.json` 链接凭证（服务端签发的唯一共享 token，可选 device_id 覆盖设备名）
 - `outbox.json` 离线待推送队列
-- `Records/` 本地日记、`AnalysisReports/` 云端报告副本、`Log/` 本地日志
+- `../Records/` 本地日记、`../AnalysisReports/` 云端报告副本、`Log/` 本地日志
+  （默认在 `client/` 的同级目录即项目根，与代码包 `client/` 分开放置）
 
 ## 数据与安全
 
