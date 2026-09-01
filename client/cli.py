@@ -5,6 +5,7 @@
 """
 
 import datetime
+import re
 import subprocess
 import sys
 import threading
@@ -38,6 +39,14 @@ def _help_text() -> str:
     )
 
 
+def _show_help() -> None:
+    """把帮助文本包装成与开头一致的 Panel 展示。"""
+    from rich.console import Console
+    from rich.panel import Panel
+
+    Console().print(Panel.fit(_help_text(), title="帮助", border_style="cyan"))
+
+
 # ---------- 终端辅助 ----------
 
 
@@ -65,7 +74,6 @@ def resolve_date(arg: str = "") -> str:
             return datetime.datetime.strptime(value, fmt).date().isoformat()
         except ValueError:
             continue
-    import re
 
     m = re.fullmatch(r"(\d{1,2})-(\d{1,2})", value)
     if m:
@@ -77,7 +85,9 @@ def resolve_date(arg: str = "") -> str:
 
 
 def show_day(arg: str) -> None:
-    """查看本地日记（不提供报告查看）。"""
+    """查看本地日记（渲染 Markdown；不提供报告查看）。"""
+    from rich.markdown import Markdown
+
     date = resolve_date(arg)
     if not date:
         Console().print("[yellow][!][/yellow] 无法解析日期。")
@@ -87,15 +97,52 @@ def show_day(arg: str) -> None:
         print(f"（{date} 还没有记录。）")
         return
     print(f"===== {date} =====")
-    print(path.read_text(encoding="utf-8"))
+    Console().print(Markdown(_render_day_markdown(path.read_text(encoding="utf-8"))))
+
+
+_SUMMARY_RE = re.compile(r"<summary>(.*?)</summary>", re.DOTALL)
+
+
+def _render_day_markdown(text: str) -> str:
+    """把 `<summary>` 区域转成 blockquote，其余原样交给 Markdown 渲染。
+
+    原因：`<summary>` 是自定义标记，rich Markdown 会丢弃未知 HTML 标签内的正文；
+    转成 blockquote 后总结正文（含其中 Markdown）可被正常渲染。
+    """
+
+    def _to_quote(match: re.Match) -> str:
+        summary = match.group(1).strip()
+        if not summary:
+            return ""
+        return "\n".join("> " + line for line in summary.splitlines()) + "\n"
+
+    return _SUMMARY_RE.sub(_to_quote, text)
 
 
 # ---------- 命令处理 ----------
 
 
-def _handle_view(arg: str) -> None:
-    date = arg.split(maxsplit=1)[1].strip() if " " in arg else ""
-    show_day(date)
+def _handle_command(client: SyncClient, text: str) -> None:
+    """统一命令解析：以 / 开头的输入只按命令处理，未知命令提示而不写入。"""
+    from rich.console import Console
+
+    cmd, _, arg = text.partition(" ")
+    arg = arg.strip()
+    handlers = {
+        "/c": lambda: clear_screen(),
+        "/h": lambda: _show_help(),
+        "/v": lambda: show_day(arg),
+        "/d": lambda: _handle_delete(client),
+        "/sync": lambda: _handle_sync(client),
+        "/status": lambda: _handle_status(client),
+        "/retry": lambda: _handle_retry(client),
+        "/model": lambda: _handle_model(client),
+    }
+    handler = handlers.get(cmd)
+    if handler:
+        handler()
+    else:
+        Console().print(f"[yellow][!][/yellow] 未知命令：{cmd}（输入 /h 查看帮助）。")
 
 
 def _print_automation_status(automation: dict) -> None:
@@ -277,7 +324,7 @@ def run_interactive() -> None:
         Console().print(f"[yellow][!][/yellow] {error}（本地照常记录，上线后自动同步）")
 
     _banner()
-    print(_help_text())
+    _show_help()
 
     # 运行期间保持一条长连接（长轮询），实现扇出即拉取；不密集轮询云端。
     thread = threading.Thread(
@@ -294,28 +341,7 @@ def run_interactive() -> None:
         text = raw.strip()
         if not text:
             continue
-        if text == "/c":
-            clear_screen()
-            continue
-        if text == "/h":
-            print(_help_text())
-            continue
-        if text.startswith("/v"):
-            _handle_view(text)
-            continue
-        if text == "/d":
-            _handle_delete(client)
-            continue
-        if text == "/sync":
-            _handle_sync(client)
-            continue
-        if text == "/status":
-            _handle_status(client)
-            continue
-        if text == "/retry":
-            _handle_retry(client)
-            continue
-        if text == "/model":
-            _handle_model(client)
+        if text.startswith("/"):
+            _handle_command(client, text)
             continue
         _write_record(client, text)

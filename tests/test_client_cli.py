@@ -206,6 +206,70 @@ class ClientCLICommandRoutingTests(unittest.TestCase):
             journal.append_record.assert_not_called()
 
 
+class ClientCLISlashDispatchTests(unittest.TestCase):
+    """统一命令解析：仅开头的 `/` 视为命令；未知命令提示而不写入日记。"""
+
+    def _run_with_inputs(self, inputs):
+        with patch.object(cli_app, "SyncClient") as SyncClient, patch.object(
+            client_identity, "require"
+        ) as require, patch.object(cli_app, "journal") as journal, patch.object(
+            client_identity, "make_entry_id"
+        ) as make_entry_id, patch.object(client_identity, "device_name") as device_name, patch(
+            "builtins.input", side_effect=inputs
+        ):
+            require.return_value = {"device_id": "e2e-a", "token": "t"}
+            make_entry_id.return_value = "e2e-a-1"
+            device_name.return_value = "e2e-a"
+            journal.append_record = Mock()
+            SyncClient.return_value = Mock()
+            SyncClient.return_value.base_url = "http://127.0.0.1:1"
+            cli_app.run_interactive()
+            return journal
+
+    def test_unknown_slash_command_rejected_not_written(self):
+        """`/statuss` 是命令拼写错误：应提示未知命令，而不是写进日记。"""
+        journal = self._run_with_inputs(["/statuss", EOFError])
+        journal.append_record.assert_not_called()
+
+    def test_non_leading_slash_is_written_as_record(self):
+        """`/` 只当首字符时才是命令；出现在正文中间按普通文本记录。"""
+        journal = self._run_with_inputs(["我在公司 / 写代码", EOFError])
+        journal.append_record.assert_called_once()
+
+
+class ClientCLIRenderDayTests(unittest.TestCase):
+    def test_render_day_markdown_converts_summary_to_quote(self):
+        content = """# 2026-09-01
+
+<summary>
+暂无今日总结。
+</summary>
+
+---
+## 原始记录流
+
+**19:02 [MK8]:** /statuss
+"""
+        rendered = cli_app._render_day_markdown(content)
+        self.assertIn("> 暂无今日总结。", rendered)
+        # 自定义 <summary> 标签本身应被移除
+        self.assertNotIn("<summary>", rendered)
+        # 其余 Markdown 原样保留
+        self.assertIn("## 原始记录流", rendered)
+        self.assertIn("**19:02 [MK8]:** /statuss", rendered)
+
+    def test_render_day_markdown_keeps_summary_markdown(self):
+        content = """# 2026-09-01
+
+<summary>
+第一条\n\n第二条
+</summary>
+"""
+        rendered = cli_app._render_day_markdown(content)
+        self.assertIn("> 第一条", rendered)
+        self.assertIn("> 第二条", rendered)
+
+
 class ClientCLIDateTests(unittest.TestCase):
     """/v 与终端日期解析辅助（已并入 cli/app.py）。"""
 
