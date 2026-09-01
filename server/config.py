@@ -59,4 +59,10 @@ def load() -> dict:
         raw = merged["tls"][key]
         if raw and not _is_absolute_path(Path(raw)):
             merged["tls"][key] = str((base_dir / raw).resolve())
+    # TLS 缺省指向本项目 `cert` 生成的证书（<data_dir>/tls/server.*），无需手动填路径；
+    # 证书文件确实缺失时由 run 的强制 TLS 检查拦截（提示先执行 cert）。
+    if not merged["tls"]["certfile"]:
+        merged["tls"]["certfile"] = str(Path(merged["data_dir"]) / "tls" / "server.crt")
+    if not merged["tls"]["keyfile"]:
+        merged["tls"]["keyfile"] = str(Path(merged["data_dir"]) / "tls" / "server.key")
     return {"server": merged, "raw": value if isinstance(value, dict) else {}}

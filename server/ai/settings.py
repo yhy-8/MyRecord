@@ -21,15 +21,6 @@ _RETRY_DEFAULTS = {
     "daily_summary_retry_limit": 2,
     "weekly_report_retry_limit": 2,
     "monthly_report_retry_limit": 2,
-    "empty_response_retry_limit": 1,
-    "transient_http_retry_limit": 2,
-    "transient_http_backoff_seconds": 1,
-}
-_POSITIVE_RETRY_SETTINGS = {
-    "transient_http_backoff_seconds",
-}
-_MAXIMUM_RETRY_SETTINGS = {
-    "empty_response_retry_limit": 1,
 }
 
 
@@ -88,7 +79,11 @@ DIARY_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def retry_policy() -> dict[str, int]:
-    """Return the validated retry controls from ``config.yaml``."""
+    """Return the validated retry controls from ``config.yaml``.
+
+    只保留自动化层三种内容任务的各自重试次数；模型调用本身是单次请求，
+    瞬时 HTTP 错误与空正文都当作一次普通任务失败，交由自动化层重试。
+    """
     configured = CONFIG.get("retry", {})
     if not isinstance(configured, dict):
         raise RuntimeError("config.yaml 中 retry 必须是对象")
@@ -100,15 +95,8 @@ def retry_policy() -> dict[str, int]:
     policy = {}
     for key, default in _RETRY_DEFAULTS.items():
         value = configured.get(key, default)
-        minimum = 1 if key in _POSITIVE_RETRY_SETTINGS else 0
-        if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
-            comparator = "正整数" if minimum else "非负整数"
-            raise RuntimeError(f"config.yaml 中 retry.{key} 必须是{comparator}")
-        maximum = _MAXIMUM_RETRY_SETTINGS.get(key)
-        if maximum is not None and value > maximum:
-            raise RuntimeError(
-                f"config.yaml 中 retry.{key} 不能大于 {maximum}"
-            )
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise RuntimeError(f"config.yaml 中 retry.{key} 必须是非负整数")
         policy[key] = value
     return policy
 

@@ -56,30 +56,6 @@ def _transient_http_error(error: requests.HTTPError) -> bool:
     )
 
 
-def _post_with_transient_retry(*args, **kwargs):
-    """Retry connection failures and transient server responses as configured."""
-    attempt_observer = kwargs.pop("attempt_observer", None)
-    retry = settings.retry_policy()
-    maximum_attempts = retry["transient_http_retry_limit"] + 1
-    backoff_seconds = retry["transient_http_backoff_seconds"]
-    for attempt in range(maximum_attempts):
-        if attempt_observer:
-            attempt_observer(attempt + 1)
-        try:
-            response = requests.post(*args, **kwargs)
-        except (requests.ConnectionError, requests.Timeout):
-            if attempt + 1 == maximum_attempts:
-                raise
-            time.sleep(backoff_seconds * (1 << attempt))
-            continue
-        if response.status_code == 408 or 500 <= response.status_code < 600:
-            if attempt + 1 < maximum_attempts:
-                time.sleep(backoff_seconds * (1 << attempt))
-                continue
-        return response
-    raise RuntimeError("unreachable")
-
-
 def _build_system_prompt() -> str:
     today = datetime.datetime.now().strftime("%Y-%m-%d")
     return f"""你是 MyRecord 的分析引擎。今天是 {today}。你只执行程序提交的总结或分析任务，不承担日常聊天。输出必须忠于记录、结构清晰且可独立阅读。
@@ -153,10 +129,6 @@ def call_ai(
         return AIResponse(f"{CONFIG_ERROR_MARKER} 模型 api_url 无效。", False)
     if not api_key:
         return AIResponse(f"{CONFIG_ERROR_MARKER} 模型 api_key 为空。", False)
-    try:
-        retry = settings.retry_policy()
-    except RuntimeError as error:
-        return AIResponse(f"{CONFIG_ERROR_MARKER} {error}", False)
 
     messages = [
         {"role": "system", "content": _build_system_prompt()},
@@ -197,12 +169,6 @@ def call_ai(
         "cache_miss_tokens": 0,
     }
     finish_reasons: list[str] = []
-    empty_content_retries = 0
-    empty_response_retry_limit = retry["empty_response_retry_limit"]
-
-    def observe_attempt(_attempt: int) -> None:
-        nonlocal http_attempts
-        http_attempts += 1
 
     def finish(text: str, success: bool) -> AIResponse:
         return AIResponse(
@@ -213,65 +179,46 @@ def call_ai(
                 "http_attempts": http_attempts,
                 "usage": usage,
                 "finish_reasons": finish_reasons,
-                "empty_content_retries": empty_content_retries,
             },
         )
 
     try:
-        for _ in range(empty_response_retry_limit + 1):
-            response = _post_with_transient_retry(
-                api_url,
-                headers=headers,
-                json=payload,
-                timeout=60,
-                attempt_observer=observe_attempt,
-            )
-            response.raise_for_status()
-            data = response.json()
-            choice = data["choices"][0]
-            message = choice["message"]
-            finish_reason = str(choice.get("finish_reason", ""))
-            finish_reasons.append(finish_reason)
-            for key, value in _usage_values(data).items():
-                usage[key] += value
+        http_attempts = 1
+        response = requests.post(
+            api_url,
+            headers=headers,
+            json=payload,
+            timeout=60,
+        )
+        response.raise_for_status()
+        data = response.json()
+        choice = data["choices"][0]
+        message = choice["message"]
+        finish_reason = str(choice.get("finish_reason", ""))
+        finish_reasons.append(finish_reason)
+        for key, value in _usage_values(data).items():
+            usage[key] += value
 
-            text = (message.get("content") or "").strip()
-            if finish_reason == "length":
-                return finish(
-                    (text + "\n\n" if text else "")
-                    + f"{OUTPUT_TRUNCATED_MARKER} 模型达到输出长度上限。",
-                    False,
-                )
-            if finish_reason == "content_filter":
-                return finish(
-                    (text + "\n\n" if text else "")
-                    + f"{OUTPUT_FILTERED_MARKER} 模型输出触发内容过滤。",
-                    False,
-                )
-            if finish_reason == "insufficient_system_resource":
-                return finish(
-                    f"{NETWORK_ERROR_MARKER} 模型服务资源暂时不足。",
-                    False,
-                )
-            if text:
-                return finish(text, True)
-            if (
-                finish_reason == "stop"
-                and empty_content_retries < empty_response_retry_limit
-            ):
-                empty_content_retries += 1
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": (
-                            "[系统提示] 上一轮只完成了内部思考，没有返回最终正文。"
-                            "请立即按原任务输出完整最终答案。"
-                        ),
-                    }
-                )
-                payload["messages"] = messages
-                continue
-            return finish("(AI 未给出最终回答)", False)
+        text = (message.get("content") or "").strip()
+        if finish_reason == "length":
+            return finish(
+                (text + "\n\n" if text else "")
+                + f"{OUTPUT_TRUNCATED_MARKER} 模型达到输出长度上限。",
+                False,
+            )
+        if finish_reason == "content_filter":
+            return finish(
+                (text + "\n\n" if text else "")
+                + f"{OUTPUT_FILTERED_MARKER} 模型输出触发内容过滤。",
+                False,
+            )
+        if finish_reason == "insufficient_system_resource":
+            return finish(
+                f"{NETWORK_ERROR_MARKER} 模型服务资源暂时不足。",
+                False,
+            )
+        if text:
+            return finish(text, True)
         return finish("(AI 未给出最终回答)", False)
     except (requests.ConnectionError, requests.Timeout) as error:
         return finish(f"{NETWORK_ERROR_MARKER} {error}", False)

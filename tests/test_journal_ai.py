@@ -3,7 +3,7 @@
 import unittest
 from unittest.mock import patch
 
-from server.ai import ai_client, settings
+from server.ai import ai_client
 
 
 class FakeResponse:
@@ -177,55 +177,18 @@ class JournalAITests(unittest.TestCase):
         self.assertEqual(["length"], response.telemetry["finish_reasons"])
 
     @patch("server.ai.ai_client.requests.post")
-    def test_empty_stop_response_gets_one_final_answer_retry(self, post):
-        post.side_effect = [
-            FakeResponse(
-                {
-                    "choices": [
-                        {
-                            "finish_reason": "stop",
-                            "message": {
-                                "role": "assistant",
-                                "content": "",
-                                "reasoning_content": "内部思考",
-                            },
-                        }
-                    ]
-                }
-            ),
-            FakeResponse(
-                {
-                    "choices": [
-                        {
-                            "finish_reason": "stop",
-                            "message": {
-                                "role": "assistant",
-                                "content": "最终回答",
-                            },
-                        }
-                    ]
-                }
-            ),
-        ]
-
-        response = ai_client.call_ai("结构化任务", self.model)
-
-        self.assertTrue(response.success)
-        self.assertEqual("最终回答", response.text)
-        self.assertEqual(2, post.call_count)
-        self.assertEqual(1, response.telemetry["empty_content_retries"])
-        retry_message = post.call_args_list[1].kwargs["json"]["messages"][-1]
-        self.assertEqual("user", retry_message["role"])
-        self.assertIn("没有返回最终正文", retry_message["content"])
-
-    @patch("server.ai.ai_client.requests.post")
-    def test_repeated_empty_stop_response_still_fails_boundedly(self, post):
+    def test_empty_stop_response_is_a_single_request_failure(self, post):
+        # 单次请求：模型只思考未给最终正文（空正文）直接判失败，不再引导重试。
         post.return_value = FakeResponse(
             {
                 "choices": [
                     {
                         "finish_reason": "stop",
-                        "message": {"role": "assistant", "content": ""},
+                        "message": {
+                            "role": "assistant",
+                            "content": "",
+                            "reasoning_content": "内部思考",
+                        },
                     }
                 ]
             }
@@ -235,8 +198,8 @@ class JournalAITests(unittest.TestCase):
 
         self.assertFalse(response.success)
         self.assertEqual("(AI 未给出最终回答)", response.text)
-        self.assertEqual(2, post.call_count)
-        self.assertEqual(1, response.telemetry["empty_content_retries"])
+        self.assertEqual(1, post.call_count)
+
 
     @patch("server.ai.ai_client.requests.post")
     def test_filtered_and_resource_exhausted_finishes_are_failures(self, post):
@@ -290,106 +253,16 @@ class JournalAITests(unittest.TestCase):
         self.assertFalse(response.success)
         self.assertTrue(ai_client.is_config_failure(response.text))
 
-    def test_invalid_retry_policy_is_a_configuration_failure(self):
-        with patch.dict(
-            settings.CONFIG,
-            {"retry": {"empty_response_retry_limit": 2}},
-        ):
-            response = ai_client.call_ai("问题", self.model)
-
-        self.assertFalse(response.success)
-        self.assertTrue(ai_client.is_config_failure(response.text))
-
-    @patch("server.ai.ai_client.time.sleep")
     @patch("server.ai.ai_client.requests.post")
-    def test_transient_connection_errors_use_bounded_retry(self, post, sleep):
-        expected = FakeResponse({"ok": True})
-        post.side_effect = [
-            ai_client.requests.ConnectionError("dns"),
-            ai_client.requests.Timeout("timeout"),
-            expected,
-        ]
-
-        response = ai_client._post_with_transient_retry("https://example.test")
-
-        self.assertIs(expected, response)
-        self.assertEqual(3, post.call_count)
-        self.assertEqual([1, 2], [call.args[0] for call in sleep.call_args_list])
-
-    @patch("server.ai.ai_client.time.sleep")
-    @patch("server.ai.ai_client.requests.post")
-    def test_transient_http_retry_count_and_backoff_are_configurable(
-        self, post, sleep
-    ):
-        expected = FakeResponse({"ok": True})
-        post.side_effect = [ai_client.requests.Timeout("timeout"), expected]
-
-        with patch.dict(
-            settings.CONFIG,
-            {
-                "retry": {
-                    "transient_http_retry_limit": 1,
-                    "transient_http_backoff_seconds": 3,
-                }
-            },
-        ):
-            response = ai_client._post_with_transient_retry(
-                "https://example.test"
-            )
-
-        self.assertIs(expected, response)
-        self.assertEqual(2, post.call_count)
-        sleep.assert_called_once_with(3)
-
-    @patch("server.ai.ai_client.requests.post")
-    def test_empty_response_retry_can_be_disabled(self, post):
-        post.return_value = FakeResponse(
-            {
-                "choices": [
-                    {
-                        "finish_reason": "stop",
-                        "message": {"role": "assistant", "content": ""},
-                    }
-                ]
-            }
-        )
-
-        with patch.dict(
-            settings.CONFIG,
-            {"retry": {"empty_response_retry_limit": 0}},
-        ):
-            response = ai_client.call_ai("问题", self.model)
-
-        self.assertFalse(response.success)
-        self.assertEqual(1, post.call_count)
-
-    @patch("server.ai.ai_client.time.sleep")
-    @patch("server.ai.ai_client.requests.post")
-    def test_transient_server_errors_use_bounded_retry(self, post, sleep):
-        unavailable = FakeResponse({})
-        unavailable.status_code = 503
-        expected = FakeResponse({"ok": True})
-        post.side_effect = [unavailable, unavailable, expected]
-
-        response = ai_client._post_with_transient_retry("https://example.test")
-
-        self.assertIs(expected, response)
-        self.assertEqual(3, post.call_count)
-        self.assertEqual([1, 2], [call.args[0] for call in sleep.call_args_list])
-
-    @patch("server.ai.ai_client.time.sleep")
-    @patch("server.ai.ai_client.requests.post")
-    def test_exhausted_connection_errors_are_marked_as_network_failure(
-        self, post, sleep
-    ):
+    def test_connection_error_is_a_network_failure_from_single_request(self, post):
         post.side_effect = ai_client.requests.ConnectionError("dns")
 
         message, success = ai_client.call_ai("自动任务", self.model)
 
         self.assertFalse(success)
         self.assertTrue(ai_client.is_network_failure(message))
-        self.assertEqual(3, post.call_count)
-        self.assertEqual([1, 2], [call.args[0] for call in sleep.call_args_list])
+        self.assertEqual(1, post.call_count)
+
 
 
 if __name__ == "__main__":

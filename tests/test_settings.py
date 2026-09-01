@@ -111,30 +111,33 @@ class ModelSettingsTests(unittest.TestCase):
         with patch.object(
             settings,
             "CONFIG",
-            {"retry": {"empty_response_retry_limit": 0}},
+            {"retry": {"weekly_report_retry_limit": 5}},
         ):
             policy = settings.retry_policy()
 
-        self.assertEqual(0, policy["empty_response_retry_limit"])
+        self.assertEqual(5, policy["weekly_report_retry_limit"])
         self.assertEqual(2, policy["daily_summary_retry_limit"])
-        self.assertEqual(2, policy["weekly_report_retry_limit"])
         self.assertEqual(2, policy["monthly_report_retry_limit"])
-        self.assertEqual(2, policy["transient_http_retry_limit"])
+        # 不再有请求层重试参数
+        self.assertNotIn("empty_response_retry_limit", policy)
+        self.assertNotIn("transient_http_retry_limit", policy)
+        self.assertNotIn("transient_http_backoff_seconds", policy)
 
     def test_retry_policy_rejects_invalid_numeric_controls(self):
-        with patch.object(
-            settings,
-            "CONFIG",
-            {"retry": {"transient_http_backoff_seconds": 0}},
-        ):
-            with self.assertRaisesRegex(RuntimeError, "必须是正整数"):
-                settings.retry_policy()
-
         # 任务重试次数可为 0（不重试）；负值非法
         with patch.object(
             settings,
             "CONFIG",
             {"retry": {"daily_summary_retry_limit": -1}},
+        ):
+            with self.assertRaisesRegex(RuntimeError, "非负整数"):
+                settings.retry_policy()
+
+        # 布尔值非法
+        with patch.object(
+            settings,
+            "CONFIG",
+            {"retry": {"weekly_report_retry_limit": True}},
         ):
             with self.assertRaisesRegex(RuntimeError, "非负整数"):
                 settings.retry_policy()

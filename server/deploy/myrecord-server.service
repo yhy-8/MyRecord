@@ -2,7 +2,9 @@
 # 安装（在独立 server 工程内）：
 #   sudo cp server/deploy/myrecord-server.service /etc/systemd/system/
 #   修改 ExecStart 的解释器路径与 WorkingDirectory 为独立 server 工程绝对路径
-#   sudo systemctl daemon-reload && sudo systemctl enable --now myrecord-server
+#   sudo systemctl daemon-reload && sudo systemctl start myrecord-server
+# 注意：本服务**不启用开机自启动**（无 [Install] 段，需手动 start；
+# 不要执行 systemctl enable）。如需开机自启请自行添加 [Install] 并 enable。
 
 [Unit]
 Description=MyRecord server hub (sync + AI reports + fanout)
@@ -18,6 +20,3 @@ WorkingDirectory=/mnt/d盘/工具/编程/已完成编程/AgentRecord
 Restart=on-failure
 RestartSec=3
 User=root
-
-[Install]
-WantedBy=multi-user.target

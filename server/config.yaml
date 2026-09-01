@@ -6,11 +6,12 @@ server:
   host: "0.0.0.0"     # 监听地址
   port: 8765          # 监听端口
   data_dir: "./data"  # 服务端数据空间（records/analysis/automation 状态/垃圾桶）
-  # 自签 TLS 直连：用 `python -m server.main cert` 生成 ./data/tls/*.crt/.key
-  # 后填入路径即启用 HTTPS；客户端 config.yaml 设 verify 指向该证书即可校验收信。
+  # 自签 TLS 直连：`python -m server.main cert` 生成 ./data/tls/*.crt/.key，
+  # 缺省即自动指向上述路径（留空即可，无需手动填写）；客户端 config.yaml
+  # 设 verify 指向该证书即可校验收信。
   tls:
-    certfile: ""     # 例如 ./data/tls/server.crt
-    keyfile: ""      # 例如 ./data/tls/server.key
+    certfile: ""     # 留空 = 缺省 <data_dir>/tls/server.crt
+    keyfile: ""      # 留空 = 缺省 <data_dir>/tls/server.key
 
 # ---- 云端 AI（沿用原单机分析的模型配置）----
 models:
@@ -33,9 +34,6 @@ retry:
   daily_summary_retry_limit: 2
   weekly_report_retry_limit: 2
   monthly_report_retry_limit: 2
-  empty_response_retry_limit: 1
-  transient_http_retry_limit: 2
-  transient_http_backoff_seconds: 1
 
 automation:
   enabled: true

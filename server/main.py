@@ -295,10 +295,10 @@ def _command_cert(args: argparse.Namespace) -> int:
     certfile.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
     os.chmod(keyfile, 0o600)
 
-    print(f"已生成自签证书（CA 能力，有效期 10 年）：")
+    print("已生成自签证书（CA 能力，有效期 10 年）：")
     print(f"  cert: {certfile}")
     print(f"  key : {keyfile}")
-    print("配置 server/config.yaml 的 server.tls.certfile/keyfile 指向上述路径即启用 HTTPS。")
+    print("服务端已默认指向上述路径（server.tls 留空即自动使用缺省），直接 run 即可启用 HTTPS。")
     print("客户端 config.yaml 设 server_url=https://<地址>:8765、verify=该 .crt 证书路径（含本机名 SAN，建议 --ip 加服务器 IP）。")
     return 0
 
