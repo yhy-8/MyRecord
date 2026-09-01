@@ -332,9 +332,6 @@ def _render_systemd(interpreter: str, project_root: Path) -> str:
         "Restart=on-failure\n"
         "RestartSec=3\n"
         "User=root\n"
-        "\n"
-        "[Install]\n"
-        "WantedBy=multi-user.target\n"
     )
 
 
@@ -363,7 +360,8 @@ def _command_deploy(args: argparse.Namespace) -> int:
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_text(_render_systemd(sys.executable, project_root), encoding="utf-8")
     subprocess.run(["systemctl", "daemon-reload"], check=True)
-    subprocess.run(["systemctl", "enable", "--now", "myrecord-server"], check=True)
+    # 只部署并立即启动，不执行 `enable`，避免开机自启动（如需开机自启请自行 `systemctl enable`）。
+    subprocess.run(["systemctl", "start", "myrecord-server"], check=True)
     print(f"已安装并启动服务：{dest}")
     print("服务名：myrecord-server（systemctl status myrecord-server 查看状态）。")
     return 0

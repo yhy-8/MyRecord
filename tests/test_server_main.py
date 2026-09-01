@@ -174,11 +174,12 @@ class ServerMainDeployTests(unittest.TestCase):
         server_main.config.load = self._orig_load
         self.tmp.cleanup()
 
-    def test_render_systemd_includes_interpreter_workdir_and_install(self):
+    def test_render_systemd_includes_interpreter_and_workdir_but_no_install(self):
         text = server_main._render_systemd("/usr/bin/python3", Path("/srv/myrecord"))
         self.assertIn("ExecStart=/usr/bin/python3 -m server.main run", text)
         self.assertIn("WorkingDirectory=/srv/myrecord", text)
-        self.assertIn("WantedBy=multi-user.target", text)
+        # 默认不启用开机自启：单元不带 [Install] 段
+        self.assertNotIn("WantedBy=", text)
 
     def test_deploy_requires_root(self):
         err = io.StringIO()
@@ -203,7 +204,7 @@ class ServerMainDeployTests(unittest.TestCase):
         self.assertIn(f"ExecStart={_sys.executable} -m server.main run", unit)
         calls = [c.args[0] for c in run.call_args_list]
         self.assertEqual(["systemctl", "daemon-reload"], calls[0])
-        self.assertEqual(["systemctl", "enable", "--now", "myrecord-server"], calls[1])
+        self.assertEqual(["systemctl", "start", "myrecord-server"], calls[1])
 
 
 class ServerMainRenderImportTests(unittest.TestCase):

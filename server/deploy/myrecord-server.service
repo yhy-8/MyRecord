@@ -1,9 +1,10 @@
 # MyRecord 服务端中枢 systemd 单元（裸机 root 运行，明文存储）。
 #
-# 推荐一键安装（在独立 server 工程内）：
+# 推荐一键部署（在独立 server 工程内）：
 #   sudo python -m server.main deploy
-# 该命令会自动带出当前解释器与工程根、按需生成自签证书，写入本单元并
-# systemctl daemon-reload && systemctl enable --now myrecord-server。
+# 该命令会自动带出当前解释器与工程根、按需生成自签证书，写入本单元并执行
+# systemctl daemon-reload && systemctl start myrecord-server（只部署并启动，
+# 不启用开机自启动）。
 #
 # 以下是 deploy 自动生成的等价内容（供手动/审阅参照）。
 [Unit]
@@ -18,6 +19,3 @@ WorkingDirectory=/srv/myrecord
 Restart=on-failure
 RestartSec=3
 User=root
-
-[Install]
-WantedBy=multi-user.target
