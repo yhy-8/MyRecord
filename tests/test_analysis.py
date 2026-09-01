@@ -1,4 +1,5 @@
 import datetime
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -61,7 +62,19 @@ class AnalysisWorkflowTests(unittest.TestCase):
             return "测试总结", True
         if "任务:report]" in prompt:
             return AIResponse(
-                "## 本周回顾\n- 完成记录模块重构。[1]\n\n## 遇到的问题\n- 修复同步丢帧。[2]",
+                json.dumps(
+                    {
+                        "summary": (
+                            "## 本周回顾\n- 完成记录模块重构。[1]\n\n"
+                            "## 遇到的问题\n- 修复同步丢帧。[2]"
+                        ),
+                        "references": [
+                            {"id": 1, "source": "R-20260714-10"},
+                            {"id": 2, "source": "R-20260714-10-10"},
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
                 True,
                 {
                     "usage": {
@@ -186,6 +199,8 @@ class AnalysisWorkflowTests(unittest.TestCase):
         self.assertIn("Token 用量", content)
         self.assertIn("本周回顾", content)
         self.assertIn("[1]", content)
+        self.assertIn("## 来源", content)
+        self.assertIn("R-20260714-10", content)
         self.assertEqual(original, diary.read_bytes())
 
     def test_weekly_report_is_single_report_agent_no_reviewer(self):
@@ -210,12 +225,12 @@ class AnalysisWorkflowTests(unittest.TestCase):
         report_prompt = next(
             p for p in self.ai_calls if "[程序 Agent 任务:report]" in p
         )
-        self.assertIn("2026-07-14", report_prompt)  # 按日期分隔
-        self.assertIn("line", report_prompt)        # 行号标注
-        self.assertIn("\"n\": 1", report_prompt)   # 全局引用编号
+        self.assertIn("[20260714]", report_prompt)  # 按天分块，块首 [YYYYMMDD]
+        self.assertIn("10:", report_prompt)         # 块内每行 行号: 内容
+        self.assertNotIn("\"n\": 1", report_prompt)  # 不再用 JSON 记录列表，改文本块
         content = path.read_text(encoding="utf-8")
         self.assertNotIn("记录依据", content)        # 不再有旧页脚
-        self.assertNotIn("R-2026", content)
+        self.assertIn("R-20260714", content)        # 报告含中控生成的来源表
 
     def test_weekly_report_without_records_fails_cleanly(self):
         day = datetime.date(2026, 7, 14)
@@ -236,7 +251,7 @@ class AnalysisWorkflowTests(unittest.TestCase):
         report_prompt = next(
             p for p in self.ai_calls if "[程序 Agent 任务:report]" in p
         )
-        self.assertIn("2026-07-14", report_prompt)
+        self.assertIn("[20260714]", report_prompt)
         self.assertNotIn("周报", report_prompt)  # 不读取周期周报/历史报告
         content = path.read_text(encoding="utf-8")
         self.assertIn("分析月报", content)
@@ -271,6 +286,30 @@ class AnalysisWorkflowTests(unittest.TestCase):
         self.assertTrue(success)  # 单次即成功，无审查/修订循环
         self.assertFalse(any("reviewer" in p for p in self.ai_calls))
         self.assertFalse(any("修订" in p for p in self.ai_calls))
+
+    def test_report_parse_strips_fence_and_validates_references(self):
+        records = [
+            {"date": "2026-07-14", "line": 10, "text": "A"},
+            {"date": "2026-07-15", "line": 3, "text": "B"},
+        ]
+        raw = "```json\n" + json.dumps(
+            {
+                "summary": "正文。[1]",
+                "references": [
+                    {"id": 1, "source": "R-20260714-10"},
+                    {"id": 2, "source": "R-20260714-10-11"},  # 行 11 超出当日最大行号 → 丢弃
+                    {"id": 3, "source": "R-99999999-1"},       # 日期不在周期 → 丢弃
+                ],
+            },
+            ensure_ascii=False,
+        ) + "```"
+        summary, refs = orchestrator._parse_report_response(raw, records)
+        self.assertEqual("正文。[1]", summary)
+        self.assertEqual([{"id": 1, "source": "R-20260714-10"}], refs)
+
+    def test_report_parse_rejects_non_json_body(self):
+        with self.assertRaises(orchestrator.AgentPipelineError):
+            orchestrator._parse_report_response("## 本周回顾\n- 纯 Markdown。", [])
 
 
 if __name__ == "__main__":

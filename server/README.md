@@ -62,9 +62,9 @@ python -m server.main cert             生成自签证书（服务端直连 TLS�
 | `ai/settings.py` | 运行配置、目录与模型选择（`current_model` / `models`） |
 | `ai/ai_client.py` | OpenAI 兼容模型请求、HTTP/thinking/JSON 输出、Token 遥测、错误分类 |
 | `ai/journal.py` | 原始日记读写与 `<summary>` 区域更新（AI 只能通过这里写日记） |
-| `ai/agents/` | 单模块：AgentSpec、纯文本协议；单次 Report Agent 生成完整报告正文 |
-| `ai/analysis/context.py` | 周期范围、按日期分隔并标注行号的记录流、全局引用编号、报告路径 |
-| `ai/analysis/orchestrator.py` | 单次 Report Agent、[N] 全局引用编号、Token 累计、审计头部、原子交付报告；来源表与引用校验当前不实现（权威说明见 `../Docs/设计基线.md` §8） |
+| `ai/agents/` | 单模块：AgentSpec、提示词（含 JSON 结构与示例）；单次 Report Agent |
+| `ai/analysis/context.py` | 周期范围、按天分块并标注行号的记录流、报告路径 |
+| `ai/analysis/orchestrator.py` | 单次 Report Agent、纯 JSON（summary+references）解析与引用校验、Token 累计、审计头部、文末来源表、原子交付报告（权威说明见 `../Docs/设计基线.md` §8） |
 | `ai/analysis/automation.py` | 简调度器：每 15 分钟缺失检测、失败后 30 分钟重试、按失败次数上限停止、每任务状态持久化 |
 | `ai/file_lock.py`、`ai/logging_config.py` | 跨进程互斥、有界诊断日志 |
 

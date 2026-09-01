@@ -17,13 +17,15 @@ class AgentModuleTests(unittest.TestCase):
         self.assertEqual({"report"}, set(AGENTS))
         self.assertTrue(AGENTS["report"].can_read_raw)
 
-    def test_report_agent_prompt_mentions_citation_and_no_source_table(self):
-        prompt = _prompt(REPORT_SPEC, "生成周报正文", {"records": [{"n": 1, "date": "2026-07-14", "line": 23, "text": "内容"}]})
+    def test_report_agent_prompt_mentions_citation_and_json_references(self):
+        prompt = _prompt(REPORT_SPEC, "生成周报正文", "[20260714]\n1: 内容")
         self.assertIn("只负责当前这一项语义任务", prompt)
         self.assertIn("完整覆盖本任务所需信息的前提下保持简洁", prompt)
-        self.assertIn("数字引用", prompt)
-        self.assertIn("不要生成文末来源表", prompt)
-        self.assertIn("R-", prompt)  # 明确禁止输出 R- 来源标识
+        self.assertIn("引用规则", prompt)
+        self.assertIn("references", prompt)   # 要求返回 JSON references 数组
+        self.assertIn("只引用输入中实际出现的行号", prompt)
+        self.assertIn("纯 JSON", prompt)      # 要求纯 JSON 输出
+        self.assertIn("[20260714]", prompt)  # 输入为按天分块文本
 
     def test_report_invocation_is_plain_text_with_thinking_budget(self):
         calls = []
@@ -37,7 +39,7 @@ class AgentModuleTests(unittest.TestCase):
         body, _ = invoke_agent(
             REPORT_SPEC,
             "生成周报正文",
-            {"records": [{"n": 1, "date": "2026-07-14", "line": 23, "text": "内容"}]},
+            "[20260714]\n1: 内容",
             {"name": "mock"},
             fake_call,
         )
@@ -57,7 +59,7 @@ class AgentModuleTests(unittest.TestCase):
             )
 
         _, telemetry = invoke_agent(
-            REPORT_SPEC, "生成", {"records": []}, {"name": "mock"}, fake_call
+            REPORT_SPEC, "生成", "[20260714]\n1: 内容", {"name": "mock"}, fake_call
         )
         self.assertEqual(12, telemetry["usage"]["total_tokens"])
 
@@ -67,7 +69,7 @@ class AgentModuleTests(unittest.TestCase):
 
         with self.assertRaises(AgentPipelineError):
             invoke_agent(
-                REPORT_SPEC, "生成", {"records": []}, {"name": "mock"}, fake_call
+                REPORT_SPEC, "生成", "[20260714]\n1: 内容", {"name": "mock"}, fake_call
             )
 
     def test_is_json_container(self):

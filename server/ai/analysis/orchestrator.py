@@ -1,4 +1,9 @@
-"""单次 Report Agent 直接生成完整周报 / 月报。"""
+"""单次 Report Agent 直接生成完整周报 / 月报。
+
+输入交给 Agent 的是按天分块的记录流（块首 `[YYYYMMDD]`，块内每行 `行号: 内容`）；Agent 返回纯 JSON
+（`summary` + `references`）。中控解析 JSON（必要时先去代码围栏）、校验每个引用（格式、日期、行号范围），
+并按校验后的引用生成文末来源表，最后写入头部审计元数据并原子交付报告。
+"""
 
 import datetime
 import hashlib
@@ -164,13 +169,13 @@ def summarize_diary(date: str, model_config: settings.ModelDict) -> tuple[str, b
 
 def _call_report_agent(
     task: str,
-    input_data: dict,
+    input_data: str,
     model_config: settings.ModelDict,
     usage: UsageAccumulator,
     run_id: str,
 ) -> str:
     logger.info("agent_start run=%s agent=%s", run_id, REPORT_SPEC.name)
-    input_size = len(json.dumps(input_data, ensure_ascii=False))
+    input_size = len(input_data)
     if input_size > _MAX_AGENT_INPUT_CHARACTERS:
         raise AgentPipelineError(
             f"{REPORT_SPEC.name} 输入超过安全上限（{input_size} > "
@@ -207,21 +212,108 @@ def _call_report_agent(
     return body
 
 
-def _report_input(period: dict, records: list[dict]) -> dict:
-    """按日期分隔 + 行号标注 + 全局引用编号，作为唯一事实源交给 Report Agent。"""
-    labeled = []
-    for index, record in enumerate(records, 1):
-        labeled.append(
-            {
-                "n": index,
-                "date": record.get("date", ""),
-                "line": record.get("line", 0),
-                "time": record.get("time", ""),
-                "tag": record.get("tag", ""),
-                "text": record.get("text", ""),
-            }
-        )
-    return {"period": period, "records": labeled}
+def _report_input(period: dict, records: list[dict]) -> str:
+    """按天分块：块首 `[YYYYMMDD]`，块内每行 `行号: 内容`，作为唯一事实源交给 Report Agent。
+
+    行号即该记录在所属日期文件中的实际行号，与引用来源 `R-YYYYMMDD-行号` 中的行号一致。
+    所有块按日期顺序拼接。
+    """
+    blocks: list[str] = []
+    current_date: str | None = None
+    lines: list[str] = []
+    for record in records:
+        date = record.get("date", "")
+        line = record.get("line", 0)
+        text = record.get("text", "")
+        if date != current_date:
+            if current_date is not None:
+                blocks.append(f"[{current_date.replace('-', '')}]\n" + "\n".join(lines))
+            current_date = date
+            lines = []
+        lines.append(f"{line}: {text}")
+    if current_date is not None:
+        blocks.append(f"[{current_date.replace('-', '')}]\n" + "\n".join(lines))
+    return "\n\n".join(blocks)
+
+
+_REFERENCE_RE = re.compile(r"^R-\d{8}-\d+(-\d+)?$")
+
+
+def _parse_reference(source: str) -> tuple[str, int, int] | None:
+    """解析 `R-YYYYMMDD-行号` / `R-YYYYMMDD-起始行-结束行`，返回 (日期, 起始, 结束)。"""
+    source = source.strip()
+    if not _REFERENCE_RE.match(source):
+        return None
+    parts = source.split("-")
+    date = parts[1]
+    num = [p for p in parts[2:]]
+    if not all(p.isdigit() for p in num):
+        return None
+    nums = [int(p) for p in num]
+    return date, nums[0], nums[-1]
+
+
+def _strip_json_fences(text: str) -> str:
+    text = text.strip()
+    if text.startswith("```"):
+        _, _, body = text.partition("\n")
+        if body.endswith("```"):
+            body = body[:-3]
+        return body.strip()
+    return text
+
+
+def _parse_report_response(
+    raw: str, records: list[dict]
+) -> tuple[str, list[dict]]:
+    """解析模型返回的纯 JSON（必要时去除首尾代码围栏），并校验每个引用来源的合法性。
+
+    返回 (summary, references)。无效引用（格式不符 / 日期不在本周期 / 行号越界）被丢弃并记日志。
+    """
+    text = _strip_json_fences(raw)
+    try:
+        obj = json.loads(text)
+    except (json.JSONDecodeError, TypeError) as error:
+        raise AgentPipelineError(f"报告输出不是合法 JSON: {error}", response=raw)
+    if not isinstance(obj, dict):
+        raise AgentPipelineError("报告输出 JSON 顶层不是对象", response=raw)
+    summary = obj.get("summary")
+    if not isinstance(summary, str) or not summary.strip():
+        raise AgentPipelineError("报告 summary 缺失或不是文本", response=raw)
+    references = obj.get("references")
+    if not isinstance(references, list):
+        references = []
+    max_line: dict[str, int] = {}
+    for record in records:
+        date = record.get("date", "").replace("-", "")
+        max_line[date] = max(max_line.get(date, 0), record.get("line", 0))
+    kept = []
+    for item in references:
+        if not isinstance(item, dict):
+            continue
+        source = str(item.get("source", ""))
+        parsed = _parse_reference(source)
+        if parsed is None:
+            logger.warning("report_reference_invalid source=%s", source)
+            continue
+        date, start, end = parsed
+        if date not in max_line:
+            logger.warning("report_reference_date_missing source=%s", source)
+            continue
+        if start > end or end > max_line[date]:
+            logger.warning("report_reference_line_out_of_range source=%s date=%s", source, date)
+            continue
+        kept.append({"id": item.get("id"), "source": source})
+    kept.sort(key=lambda item: item["id"] if isinstance(item["id"], int) else 0)
+    return summary.strip(), kept
+
+
+def _source_table(references: list[dict]) -> str:
+    """由中控根据校验后的引用生成文末来源表。"""
+    lines = ["## 来源"]
+    for item in references:
+        lines.append(f"[{item['id']}] {item['source']}")
+    return "\n".join(lines) if references else ""
 
 
 def _report_task(kind: str) -> str:
@@ -313,17 +405,21 @@ def generate_analysis_report(
         if not records:
             return "日记中没有可识别的标准记录。", False, None
 
-        input_data = _report_input(period, records)
-        body = _call_report_agent(
+        input_text = _report_input(period, records)
+        raw_body = _call_report_agent(
             _report_task(kind),
-            input_data,
+            input_text,
             model_config,
             usage,
             run_id,
         )
-        if not body:
+        if not raw_body:
+            return "报告正文为空。", False, None
+        summary, references = _parse_report_response(raw_body, records)
+        if not summary:
             return "报告正文为空。", False, None
 
+        source_table = _source_table(references)
         final_content = (
             f"# {report_name}\n\n"
             f"> 生成时间：{datetime.datetime.now():%Y-%m-%d %H:%M}\n"
@@ -332,8 +428,9 @@ def generate_analysis_report(
             f"> Token 用量：{_token_label(usage.totals())}\n"
             f"> 原始日记范围：{start:%Y-%m-%d} 至 {end:%Y-%m-%d}\n"
             f"> 分析运行：{run_id}\n\n"
-            + body
+            + summary
             + "\n"
+            + (("\n\n" + source_table + "\n") if source_table else "")
         )
         report_path.parent.mkdir(parents=True, exist_ok=True)
         temp_path = report_path.with_suffix(report_path.suffix + f".{run_id}.tmp")
@@ -341,13 +438,14 @@ def generate_analysis_report(
         temp_path.replace(report_path)
         temp_path = None
         logger.info("analysis_completed run=%s kind=%s", run_id, kind)
-        return body, True, report_path
+        return summary, True, report_path
     except Exception as error:
         message = str(error) or error.__class__.__name__
         logger.error(
-            "analysis_failed run=%s error_type=%s",
+            "analysis_failed run=%s error_type=%s message=%s",
             run_id,
             error.__class__.__name__,
+            message,
         )
         return f"分析失败: {message}", False, None
     finally:
