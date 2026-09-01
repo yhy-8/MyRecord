@@ -118,6 +118,25 @@ class Store:
                     }
             return None
 
+    def device_names(self) -> list[str]:
+        """返回真实设备名集合（去重自条目/垃圾桶/删除标记），供状态展示。
+
+        credential 标签（见 active_credential）只是连接凭证的标识，并非设备；
+        设备名是各端自报的本机名（写入条目 / 删除标记），因此从它们归纳。
+        """
+        with self._lock:
+            names = set()
+            for entry in self.data["entries"].values():
+                if entry.get("device_id"):
+                    names.add(entry["device_id"])
+            for entry in self.data["trash"].values():
+                if entry.get("device_id"):
+                    names.add(entry["device_id"])
+            for tomb in self.data["tombstones"].values():
+                if tomb.get("deleted_by"):
+                    names.add(tomb["deleted_by"])
+            return sorted(names)
+
     # ---------- 条目 ----------
 
     def append_entries(self, device_id: str, entries: list[dict]) -> list[str]:

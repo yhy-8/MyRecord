@@ -35,7 +35,6 @@ def _help_text() -> str:
         "/status       查看服务端 AI 自动任务状态\n"
         "/retry        直接重试全部失败的服务端自动任务（顺序无关）\n"
         "/model        永久切换服务端 AI 模型\n"
-        "普通输入       立即写入当天记录并即时同步到云端（长连接保持中）\n"
     )
 
 
@@ -179,7 +178,6 @@ def _handle_status(client: SyncClient) -> None:
     except SyncError as error:
         console.print(f"[red][!][/red] {error}")
         return
-    console.print(f"服务端版本: {status.get('version')}")
     console.print(f"条目数: {status.get('entry_count')}   已删数: {status.get('tombstone_count')}")
     devices = status.get("devices") or {}
     console.print("设备: " + (", ".join(devices.keys()) if devices else "（无）"))

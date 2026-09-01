@@ -246,19 +246,19 @@ class SyncHandler(BaseHTTPRequestHandler):
             return self._send_json(401, {"error": "unauthorized"})
         snapshot = self.server.store.snapshot()
         logger.info(
-            "status_request device=%s version=%d entries=%d tombstones=%d",
+            "status_request device=%s entries=%d tombstones=%d",
             _device_id(self),
-            snapshot["version"],
             len(snapshot["entries"]),
             len(snapshot["tombstones"]),
         )
         self._send_json(
             200,
             {
-                "version": snapshot["version"],
                 "entry_count": len(snapshot["entries"]),
                 "tombstone_count": len(snapshot["tombstones"]),
-                "devices": snapshot["devices"],
+                "devices": {
+                    name: {} for name in self.server.store.device_names()
+                },
                 "automation": self.server.automation_status() or {},
                 "ai": self.server.status_ai() or {},
             },
