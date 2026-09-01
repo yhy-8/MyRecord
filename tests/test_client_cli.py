@@ -78,6 +78,51 @@ class ClientCLIUnconfiguredOfflineTests(unittest.TestCase):
         outbox = json.loads((root / "outbox.json").read_text(encoding="utf-8"))
         self.assertEqual(1, len(outbox["entries"]))
 
+    def test_plain_input_records_locally_without_records_dir(self):
+        """回归：全新客户端（Records/ 尚不存在）也能立即本地记录并进离线队列。
+
+        修复前 file_lock 在锁文件父目录缺失时抛 FileNotFoundError，
+        客户端首次记录即崩溃；这里不预创建 Records/，验证本地记录永不依赖目录存在。
+        """
+        root = Path(tempfile.mkdtemp(prefix="cli-fresh-"))
+        records = root / "Records"  # 故意不预创建：模拟全新安装首次记录
+        entry = {
+            "entry_id": "e-fresh-1",
+            "device_id": "desk-01",
+            "date": "2026-09-01",
+            "ts": 5,
+            "tag": "",
+            "text": "首次本地记录",
+        }
+        with patch.object(client_sync, "_state_path", return_value=root / "state.json"), patch.object(
+            client_sync, "_outbox_path", return_value=root / "outbox.json"
+        ), patch.object(
+            client_config,
+            "load",
+            return_value={
+                "client": {
+                    "server_url": "http://127.0.0.1:1",
+                    "records_dir": records,
+                    "analysis_dir": root / "AnalysisReports",
+                    "log_dir": root / "Log",
+                    "longpoll_timeout_seconds": 25,
+                    "verify": "",
+                }
+            },
+        ), patch.object(client_identity, "load", return_value={}):
+            client = SyncClient()
+            # 与 _write_record 一致：先本地落盘（首次不崩溃），再进离线队列
+            client_journal.append_record(entry)
+            client.push_new(entry)  # 无凭据：内部静默失败，不抛异常
+
+            day = (records / "2026-09-01.md").read_text(encoding="utf-8")
+            self.assertIn("首次本地记录", day)
+            self.assertIn("e-fresh-1", day)
+
+        # 离线队列保留，等待拿到凭据后上线冲刷
+        outbox = json.loads((root / "outbox.json").read_text(encoding="utf-8"))
+        self.assertEqual(1, len(outbox["entries"]))
+
 
 class ClientCLIPlainInputTests(unittest.TestCase):
     def test_plain_input_builds_entry_and_writes_and_pushes(self):
