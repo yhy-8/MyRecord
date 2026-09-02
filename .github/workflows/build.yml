@@ -32,14 +32,17 @@ jobs:
         timeout-minutes: 5
         run: python -m unittest discover -s tests -v
 
-      # 新的两端架构：client/ 是唯一打包目标（服务端走 systemd，不打 exe）。
-      # 入口取 client/__main__.py（等价 `python -m client`）；把 client/config.yaml 一并打进包。
+      # 两端架构：client/ 是唯一打包目标（服务端走 systemd，不打 exe）。
+      # 入口取 client/__main__.py（等价 `python -m client`）。config.yaml 与凭据样板
+      # 放到 exe 同级目录：打包版从 sys.executable 旁读取 config/credentials/状态/data
+      # （见 client/config.py / identity.py / sync.py 的 sys.frozen 分支），不读临时 _MEIPASS。
       - name: Build client executable
         run: |
           pyinstaller --onefile --clean --name MyRecord --paths . `
             --hidden-import=yaml --exclude-module termios --exclude-module tty `
-            --add-data "client/config.yaml;client" client/__main__.py
+            client/__main__.py
           Copy-Item client\config.yaml dist\config.yaml
+          Copy-Item client\credentials.example.json dist\credentials.example.json
           dir dist\
 
       - name: Upload artifact

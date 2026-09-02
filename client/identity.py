@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 import socket
+import sys
 import uuid
 from pathlib import Path
 
@@ -22,6 +23,13 @@ from .file_lock import file_lock
 
 
 def credentials_path() -> Path:
+    """返回客户端 credentials.json 路径。
+
+    PyInstaller 单文件 exe 运行时 __file__ 指向临时 _MEIPASS（退出即删）；
+    为保证凭据可见、可改且不被丢弃，打包后优先读 exe 同级目录的 credentials.json。
+    """
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent / "credentials.json"
     return Path(__file__).resolve().parent / "credentials.json"
 
 

@@ -1,5 +1,6 @@
 """客户端本地助手测试：凭据读写/require、单调序号持久化、客户端入口。"""
 
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -7,6 +8,7 @@ from unittest.mock import patch
 
 from client import config as client_config
 from client import identity
+from client import sync as client_sync
 from client import __main__ as client_main
 
 
@@ -85,6 +87,35 @@ class ClientConfigTests(unittest.TestCase):
         with patch.object(client_config, "config_path", return_value=missing):
             value = client_config.load()
         self.assertEqual("https://localhost:8765", value["client"]["server_url"])
+
+
+class ClientFrozenPathTests(unittest.TestCase):
+    """打包成 exe（sys.frozen=True）时，配置/凭据/状态/离线队列路径都应指向 exe 同级目录，
+    而不是临时解压目录 _MEIPASS（进程退出即删，会导致数据丢失）。"""
+
+    @staticmethod
+    def _frozen():
+        return patch.object(sys, "frozen", True, create=True)
+
+    def test_config_path_frozen_points_next_to_executable(self):
+        with self._frozen():
+            self.assertEqual(
+                Path(sys.executable).resolve().parent / "config.yaml",
+                client_config.config_path(),
+            )
+
+    def test_sync_state_and_outbox_frozen_points_to_config_dir(self):
+        with self._frozen():
+            expected_dir = Path(sys.executable).resolve().parent
+            self.assertEqual(expected_dir / "state.json", client_sync._state_path())
+            self.assertEqual(expected_dir / "outbox.json", client_sync._outbox_path())
+
+    def test_credentials_path_frozen_points_next_to_executable(self):
+        with self._frozen():
+            self.assertEqual(
+                Path(sys.executable).resolve().parent / "credentials.json",
+                identity.credentials_path(),
+            )
 
 
 class ClientMainTests(unittest.TestCase):

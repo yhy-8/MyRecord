@@ -29,13 +29,12 @@ def _tmp_dir(prefix: str) -> Path:
 
 
 def _client_settings(records_dir: Path, analysis_dir: Path) -> dict:
-    """与 client.config.load 一致：三个目录键解析为绝对 Path。"""
+    """与 client.config.load 一致：目录键解析为绝对 Path。"""
     return {
         "client": {
             "server_url": "http://127.0.0.1:1",  # runner 会覆盖为真实地址
             "records_dir": records_dir,
             "analysis_dir": analysis_dir,
-            "log_dir": records_dir.parent / "Log",
             "longpoll_timeout_seconds": 25,
         }
     }
@@ -372,6 +371,52 @@ class ReportSyncTest(ClientSyncE2ETestBase):
                 / "2024-05-27_to_2024-06-02_auto.md"
             )
             self.assertTrue(target.exists())
+            self.assertIn("周报内容", target.read_text(encoding="utf-8"))
+        finally:
+            self._stop(pat)
+
+    def test_client_refreshes_regenerated_report_to_newest(self):
+        """同一时间段报告只保留最新生成：服务端重新生成（同路径、新内容）后客户端要覆盖旧副本。"""
+        rel = "Weekly/2024-05-27_to_2024-06-02_auto.md"
+        samples = {rel: "# 周报（v1 旧内容）\n"}
+        self.httpd.list_reports = lambda kind: [rel]
+        self.httpd.read_report = lambda r: samples.get(r)
+
+        root = _tmp_dir("cli-refresh-")
+        client_a, pat = self._new_client(self.device_a, self.token_a, root)
+        try:
+            # 第一次同步：拉取旧版本
+            client_a.sync_reports()
+            target = root / "AnalysisReports" / rel
+            self.assertTrue(target.exists())
+            self.assertIn("v1 旧内容", target.read_text(encoding="utf-8"))
+
+            # 服务端重新生成了同一时段报告，内容更新
+            samples[rel] = "# 周报（v2 最新）\n"
+
+            # 第二次同步：应刷新为最新版本，而不是跳过旧副本
+            client_a.sync_reports()
+            self.assertIn("v2 最新", target.read_text(encoding="utf-8"))
+            self.assertNotIn("v1 旧内容", target.read_text(encoding="utf-8"))
+        finally:
+            self._stop(pat)
+
+    def test_client_does_not_rewrite_unchanged_report(self):
+        """内容未变化的报告不重复写覆盖（避免无谓的磁盘写入）。"""
+        rel = "Weekly/2024-05-27_to_2024-06-02_auto.md"
+        content = "# 周报内容\n"
+        samples = {rel: content}
+        self.httpd.list_reports = lambda kind: [rel]
+        self.httpd.read_report = lambda r: samples.get(r)
+
+        root = _tmp_dir("cli-nochange-")
+        client_a, pat = self._new_client(self.device_a, self.token_a, root)
+        try:
+            client_a.sync_reports()
+            target = root / "AnalysisReports" / rel
+            first_mtime = target.stat().st_mtime_ns
+            client_a.sync_reports()
+            self.assertEqual(first_mtime, target.stat().st_mtime_ns)
             self.assertIn("周报内容", target.read_text(encoding="utf-8"))
         finally:
             self._stop(pat)

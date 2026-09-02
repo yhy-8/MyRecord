@@ -7,7 +7,6 @@
 import json
 import os
 import uuid
-from pathlib import Path
 
 import requests
 import urllib3
@@ -21,11 +20,13 @@ class SyncError(RuntimeError):
 
 
 def _state_path():
-    return Path(__file__).resolve().parent / "state.json"
+    # 以 config.yaml 所在目录为持久化基准：打包 exe 时该目录为 exe 同级（非临时 _MEIPASS），
+    # 避免状态文件随进程退出被丢弃。
+    return config.config_path().parent / "state.json"
 
 
 def _outbox_path():
-    return Path(__file__).resolve().parent / "outbox.json"
+    return config.config_path().parent / "outbox.json"
 
 
 def _read_state():
@@ -262,7 +263,11 @@ class SyncClient:
         return resp.text
 
     def sync_reports(self) -> None:
-        """拉取缺失报告文件到本地 AnalysisReports（不做 /v 查看）。"""
+        """把云端报告同步到本地 AnalysisReports（不做 /v 查看）。
+
+        同一时间段只保留最新生成：已有本地副本时仍校验与云端最新内容，
+        不一致则覆盖（服务端重新生成后客户端同步到最新版本）。
+        """
         remote = (self._request("GET", "/api/reports") or {}).get("reports", []) or []
         if not remote:
             return
@@ -270,12 +275,19 @@ class SyncClient:
         base.mkdir(parents=True, exist_ok=True)
         for rel in remote:
             target = base / rel
-            if target.exists() and target.stat().st_size > 0:
-                continue
             target.parent.mkdir(parents=True, exist_ok=True)
             content = self._report_content(rel)
             if content is None:
                 continue
+            # 同一时间段报告只保留最新生成：已存在本地副本时也校验与云端最新内容是否一致，
+            # 不一致（服务端重新生成、内容更新、或本地副本损坏/不可读）则覆盖，不跳过旧副本。
+            if target.exists():
+                try:
+                    local = target.read_text(encoding="utf-8")
+                except (OSError, UnicodeError):
+                    local = None
+                if local == content:
+                    continue
             tmp = target.with_name(target.name + ".syncing.tmp")
             tmp.write_text(content, encoding="utf-8")
             os.replace(tmp, target)

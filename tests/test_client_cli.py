@@ -60,7 +60,6 @@ class ClientCLIUnconfiguredOfflineTests(unittest.TestCase):
                     "server_url": "http://127.0.0.1:1",
                     "records_dir": records,
                     "analysis_dir": root / "AnalysisReports",
-                    "log_dir": root / "Log",
                     "longpoll_timeout_seconds": 25,
                     "verify": "",
                 }
@@ -104,7 +103,6 @@ class ClientCLIUnconfiguredOfflineTests(unittest.TestCase):
                     "server_url": "http://127.0.0.1:1",
                     "records_dir": records,
                     "analysis_dir": root / "AnalysisReports",
-                    "log_dir": root / "Log",
                     "longpoll_timeout_seconds": 25,
                     "verify": "",
                 }
