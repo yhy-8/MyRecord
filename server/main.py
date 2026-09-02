@@ -76,13 +76,23 @@ def _command_run(args: argparse.Namespace) -> int:
         except (OSError, ValueError):
             return {}
 
+    last_render_version = store.data["version"]
+
     def run_ai_cycle() -> None:
-        """一次自动任务循环：与原来相同的定时调度语义。"""
+        """一次自动任务循环：仅在权威数据版本变化时重渲染 Records。
+
+        后台只是用它将 Records 与 state.json 保持同步；没有新条目/墓碑时跳过
+        全量重渲染，避免每分钟对全部日期做无谓的磁盘写。
+        """
         try:
             ai_analysis.run_due_automatic_tasks()
         except Exception:
             pass
-        store.render_records(data_dir / "Records", data_dir / "Trash")
+        nonlocal last_render_version
+        current = store.data["version"]
+        if current != last_render_version:
+            store.render_records(data_dir / "Records", data_dir / "Trash")
+            last_render_version = current
 
     def admin_retry():
         return _admin_retry_result(ai_analysis.retry_failed_automatic_tasks)
@@ -237,6 +247,30 @@ def _command_render(args: argparse.Namespace) -> int:
     return 0
 
 
+def _command_report(args: argparse.Namespace) -> int:
+    """手动生成周报 / 月报（与自动任务同一流程、同一报告路径，直接覆盖）。"""
+    from .ai import settings as ai_settings
+    from .ai.analysis import generate_analysis_report
+
+    kind = args.kind
+    try:
+        anchor = datetime.date.fromisoformat(args.date)
+    except ValueError:
+        print(f"无效日期: {args.date}（应为 YYYY-MM-DD）", file=sys.stderr)
+        return 2
+    try:
+        model = ai_settings.ModelConfig.get_model()
+    except Exception as error:
+        print(f"模型配置无效: {error}", file=sys.stderr)
+        return 2
+    message, success, path = generate_analysis_report(kind, anchor, model)
+    print(message)
+    if success and path:
+        print(f"报告已生成: {path}")
+        return 0
+    return 1
+
+
 def _generate_cert(
     data_dir: Path,
     cn: str = "",
@@ -380,6 +414,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     imp = sub.add_parser("import", help="导入旧版 Records 目录")
     imp.add_argument("--records", required=True)
     sub.add_parser("render", help="重新渲染当天 Records")
+    rep = sub.add_parser("report", help="手动生成周报/月报（同一流程，直接覆盖）")
+    rep.add_argument("--kind", required=True, choices=["weekly", "monthly"])
+    rep.add_argument(
+        "--date",
+        required=True,
+        help="周/月内任一天，按该日期所在自然周/月确定范围 (YYYY-MM-DD)",
+    )
     sub.add_parser("deploy", help="一键安装并启动 systemd 服务（需 root）")
     cert = sub.add_parser("cert", help="生成自签证书（服务端直连 TLS）")
     cert.add_argument("--cn", default="", help="证书 CN（默认本机名）")
@@ -399,6 +440,8 @@ def main(argv: list[str] | None = None) -> int:
         return _command_import(args)
     if command == "render":
         return _command_render(args)
+    if command == "report":
+        return _command_report(args)
     if command == "deploy":
         return _command_deploy(args)
     if command == "cert":

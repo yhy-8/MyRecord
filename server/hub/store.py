@@ -6,6 +6,7 @@
 
 import datetime
 import json
+import logging
 import os
 import re
 import threading
@@ -13,6 +14,9 @@ import uuid
 from pathlib import Path
 
 from . import auth
+
+
+logger = logging.getLogger(__name__)
 
 
 class Store:
@@ -38,6 +42,9 @@ class Store:
         try:
             value = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
+            # state.json 是唯一事实源：损坏时不能静默当成“空库”，否则会看似全部丢失。
+            # 记录告警（仍按原逻辑回退到空状态，写入是原子替换，正常不触发，但需可观测）。
+            logger.warning("state.json 读取失败，已回退到空状态: %s", self.path)
             value = {}
         for key in ("version", "entries", "tombstones", "trash", "devices"):
             if key not in value:
@@ -235,26 +242,42 @@ class Store:
         records_dir.mkdir(parents=True, exist_ok=True)
         trash_dir.mkdir(parents=True, exist_ok=True)
 
+        # 在 self._lock 内对权威状态做一次快照，避免渲染线程与 HTTP push/delete 并发
+        # 迭代同一 dict 而触发 “dictionary changed size during iteration”。
+        with self._lock:
+            entries = list(self.data["entries"].values())
+            tombs = list(self.data["tombstones"].values())
+            trash = list(self.data["trash"].values())
+
         entries_by_date: dict[str, list] = {}
-        for entry in self.data["entries"].values():
+        for entry in entries:
             entries_by_date.setdefault(entry["date"], []).append(entry)
         tombs_by_date: dict[str, list] = {}
-        for tomb in self.data["tombstones"].values():
+        for tomb in tombs:
             tombs_by_date.setdefault(tomb["date"], []).append(tomb)
         trash_by_date: dict[str, list] = {}
-        for entry in self.data["trash"].values():
+        for entry in trash:
             trash_by_date.setdefault(entry["date"], []).append(entry)
 
         dates = sorted(set(entries_by_date) | set(tombs_by_date))
-        for date in dates:
-            target = records_dir / f"{date}.md"
-            text = render_mod.render_day_file(
-                date,
-                entries_by_date.get(date, []),
-                tombs_by_date.get(date, []),
-                summary=_existing_summary(target),
-            )
-            self._atomic_write(target, text)
+        # 与 ai/journal.update_summary_for_date 共用同一把 .journal.lock（跨进程互斥），
+        # 保证“读旧总结 → 写回”期间不被并发的日总结写入覆盖（避免丢失更新的竞态）。
+        from ..ai.file_lock import FileLock
+
+        lock = FileLock.acquire(records_dir / ".journal.lock", blocking=True)
+        try:
+            for date in dates:
+                target = records_dir / f"{date}.md"
+                text = render_mod.render_day_file(
+                    date,
+                    entries_by_date.get(date, []),
+                    tombs_by_date.get(date, []),
+                    summary=_existing_summary(target),
+                )
+                self._atomic_write(target, text)
+        finally:
+            if lock is not None:
+                lock.release()
         for date, trash_entries in trash_by_date.items():
             blocks = "".join(
                 render_mod.entry_block(e)

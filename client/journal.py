@@ -71,7 +71,10 @@ def ensure_day_file(date: str) -> None:
 def append_record(entry: dict) -> None:
     """把一条新记录本地写入当天文件（原子追加，永不回滚）。"""
     date = entry["date"]
-    with file_lock(day_path(date).with_suffix(".journal.lock")):
+    # 与 apply_delta 共用同一把全局写锁：长轮询线程（apply_delta）与主输入线程
+    # （append_record）可能并发写同一天文件，若各用不同锁文件会导致同一 entry_id
+    # 被重复追加（本地 Records 出现重复块）。统一用 Records/.journal.lock 串行化。
+    with file_lock(records_dir() / ".journal.lock"):
         ensure_day_file(date)
         path = day_path(date)
         with path.open("a", encoding="utf-8") as handle:

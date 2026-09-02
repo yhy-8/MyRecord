@@ -23,6 +23,7 @@ python -m server.main token create                 签发/重签唯一链接凭�
 python -m server.main token list                   查看当前唯一凭证状态（含生成时间）
 python -m server.main import --records 路径    导入旧版 Records
 python -m server.main render          重渲染当天 Records
+python -m server.main report --kind weekly|monthly --date YYYY-MM-DD   手动生成周/月报（同流程，直接覆盖）
 python -m server.main cert             生成自签证书（服务端直连 TLS，`--ip` 可指定 SAN）
 python -m server.main deploy            一键安装并启动 systemd 服务（需 root）
 ```

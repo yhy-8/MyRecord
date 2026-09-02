@@ -3,6 +3,8 @@
 通过替换 config.load 指向独立临时数据目录，避免写入仓库真实 data/。
 """
 
+import argparse
+import datetime
 import io
 import tempfile
 import unittest
@@ -271,6 +273,44 @@ class ServerMainRenderImportTests(unittest.TestCase):
                 ["import", "--records", str(self.root / "nope")]
             )
         self.assertEqual(2, rc)
+
+
+class ServerMainReportTests(unittest.TestCase):
+    """手动生成周报/月报：与自动任务同一流程、同一路径（补足原先缺手动入口）。"""
+
+    def test_report_rejects_invalid_date(self):
+        with patch("sys.stderr", io.StringIO()):
+            rc = server_main.main(
+                ["report", "--kind", "weekly", "--date", "not-a-date"]
+            )
+        self.assertEqual(2, rc)
+
+    def test_report_generates_weekly_overwrites_same_path(self):
+        with patch("server.ai.settings.ModelConfig.get_model", return_value={"name": "mock"}), \
+             patch(
+                 "server.ai.analysis.generate_analysis_report",
+                 return_value=("生成成功", True, Path("/tmp/r.md")),
+             ) as gen, \
+             patch("builtins.print"):
+            rc = server_main._command_report(
+                argparse.Namespace(kind="weekly", date="2026-07-14")
+            )
+        self.assertEqual(0, rc)
+        gen.assert_called_once_with(
+            "weekly", datetime.date(2026, 7, 14), {"name": "mock"}
+        )
+
+    def test_report_failures_return_nonzero(self):
+        with patch("server.ai.settings.ModelConfig.get_model", return_value={"name": "mock"}), \
+             patch(
+                 "server.ai.analysis.generate_analysis_report",
+                 return_value=("分析失败", False, None),
+             ), \
+             patch("builtins.print"):
+            rc = server_main._command_report(
+                argparse.Namespace(kind="monthly", date="2026-07-14")
+            )
+        self.assertEqual(1, rc)
 
 
 if __name__ == "__main__":

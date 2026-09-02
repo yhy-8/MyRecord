@@ -105,13 +105,27 @@ def show_day(arg: str) -> None:
 
 _SUMMARY_RE = re.compile(r"<summary>(.*?)</summary>", re.DOTALL)
 
+# 技术标记注释（myrecord-id / myrecord-device / myrecord-tombstone-id / myrecord-record 及
+# 旧代理 agentrecord-*）只在文件中用于对账与去重，不参与渲染。rich 会把独立成行的注释
+# 渲染成空段落，凭空多出空行，导致条目之间间隔过大——这里在展示前先剥掉这些注释行。
+_MARKER_COMMENT_RE = re.compile(
+    r"^[ \t]*<!--\s*(?:myrecord|agentrecord)[^>]*?-->[ \t]*$\n?",
+    re.MULTILINE,
+)
+
+
+def _strip_marker_comments(text: str) -> str:
+    return _MARKER_COMMENT_RE.sub("", text)
+
 
 def _render_day_markdown(text: str) -> str:
     """把 `<summary>` 区域转成 blockquote，其余原样交给 Markdown 渲染。
 
     原因：`<summary>` 是自定义标记，rich Markdown 会丢弃未知 HTML 标签内的正文；
-    转成 blockquote 后总结正文（含其中 Markdown）可被正常渲染。
+    转成 blockquote 后总结正文（含其中 Markdown）可被正常渲染。此外剥掉不参与渲染的
+    技术标记注释行（marker comments），避免它们被当作空段落、凭空多出空行。
     """
+    text = _strip_marker_comments(text)
 
     def _to_quote(match: re.Match) -> str:
         summary = match.group(1).strip()

@@ -7,6 +7,7 @@
 import json
 import os
 import uuid
+import warnings
 
 import requests
 import urllib3
@@ -17,6 +18,10 @@ from .file_lock import file_lock
 
 class SyncError(RuntimeError):
     """同步失败（网络/鉴权/协议）。"""
+
+
+# verify 为空（跳过 TLS 校验）时只提示一次，避免长连接循环里反复刷屏。
+_VERIFY_WARNED = False
 
 
 def _state_path():
@@ -77,9 +82,22 @@ class SyncClient:
           抑制 urllib3 的 InsecureRequestWarning，否则每次 HTTPS 请求都会把
           该警告打进 stderr，污染交互终端并在长连接循环里反复刷屏。
         - 某路径 → 交给 requests 校验该 CA/自签证书
+
+        注意：verify 为空即关闭证书校验（默认），存在中间人风险。这里给出一次性
+        显式警示，避免“不安全且静默”。
         """
         verify = config.load()["client"].get("verify")
         if not verify:
+            # 只提示一次，避免长连接循环里每次请求都刷一条告警。
+            global _VERIFY_WARNED
+            if not _VERIFY_WARNED:
+                warnings.warn(
+                    "当前未配置 client.verify，TLS 证书校验已关闭（存在中间人风险）。"
+                    "建议把服务端自签的 server.crt 拷到客户端并把它设为 verify 路径。",
+                    UserWarning,
+                    stacklevel=2,
+                )
+                _VERIFY_WARNED = True
             urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
             return False
         return verify

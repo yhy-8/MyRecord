@@ -303,5 +303,36 @@ class ClientCLIDateTests(unittest.TestCase):
         self.assertIn("还没有记录", mock_print.call_args.args[0])
 
 
+class ClientRenderMarkdownTests(unittest.TestCase):
+    """展示渲染：不参与对账的技术标记注释不能渲染成空段落、凭空多出空行。"""
+
+    def test_render_day_markdown_strips_invisible_marker_comments(self):
+        text = (
+            "# 2026-08-16\n\n<summary>\n今日总结\n</summary>\n\n"
+            "---\n## 原始记录流\n\n"
+            "<!-- myrecord-id:e1 -->\n<!-- myrecord-device:MK8 -->\n"
+            "**20:33 [MK8]:** 今天去了公园。\n\n"
+            "<!-- myrecord-tombstone-id:e2 -->\n"
+            "**20:34 [MK8]:** 下午和朋友聊天。\n"
+        )
+        rendered = cli_app._render_day_markdown(text)
+        self.assertNotIn("<!--", rendered)
+        self.assertNotIn("myrecord", rendered)
+        self.assertIn("> 今日总结", rendered)  # summary 被转成 blockquote
+        # 原始 Markdown 保留 ** 加粗标记（由 rich 渲染成加粗），但无凭空多出的注释段落。
+        self.assertIn("**20:33 [MK8]:** 今天去了公园。", rendered)
+        self.assertIn("**20:34 [MK8]:** 下午和朋友聊天。", rendered)
+
+    def test_render_day_markdown_does_not_remove_marker_text_in_body(self):
+        # 正文里的字面 `myrecord-*` 不是独立注释行，不应被误删。
+        text = (
+            "# 2026-08-16\n\n<summary>\n总结\n</summary>\n\n"
+            "---\n## 原始记录流\n\n"
+            "**20:33 [MK8]:** 提到 myrecord-id:xxx 这个词\n"
+        )
+        rendered = cli_app._render_day_markdown(text)
+        self.assertIn("myrecord-id:xxx", rendered)
+
+
 if __name__ == "__main__":
     unittest.main()

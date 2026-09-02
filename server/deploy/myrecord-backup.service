@@ -12,6 +12,8 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 # 按实际工程路径修改；backup.sh 从其自身位置推断工程根，读取 config.yaml 的 data_dir。
-ExecStart=/bin/bash /mnt/d盘/工具/编程/已完成编程/AgentRecord/server/deploy/backup.sh
-WorkingDirectory=/mnt/d盘/工具/编程/已完成编程/AgentRecord
+# 下面路径仅为示例（与 myrecord-server.service 的 WorkingDirectory 一致），请改成你的
+# 独立 server 工程绝对路径。
+ExecStart=/bin/bash /srv/myrecord/server/deploy/backup.sh
+WorkingDirectory=/srv/myrecord
 User=root
