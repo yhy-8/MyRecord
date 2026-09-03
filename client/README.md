@@ -40,13 +40,13 @@ cp config.example.yaml config.yaml
 `config.yaml`：服务器地址、本地数据目录（Records / AnalysisReports）、
 长轮询挂起秒数。相对路径以 `client/` 为基准；默认 `../Records`、`../AnalysisReports`
 指向 `client` 的**同级目录（项目根）**，把记录/报告与代码包 `client/` 分开存放。
-本地数据目录不入服务端中枢。（已移除旧的每 1 分钟定时轮询间隔。）
+本地数据目录不入服务端中枢。
 `server_url` 默认 `https://localhost:8765`（服务端强制 TLS）；`verify` 留空时不校验证书，
 设为服务端 `server.crt` 路径时严格校验收信。每台客户端启动不会打印 urllib3 的
 `InsecureRequestWarning`，避免污染交互终端。
 
 > 打包成 exe 运行时（见 `.github/workflows/build.yml`），把 `config.example.yaml` 模板拷到
-> exe 同级目录作为 `config.yaml`（包内不再保留可提交的 config.yaml）；凭据 credentials.json
+> exe 同级目录作为 `config.yaml`（包内只保留 `config.example.yaml` 模板）；凭据 credentials.json
 > 与本地数据目录同样以 **exe 同级目录** 为基准（用户直接在 exe 旁编辑 config.yaml）。
 
 ## 命令（统一 7 个）

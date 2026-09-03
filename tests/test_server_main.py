@@ -153,20 +153,43 @@ class ServerMainDeployTests(unittest.TestCase):
         self.assertIn("root", err.getvalue())
         run.assert_not_called()
 
-    def test_deploy_installs_and_starts_systemd(self):
-        unit_path = self.root / "systemd" / "myrecord-server.service"
+    def test_render_backup_unit_uses_backup_script_and_workdir(self):
+        text = server_main._render_backup_unit(Path("/srv/myrecord"))
+        self.assertIn("ExecStart=/bin/bash /srv/myrecord/server/deploy/backup.sh", text)
+        self.assertIn("WorkingDirectory=/srv/myrecord", text)
+
+    def test_deploy_installs_server_and_backup_and_enables_timer(self):
+        server_unit = self.root / "systemd" / "myrecord-server.service"
+        backup_unit = self.root / "systemd" / "myrecord-backup.service"
+        timer_unit = self.root / "systemd" / "myrecord-backup.timer"
         with patch("server.main.os.geteuid", return_value=0, create=True), patch(
-            "server.main._SYSTEMD_UNIT_PATH", unit_path
+            "server.main._SYSTEMD_UNIT_PATH", server_unit
+        ), patch("server.main._BACKUP_SERVICE_PATH", backup_unit), patch(
+            "server.main._BACKUP_TIMER_PATH", timer_unit
         ), patch("sys.stdout", io.StringIO()), patch("server.main.subprocess.run") as run:
             rc = server_main.main(["deploy"])
         self.assertEqual(0, rc)
 
-        unit = unit_path.read_text(encoding="utf-8")
         import sys as _sys
-        self.assertIn(f"ExecStart={_sys.executable} -m server.main run", unit)
+        self.assertIn(
+            f"ExecStart={_sys.executable} -m server.main run",
+            server_unit.read_text(encoding="utf-8"),
+        )
+        backup_text = backup_unit.read_text(encoding="utf-8")
+        self.assertIn("backup.sh", backup_text)
+        self.assertIn("ExecStart=/bin/bash", backup_text)
+        self.assertIn("WorkingDirectory=", backup_text)
+        self.assertIn("OnCalendar=weekly", timer_unit.read_text(encoding="utf-8"))
+
         calls = [c.args[0] for c in run.call_args_list]
-        self.assertEqual(["systemctl", "daemon-reload"], calls[0])
-        self.assertEqual(["systemctl", "start", "myrecord-server"], calls[1])
+        self.assertEqual(
+            calls,
+            [
+                ["systemctl", "daemon-reload"],
+                ["systemctl", "start", "myrecord-server"],
+                ["systemctl", "enable", "--now", "myrecord-backup.timer"],
+            ],
+        )
 
 
 class ServerMainRenderImportTests(unittest.TestCase):

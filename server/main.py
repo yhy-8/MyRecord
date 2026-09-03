@@ -336,6 +336,13 @@ def _command_cert(args: argparse.Namespace) -> int:
 
 
 _SYSTEMD_UNIT_PATH = Path("/etc/systemd/system/myrecord-server.service")
+_BACKUP_SERVICE_PATH = Path("/etc/systemd/system/myrecord-backup.service")
+_BACKUP_TIMER_PATH = Path("/etc/systemd/system/myrecord-backup.timer")
+
+
+def _deploy_dir() -> Path:
+    """部署文件所在目录（server/deploy：backup.sh、restore.sh、systemd 单元与定时器模板）。"""
+    return Path(__file__).resolve().parent / "deploy"
 
 
 def _render_systemd(interpreter: str, project_root: Path) -> str:
@@ -360,10 +367,32 @@ def _render_systemd(interpreter: str, project_root: Path) -> str:
     )
 
 
+def _render_backup_unit(project_root: Path) -> str:
+    """渲染备份 systemd 单元：backup.sh 绝对路径 + 与 server 单元一致的工程根。
+
+    backup.sh 从自身位置推断工程根并读取 config.yaml 的 data_dir，因此 WorkingDirectory
+    仅作归属参考；ExecStart 用绝对路径调用，运行时不依赖当前目录。
+    """
+    backup_script = (project_root / "server" / "deploy" / "backup.sh").as_posix()
+    return (
+        "[Unit]\n"
+        "Description=MyRecord server data backup (weekly)\n"
+        "After=network-online.target\n"
+        "Wants=network-online.target\n"
+        "\n"
+        "[Service]\n"
+        "Type=oneshot\n"
+        f"ExecStart=/bin/bash {backup_script}\n"
+        f"WorkingDirectory={project_root.as_posix()}\n"
+        "User=root\n"
+    )
+
+
 def _command_deploy(args: argparse.Namespace) -> int:
     """一键安装并启动 systemd 服务（需 root）。
 
-    自动带出当前解释器与工程根，无需手改单元文件。若 TLS 证书缺失则先自动生成。
+    自动带出当前解释器与工程根，无需手改单元文件；同时安装并启用每周自动备份定时器。
+    若 TLS 证书缺失则先自动生成。
     """
     if not hasattr(os, "geteuid") or os.geteuid() != 0:
         print(
@@ -381,14 +410,28 @@ def _command_deploy(args: argparse.Namespace) -> int:
             print(f"[!] 生成自签证书失败：{error}", file=sys.stderr)
             return 2
     project_root = Path(__file__).resolve().parent.parent
-    dest = _SYSTEMD_UNIT_PATH
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text(_render_systemd(sys.executable, project_root), encoding="utf-8")
+    deploy_dir = _deploy_dir()
+    server_dest = _SYSTEMD_UNIT_PATH
+    backup_dest = _BACKUP_SERVICE_PATH
+    timer_dest = _BACKUP_TIMER_PATH
+    for dest in (server_dest, backup_dest, timer_dest):
+        dest.parent.mkdir(parents=True, exist_ok=True)
+    server_dest.write_text(
+        _render_systemd(sys.executable, project_root), encoding="utf-8"
+    )
+    backup_dest.write_text(_render_backup_unit(project_root), encoding="utf-8")
+    timer_dest.write_text(
+        (deploy_dir / "myrecord-backup.timer").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
     subprocess.run(["systemctl", "daemon-reload"], check=True)
-    # 只部署并立即启动，不执行 `enable`，避免开机自启动（如需开机自启请自行 `systemctl enable`）。
+    # 只部署并立即启动服务端，不执行 `enable`，避免开机自启动（如需开机自启请自行 `systemctl enable`）。
     subprocess.run(["systemctl", "start", "myrecord-server"], check=True)
-    print(f"已安装并启动服务：{dest}")
-    print("服务名：myrecord-server（systemctl status myrecord-server 查看状态）。")
+    # 备份定时器启用并即刻生效（Persistent=true 会在错过触发时间后补跑）。
+    subprocess.run(["systemctl", "enable", "--now", "myrecord-backup.timer"], check=True)
+    print(f"已安装服务端单元：{server_dest}")
+    print(f"已安装备份单元与定时器：{backup_dest}、{timer_dest}")
+    print("已启动 myrecord-server，并启用 myrecord-backup.timer（每周自动备份）。")
     return 0
 
 

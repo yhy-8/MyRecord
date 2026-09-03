@@ -25,7 +25,7 @@ python -m server.main run
 python -m server.main run            启动同步+AI 服务
 python -m server.main token create                 签发/重签唯一链接凭证（覆盖旧 token，需二次确认）
 python -m server.main token list                   查看当前唯一凭证状态（含生成时间）
-python -m server.main import --records 路径    导入旧版 Records
+python -m server.main import --records 路径    导入既有 Records
 python -m server.main render          重渲染当天 Records
 python -m server.main report --kind weekly|monthly --date YYYY-MM-DD   手动生成周/月报（同流程，直接覆盖）
 python -m server.main cert             生成自签证书（服务端直连 TLS，`--ip` 可指定 SAN）
@@ -48,7 +48,7 @@ python -m server.main deploy            一键安装并启动 systemd 服务（�
 
 | 文件 | 职责 |
 |---|---|
-| `main.py` | 服务端 CLI：`run`（起 hub + AI 自动任务线程）、`token`（连接凭证管理）、`cert`（自签 TLS 证书）、`deploy`（一键 systemd）、`import`（旧数据导入）、`render`（重渲染 Records） |
+| `main.py` | 服务端 CLI：`run`（起 hub + AI 自动任务线程）、`token`（连接凭证管理）、`cert`（自签 TLS 证书）、`deploy`（一键 systemd）、`import`（导入既有 Records）、`render`（重渲染 Records） |
 | `config.py` / `config.yaml` | 读取服务端配置（监听、模型、重试、自动任务、数据目录） |
 
 ### 同步中枢（hub/）
@@ -59,7 +59,7 @@ python -m server.main deploy            一键安装并启动 systemd 服务（�
 | `hub/store.py` | 权威条目存储：append-only 合并（按 entry_id 去重）、tombstone、垃圾桶、设备令牌、全局 `version` 同步游标、`wait_for_change`（长轮询等待）、拉取 `pull(version)` |
 | `hub/auth.py` | 链接凭证令牌哈希（scrypt，加盐、常量时间），只存哈希，不落明文 |
 | `hub/atomic_write.py` | 原子文件写入（服务端自带小工具，与客户端各自独立） |
-| `hub/render.py` | 日记文件格式（服务端权威；客户端独立镜像同款格式，由测试锁齐）：渲染 entry 标记、tombstone 占位、`<summary>` 区域，并反向解析文件为条目列表（兼容新旧 entry 标记） |
+| `hub/render.py` | 日记文件格式（服务端权威；客户端独立镜像同款格式，由测试锁齐）：渲染 entry 标记、tombstone 占位、`<summary>` 区域，并反向解析文件为条目列表（识别多种条目标记格式） |
 
 ### 云端 AI（ai/）
 
@@ -86,7 +86,7 @@ cp config.example.yaml config.yaml
 
 `config.yaml`：监听地址/端口、`models`、`current_model`、`retry`（失败/重试策略）、
 `automation`（开关）、数据目录（`data_dir`、`diary_dir`、`analysis_dir`、`log_dir`，相对路径以
-`server/` 为基准）。周报不再联网检索，无搜索配置。模型密钥只存在于 `config.yaml`，不入数据空间、不入日志。
+`server/` 为基准）。周报生成不做联网检索，无搜索配置。模型密钥只存在于 `config.yaml`，不入数据空间、不入日志。
 
 ## 部署
 
@@ -96,9 +96,13 @@ cp config.example.yaml config.yaml
 sudo python -m server.main deploy
 ```
 
+`deploy` 写入服务端单元（`myrecord-server.service`），并安装与启用每周备份定时器
+（`myrecord-backup.service` + `myrecord-backup.timer`，`systemctl enable --now`）。
+
 `server/deploy/`：
 
-- `myrecord-server.service` — systemd 单元（`deploy` 自动生成/写入；此文件为等价参照）。
+- `myrecord-server.service` — 服务端单元（`deploy` 自动生成/写入；此文件为等价参照）。
+- `myrecord-backup.service` / `myrecord-backup.timer` — 每周自动备份单元与定时器（`deploy` 自动生成/写入；此为等价参照）。
 - `backup.sh` — 备份 `data` 空间为 tar（保留最近 N 份）。
 - `restore.sh` — 从备份恢复 `data` 空间。
 
@@ -117,5 +121,5 @@ sudo python -m server.main deploy
 - **服务端记录详细日志**到 `data/Log/MyRecord.log`：客户端连接/鉴权、对日志的推送与在线删除、AI 报告
   生成成败与每步 Agent 调用、自动任务重试；不记录日记正文、模型密钥、token 明文。
 - 模型密钥只在服务端；不入数据空间、不入日志。
-- 日记文件统一使用 `<!-- myrecord-* -->` 条目/删除标记。旧数据（`agentrecord-*` 与远古裸记录）
-  原生向后兼容：解析时无 entry_id 自动生成 legacy id，标记注释不会混入正文，AI 只读文本。
+- 日记文件统一使用 `<!-- myrecord-* -->` 条目/删除标记。解析器识别多种标记格式（`myrecord-*`、
+  `agentrecord-*`、无标记裸行）；无 entry_id 的记录自动生成确定性 id，标记注释不会混入正文，AI 只读文本。
