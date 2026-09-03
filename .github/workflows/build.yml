@@ -33,9 +33,10 @@ jobs:
         run: python -m unittest discover -s tests -v
 
       # 两端架构：client/ 是唯一打包目标（服务端走 systemd，不打 exe）。
-      # 入口取 client/__main__.py（等价 `python -m client`）。config.yaml 与凭据样板
-      # 放到 exe 同级目录：打包版从 sys.executable 旁读取 config/credentials/状态/data
+      # 入口取 client/__main__.py（等价 `python -m client`）。把配置**模板**与凭据样板
+      # 放到 exe 同级目录：打包版从 sys.executable 旁读取 config.yaml/credentials/状态/data
       # （见 client/config.py / identity.py / sync.py 的 sys.frozen 分支），不读临时 _MEIPASS。
+      # config.yaml 是用户配置（已 gitignore），这里用 config.example.yaml 模板生成一份,使用者改即可。
       # 客户端现在复用 server/hub/render.py 与 common/atomic_write.py（--paths . 从仓库根
       # 解析并打包进 exe），不依赖外部 server 工程。
       - name: Build client executable
@@ -43,7 +44,7 @@ jobs:
           pyinstaller --onefile --clean --name MyRecord --paths . `
             --hidden-import=yaml --exclude-module termios --exclude-module tty `
             client/__main__.py
-          Copy-Item client\config.yaml dist\config.yaml
+          Copy-Item client\config.example.yaml dist\config.yaml
           Copy-Item client\credentials.example.json dist\credentials.example.json
           dir dist\
 

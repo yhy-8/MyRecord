@@ -8,10 +8,13 @@
 
 ```bash
 pip install -r requirements.txt
+cp config.example.yaml config.yaml   # 生成运行配置，再在其中填入模型 api_key
 python -m server.main run
 ```
 
 > 入口统一为 `python -m server.main run`（`server/main.py`）。
+> `config.example.yaml` 是**配置模板**（空白 api_key，已提交）；运行时读取的是 `config.yaml`
+> （含 api_key，已 gitignore，不入版本库），请按上面两步用模板生成并**填入你的模型密钥**。
 > 启动后自带**后台调度线程**：每 15 分钟检测缺失，并独立执行到期任务（日总结 / 周报 / 月报
 > 互不依赖、无顺序要求）。该线程属服务端调度，与客户端同步无关。
 
@@ -44,7 +47,7 @@ python -m server.main deploy            一键安装并启动 systemd 服务（�
 
 | 文件 | 职责 |
 |---|---|
-| `main.py` | 服务端 CLI：`run`（起 hub + AI 自动任务线程）、`token`（设备令牌管理）、`import`（旧数据导入）、`render`（重渲染 Records） |
+| `main.py` | 服务端 CLI：`run`（起 hub + AI 自动任务线程）、`token`（连接凭证管理）、`cert`（自签 TLS 证书）、`deploy`（一键 systemd）、`import`（旧数据导入）、`render`（重渲染 Records） |
 | `config.py` / `config.yaml` | 读取服务端配置（监听、模型、重试、自动任务、数据目录） |
 
 ### 同步中枢（hub/）
@@ -71,9 +74,17 @@ python -m server.main deploy            一键安装并启动 systemd 服务（�
 
 ## 配置
 
-`server/config.yaml`：监听地址/端口、`models`、`current_model`、`retry`（失败/重试策略）、
+服务器配置以 `server/config.example.yaml` 为**模板**（提交到版本库，`api_key` 留空）；运行时读取
+`server/config.yaml`（已 gitignore，不入版本库），由用户复制模板后填写：
+
+```bash
+cp config.example.yaml config.yaml
+# 编辑 config.yaml：在 models 的 api_key 处填入你的模型密钥
+```
+
+`config.yaml`：监听地址/端口、`models`、`current_model`、`retry`（失败/重试策略）、
 `automation`（开关）、数据目录（`data_dir`、`diary_dir`、`analysis_dir`、`log_dir`，相对路径以
-`server/` 为基准）。周报不再联网检索，无搜索配置。
+`server/` 为基准）。周报不再联网检索，无搜索配置。模型密钥只存在于 `config.yaml`，不入数据空间、不入日志。
 
 ## 部署
 

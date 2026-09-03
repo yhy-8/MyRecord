@@ -1,0 +1,21 @@
+# ============ MyRecord 客户端配置模板（config.example.yaml）============
+#
+# 这是**模板文件**，客户端不直接读取它。
+# 运行时读取的是 `config.yaml`（本项目已把它 gitignore，不纳入版本库）。
+# 使用方式（请一定执行）：
+#   1. 把本模板复制为 `config.yaml`：cp config.example.yaml config.yaml
+#   2. 编辑 `config.yaml`，把 `server_url` 改成你的服务端中枢地址，
+#      并按需设置 `verify`（TLS 校验收信，见下）。
+#   `config.yaml` 只在你本机，请勿提交/分享。
+#
+# 客户端本地不保存模型密钥，不做本地 AI；AI 全部在服务端。
+# 相对路径以 client/ 为基准；Records / AnalysisReports 默认指向 client 的同级目录
+# （项目根），把记录/报告与代码包 client/ 分开存放。
+# ==========================================================================
+
+client:
+  server_url: "https://localhost:8765"         # 服务端中枢地址（必改：改成你的服务端）
+  records_dir: "../Records"                     # 本地日记（渲染）
+  analysis_dir: "../AnalysisReports"            # 本地报告完整副本（云端同步）
+  longpoll_timeout_seconds: 25                  # 长轮询单次挂起秒数（扇出即拉取）
+  verify: ""                                    # TLS 校验收信：空=不校验（自签直连默认，抑制 InsecureRequestWarning）；设服务端自签证书/CA 路径=严格校验

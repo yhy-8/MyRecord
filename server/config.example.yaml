@@ -1,0 +1,53 @@
+# ============ MyRecord 服务端配置模板（config.example.yaml）============
+#
+# 这是**模板文件**，服务端不直接读取它。
+# 运行时读取的是 `config.yaml`（本项目已把它 gitignore，不纳入版本库）。
+# 使用方式（请一定执行）：
+#   1. 把本模板复制为 `config.yaml`：cp config.example.yaml config.yaml
+#   2. 在 `config.yaml` 中填入你的模型 API Key（见下方 models 的 api_key）。
+#   `config.yaml` 只在服务端本地，不要提交/分享（里面含你的密钥）。
+#
+# 若你在跑 `python -m server.main run` 前忘了生成 `config.yaml`，服务端仍能启动，
+# 但会缺少模型配置、无 AI 能力（仅本地同步/查看）；请按上面两步补上即可。
+# ==========================================================================
+
+server:
+  host: "0.0.0.0"     # 监听地址
+  port: 8765          # 监听端口
+  data_dir: "./data"  # 服务端数据空间（records/analysis/automation 状态/垃圾桶）
+  # 自签 TLS 直连：`python -m server.main cert` 生成 ./data/tls/*.crt/.key，
+  # 服务端固定从该位置读取（此处不配置证书路径，无需手动填写/分离保管）。
+
+# ---- 云端 AI（模型配置）----
+# 模型密钥（api_key）只在服务端本地；不入数据空间、不入日志。
+models:
+  - name: deepseek-v4-pro
+    model_id: deepseek-v4-pro
+    json_mode: true
+    api_url: https://api.deepseek.com/chat/completions
+    api_key: ""       # ← 在这里填入你的模型 API Key（服务端唯一的模型密钥）
+
+  - name: deepseek-v4-flash
+    model_id: deepseek-v4-flash
+    json_mode: true
+    api_url: https://api.deepseek.com/chat/completions
+    api_key: ""       # ← 在这里填入你的模型 API Key
+
+current_model: "deepseek-v4-pro"
+
+# 三种 AI 内容各自的自动重试次数（重试 limit 次，共执行 limit+1 次；默认 2）。
+retry:
+  daily_summary_retry_limit: 2
+  weekly_report_retry_limit: 2
+  monthly_report_retry_limit: 2
+
+automation:
+  enabled: true
+  daily_summary: true
+  weekly_report: true
+  monthly_report: true
+
+# 数据目录（相对本配置文件所在目录 = server/）
+diary_dir: "./data/Records"
+analysis_dir: "./data/AnalysisReports"
+log_dir: "./data/Log"

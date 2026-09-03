@@ -18,7 +18,7 @@ common/                  客户端与服务端共用的工具（项目整体拷�
 
 server/                  服务端中枢 + 云端 AI（以 `python -m server.main run` 启动）
   main.py                服务端 CLI（run / token / import / render / cert / deploy）
-  config.yaml            服务端配置（监听、模型、重试、自动任务）
+  config.example.yaml    服务端配置模板（复制为 config.yaml 并填入模型 api_key；真正的 config.yaml 已 gitignore）
   config.py              服务端配置读取
   requirements.txt      服务端依赖（pyyaml、requests、cryptography）
   README.md              服务端说明
@@ -35,13 +35,15 @@ server/                  服务端中枢 + 云端 AI（以 `python -m server.mai
 
 client/                  客户端薄端（以 `python -m client` 启动）
   __main__.py            客户端入口（python -m client）
-  config.yaml            客户端配置（服务器地址、数据目录、轮询间隔）
+  config.example.yaml    客户端配置模板（复制为 config.yaml 并填入服务器地址等；真正的 config.yaml 已 gitignore）
   config.py              客户端配置读取
   identity.py            设备身份：credentials.json（凭据）、entry_id 生成
   outbox.json            离线待推送队列
   journal.py             本地日记写入与对账（渲染格式复用 server/hub/render.py）
+  file_lock.py           跨进程排他锁（原子写保护）
   sync.py                同步：写后即时 push / 离线队列 / full_sync / 长轮询扇出 / 报告同步
   cli.py                交互界面：命令路由/查看/清屏/日期解析、后台持续同步线程
+  terminal.py           跨平台终端输入：逐字符、Unicode 感知整字符退格（Windows + POSIX）
 
 Docs/                    设计与深度说明文档（仓库级）
 tests/                   测试（仓库级：server hub / client sync / ai analysis …）
@@ -59,6 +61,13 @@ tests/                   测试（仓库级：server hub / client sync / ai anal
 
 ```bash
 pip install -r server/requirements.txt
+```
+
+首次运行前**先配置服务端配置**（`config.yaml` 是含密钥的现实配置，已 gitignore，不入版本库）：
+
+```bash
+cp config.example.yaml config.yaml   # 用模板生成运行配置
+# 然后编辑 config.yaml，在 models 的 api_key 处填入你的模型密钥
 ```
 
 运行（前台）：
@@ -90,8 +99,10 @@ python -m server.main deploy                 一键安装并启动 systemd 服�
 
 安装依赖（客户端依赖在 client/requirements.txt）：`pip install -r client/requirements.txt`。
 
-将服务端签发的唯一链接凭证 `token` 写入 `client/credentials.json`（格式见样板
-`client/credentials.example.json`；设备名默认用本机名，如 `MK8`、`vivo y78`），然后：
+首次运行前配置客户端：把 `client/config.example.yaml` 复制为 `client/config.yaml`（已 gitignore），
+并把其中的 `server_url` 改成你的服务端地址、按需设置 `verify`。再把服务端签发的唯一链接凭证
+`token` 写入 `client/credentials.json`（格式见样板 `client/credentials.example.json`；设备名默认用
+本机名，如 `MK8`、`vivo y78`），然后：
 
 ```bash
 python -m client
@@ -132,7 +143,7 @@ python -m client
 - **服务端记录详细日志**（`server/data/Log/MyRecord.log`，滚动文件）：客户端连接/鉴权、对日志的
   推送与在线删除、AI 报告生成成败与每步 Agent 调用、自动任务重试等；**不记录**日记原文、模型密钥、
   token 明文。
-- 模型密钥只在服务端；不入数据空间、不入日志。
+- 模型密钥只在服务端；不入数据空间、不入日志。服务端配置 `server/config.yaml`（含 `api_key`）已被**gitignore**，不入版本库；版本库只保留**空白模板** `server/config.example.yaml`（复制为 `config.yaml` 后自行填入密钥，勿提交/分享已填密钥的 `config.yaml`）。
 - 日记文件的条目/删除标记统一采用 `<!-- myrecord-* -->` 格式。旧数据（`agentrecord-*`，含远古
   无标记的裸 `**HH:MM:** 正文`）无需迁移，解析器原生向后兼容：无 entry_id 的记录自动生成 legacy id，
   AI 只读取正文文本，任何旧标记都不会混入正文。

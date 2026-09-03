@@ -29,7 +29,15 @@ python -m client
 
 ## 配置
 
-`client/config.yaml`：服务器地址、本地数据目录（Records / AnalysisReports）、
+客户端配置以 `client/config.example.yaml` 为**模板**（已提交）；运行时读取 `client/config.yaml`
+（已 gitignore，不入版本库），由用户复制模板后填写：
+
+```bash
+cp config.example.yaml config.yaml
+# 编辑 config.yaml：把 server_url 改成你的服务端中枢地址,按需设置 verify
+```
+
+`config.yaml`：服务器地址、本地数据目录（Records / AnalysisReports）、
 长轮询挂起秒数。相对路径以 `client/` 为基准；默认 `../Records`、`../AnalysisReports`
 指向 `client` 的**同级目录（项目根）**，把记录/报告与代码包 `client/` 分开存放。
 本地数据目录不入服务端中枢。（已移除旧的每 1 分钟定时轮询间隔。）
@@ -37,8 +45,9 @@ python -m client
 设为服务端 `server.crt` 路径时严格校验收信。每台客户端启动不会打印 urllib3 的
 `InsecureRequestWarning`，避免污染交互终端。
 
-> 打包成 exe 运行时（见 `.github/workflows/build.yml`），config.yaml、credentials.json
-> 与本地数据目录以 **exe 同级目录** 为基准（config.yaml 已拷贝到 exe 旁，可直接编辑）。
+> 打包成 exe 运行时（见 `.github/workflows/build.yml`），把 `config.example.yaml` 模板拷到
+> exe 同级目录作为 `config.yaml`（包内不再保留可提交的 config.yaml）；凭据 credentials.json
+> 与本地数据目录同样以 **exe 同级目录** 为基准（用户直接在 exe 旁编辑 config.yaml）。
 
 ## 命令（统一 7 个）
 
@@ -57,17 +66,19 @@ python -m client
 | 文件 | 职责 |
 |---|---|
 | `__main__.py` | 程序入口：`python -m client` → `run_interactive()` |
-| `config.py` / `config.yaml` | 读取本地配置（服务器地址、数据目录、长轮询秒数） |
+| `config.py` / `config.example.yaml` | 读取本地配置（服务器地址、数据目录、长轮询秒数）。`config.example.yaml` 是提交的模板；运行时读取 `config.yaml`（已 gitignore），由用户复制模板并填服务器地址 |
 | `identity.py` | 链接凭证与设备身份：读写 `credentials.json`（单一共享 token）；`device_name()` 直接用本机名（电脑名/手机名，不允许自定义）；`make_entry_id(date,ts,text)` 生成设备无关的确定性 entry_id |
 | `journal.py` | 本地日记渲染与写入：按天 `Records/YYYY-MM-DD.md` 原子追加、对账补齐、tombstone 移除 |
 | `file_lock.py` | 跨进程互斥（`.journal.lock` 等），保证原子写 |
 | `sync.py` | 与中枢的同步客户端：`push_new`（写后即 push）、`send_pending`（冲刷离线队列）、`pull`（拉取对账）、`longpoll`（长连接扇出）、`full_sync`（启动/手动完整同步）、`sync_reports`（同步报告）、`delete_latest`、`status/admin_retry/admin_set_model` |
-| `cli.py` | 交互主循环：八个命令路由、`/v` 查看本地日记、清屏与日期解析、启动时 `full_sync`、维持长连接后台线程 |
+| `cli.py` | 交互主循环：7 个命令路由、`/v` 查看本地日记、清屏与日期解析、启动时 `full_sync`、维持长连接后台线程 |
+| `terminal.py` | 跨平台终端输入：逐字符读取、Unicode 感知整字符退格（Windows 控制台事件 / POSIX raw），并处理后台线程通知展示 |
 
 ## 本地文件
 
 - `credentials.example.json` 凭据**样板**：复制为 `credentials.json` 并填入服务端签发的 token
 - `credentials.json` 链接凭证（服务端签发的唯一共享 token）
+- `state.json` 本地同步游标（单条：当前已同步到的云端版本号）
 - `outbox.json` 离线待推送队列
 - `../Records/` 本地日记、`../AnalysisReports/` 云端报告副本
   （默认在 `client/` 的同级目录即项目根，与代码包 `client/` 分开放置；打包版在 exe 同级目录）
