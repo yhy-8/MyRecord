@@ -1,16 +1,17 @@
-"""客户端同步：启动/手动完整同步、写后即 push、离线队列、长连接（长轮询）扇出即拉取、在线删除。
+"""客户端同步：持续/完整同步、写后即 push、离线队列、长连接（长轮询）扇出即拉取、在线删除。
 
-同步模型：不密集轮询云端。启动或 /sync 时做一次完整对账；运行期间保持一条长连接
-（长轮询挂起，服务端有更新即返回并立即应用），每条记录写入即触发 push。
+同步模型：不密集轮询云端。后台线程连接成功即完整对账，之后保持一条长连接
+（长轮询挂起，服务端有更新即返回并立即应用），每条记录写入即触发 push；
+断线自动重连重新完整对账。
 """
 
 import json
-import os
-import uuid
 import warnings
 
 import requests
 import urllib3
+
+from common.atomic_write import atomic_write
 
 from . import config, identity, journal
 from .file_lock import file_lock
@@ -45,17 +46,11 @@ def _read_state():
 
 
 def _save_state(version: int) -> None:
-    path = _state_path()
-    tmp = path.with_name(path.name + f".{uuid.uuid4().hex}.tmp")
-    tmp.write_text(json.dumps({"version": version}), encoding="utf-8")
-    os.replace(tmp, path)
+    atomic_write(_state_path(), json.dumps({"version": version}))
 
 
 def _save_outbox(entries: list[dict]) -> None:
-    path = _outbox_path()
-    tmp = path.with_name(path.name + f".{uuid.uuid4().hex}.tmp")
-    tmp.write_text(json.dumps({"entries": entries}, ensure_ascii=False), encoding="utf-8")
-    os.replace(tmp, path)
+    atomic_write(_outbox_path(), json.dumps({"entries": entries}, ensure_ascii=False))
 
 
 def _load_outbox() -> list[dict]:
@@ -205,12 +200,12 @@ class SyncClient:
         self._apply_delta(delta)
         return delta
 
-    # ---------- 完整同步（启动 / 手动 /sync） ----------
+    # ---------- 完整同步（启动 / 重连自动对账） ----------
 
     def full_sync(self) -> None:
         """完整同步一次：先冲刷离线队列，再完整对账（重建本地镜像），再同步报告。
 
-        用于客户端启动时链接云端、以及手动 /sync 命令。完整对账从 version=0
+        用于客户端启动链接云端、以及后台重连自动对账。完整对账从 version=0
         重新拉取全部条目与墓碑并重建/补齐本地 Records，而非依赖增量游标——
         避免「本地文件丢失但游标未回退」时增量 pull 拉不到内容，导致云端有
         数据却同步不下来。
@@ -306,6 +301,4 @@ class SyncClient:
                     local = None
                 if local == content:
                     continue
-            tmp = target.with_name(target.name + ".syncing.tmp")
-            tmp.write_text(content, encoding="utf-8")
-            os.replace(tmp, target)
+            atomic_write(target, content)

@@ -8,7 +8,8 @@
 
 import hashlib
 import re
-import uuid
+
+from common.atomic_write import atomic_write
 
 from ..hub import render  # 日记格式权威：标记/day_header/extract_summary/DEFAULT_SUMMARY
 from . import settings
@@ -59,17 +60,7 @@ def update_summary_for_date(
             count=1,
             flags=re.DOTALL,
         )
-        temp_path = file_path.with_suffix(
-            file_path.suffix + f".{uuid.uuid4().hex}.tmp"
-        )
-        try:
-            temp_path.write_text(new_content, encoding="utf-8")
-            temp_path.replace(file_path)
-        finally:
-            try:
-                temp_path.unlink(missing_ok=True)
-            except OSError:
-                pass
+        atomic_write(file_path, new_content)
         return f"{date} 的总结已写入文档顶部。"
     finally:
         lock.release()

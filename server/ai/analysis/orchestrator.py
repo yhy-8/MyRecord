@@ -27,6 +27,7 @@ from ..ai_client import (
     call_ai,
 )
 from ..file_lock import FileLock
+from common.atomic_write import atomic_write
 from .context import (
     _analysis_report_path,
     _existing_logs,
@@ -379,7 +380,6 @@ def generate_analysis_report(
         return "另一个分析报告正在生成，请稍后重试。", False, None
     generation_started = time.perf_counter()
     run_id = uuid.uuid4().hex
-    temp_path: Path | None = None
     usage = UsageAccumulator()
     try:
         period = {
@@ -432,11 +432,7 @@ def generate_analysis_report(
             + "\n"
             + (("\n\n" + source_table + "\n") if source_table else "")
         )
-        report_path.parent.mkdir(parents=True, exist_ok=True)
-        temp_path = report_path.with_suffix(report_path.suffix + f".{run_id}.tmp")
-        temp_path.write_text(final_content, encoding="utf-8")
-        temp_path.replace(report_path)
-        temp_path = None
+        atomic_write(report_path, final_content)
         logger.info("analysis_completed run=%s kind=%s", run_id, kind)
         return summary, True, report_path
     except Exception as error:
@@ -449,9 +445,4 @@ def generate_analysis_report(
         )
         return f"分析失败: {message}", False, None
     finally:
-        if temp_path is not None:
-            try:
-                temp_path.unlink(missing_ok=True)
-            except OSError:
-                logger.warning("analysis_temp_cleanup_failed run=%s", run_id)
         report_lock.release()

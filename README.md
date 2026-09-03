@@ -13,12 +13,15 @@ MyRecord 是一个**本地优先、多设备云端同步**的个人记录与周�
 ## 目录结构
 
 ```text
-server/                  服务端中枢 + 云端 AI（独立工程，见 server/README.md）
-  main.py                服务端 CLI（run / token / import / render）
+common/                  客户端与服务端共用的工具（项目整体拷贝部署）
+  atomic_write.py        原文件原子写入（客户端/服务端共用，替换分散的 tmp+replace 重复）
+
+server/                  服务端中枢 + 云端 AI（以 `python -m server.main run` 启动）
+  main.py                服务端 CLI（run / token / import / render / cert / deploy）
   config.yaml            服务端配置（监听、模型、重试、自动任务）
   config.py              服务端配置读取
-  requirements.txt      服务端依赖（pyyaml、requests）
-  README.md              服务端独立工程说明
+  requirements.txt      服务端依赖（pyyaml、requests、cryptography）
+  README.md              服务端说明
   deploy/                systemd 单元与备份/恢复脚本
   data/                  数据空间（运行时生成）
     state.json           权威条目/设备/垃圾桶状态
@@ -27,25 +30,26 @@ server/                  服务端中枢 + 云端 AI（独立工程，见 server
     AnalysisReports/     报告目录
       .automation-state.json   自动任务状态
     Log/                 服务端日志
-  hub/                   同步协议、存储、鉴权、日记格式(render)
+  hub/                   同步协议、存储、鉴权、日记格式(render，单一来源)
   ai/                    云端 AI：agents / analysis(context,orchestrator,automation)
 
-client/                  客户端薄端（独立工程，见 client/README.md）
+client/                  客户端薄端（以 `python -m client` 启动）
   __main__.py            客户端入口（python -m client）
   config.yaml            客户端配置（服务器地址、数据目录、轮询间隔）
   config.py              客户端配置读取
-  identity.py            设备身份：credentials.json（凭据）、seq.json（单调序号，entry_id 生成）
+  identity.py            设备身份：credentials.json（凭据）、entry_id 生成
   outbox.json            离线待推送队列
-  journal.py             本地日记渲染与写入
+  journal.py             本地日记写入与对账（渲染格式复用 server/hub/render.py）
   sync.py                同步：写后即时 push / 离线队列 / full_sync / 长轮询扇出 / 报告同步
-  cli.py                交互界面：命令路由/查看/清屏/日期解析、启动 full_sync、长连接后台线程
+  cli.py                交互界面：命令路由/查看/清屏/日期解析、后台持续同步线程
 
 Docs/                    设计与深度说明文档（仓库级）
 tests/                   测试（仓库级：server hub / client sync / ai analysis …）
 ```
 
-> `client/` 与 `server/` 各自是**可独立拷贝/发布的完整工程**（各自含 README、requirements、
-> config，且互不 import）。仓库根目录只保留联合开发/测试/文档的脚手架。
+> `client/` 与 `server/` **不再严格分离**：整个项目一并拷贝/部署，二者共用 `common/`（原子写入）与
+> `server/hub/render.py`（日记格式单一来源）。以启动命令决定它作为客户端还是服务端运行
+> （`python -m server.main run` / `python -m client`）。仓库根目录只保留联合开发/测试/文档脚手架。
 
 ## 启动
 
@@ -84,7 +88,7 @@ python -m server.main deploy                 一键安装并启动 systemd 服�
 
 ### 2. 客户端
 
-安装依赖（在独立 client 工程内）：`pip install -r client/requirements.txt`。
+安装依赖（客户端依赖在 client/requirements.txt）：`pip install -r client/requirements.txt`。
 
 将服务端签发的唯一链接凭证 `token` 写入 `client/credentials.json`（格式见样板
 `client/credentials.example.json`；设备名默认用本机名，如 `MK8`、`vivo y78`），然后：
@@ -93,16 +97,16 @@ python -m server.main deploy                 一键安装并启动 systemd 服�
 python -m client
 ```
 
-客户端启动时自动链接云端并完整同步（拉取对账 + 冲刷离线队列 + 同步报告）；运行期间保持
-一条长连接（长轮询）接收扇出，每条记录写入即即时 push，不密集轮询云端；手动同步用 `/sync`。
+客户端启动即**自动、持续同步**（无感知）：连接成功就完整对账（拉取对账 + 冲刷离线队列 +
+同步报告），运行期间保持一条长连接（长轮询）接收扇出，每条记录写入即即时 push；
+服务端离线再上线后，后台线程会自动重新连接并完整对账，无需手动同步。
 
-## 基本使用（客户端，统一 8 个命令）
+## 基本使用（客户端，统一 7 个命令）
 
 ```text
 /v [日期]     查看某天本地日记（默认今天；日期：今天/昨天/-N/MM-DD/YYYY-MM-DD）
 /c            清屏
 /h            帮助
-/sync         立即手动完整同步一次（推送离线队列、拉取对账、同步报告）
 /d            在线删除当天最新一条（需联网，服务端确认，正文入垃圾桶）
 /status       查看服务端 AI 自动任务状态
 /retry        直接重试全部失败的服务端自动任务（无顺序依赖）

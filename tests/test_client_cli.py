@@ -1,10 +1,9 @@
 """客户端 CLI 调度测试。
 
-覆盖新薄客户端的统一单模式交互（共 8 个命令）：
+覆盖新薄客户端的统一单模式交互（共 7 个命令）：
 - 每个命令的调度路由
 - 普通输入 → 生成 entry 并写本地 + 即时 push
 - 启动时 full_sync（连上云端对账）
-- /sync 手动完整同步
 - /d 在线删除当天最新一条（服务端确认，入垃圾桶）
 - /model 按服务端模型列表循环切换
 """
@@ -26,12 +25,13 @@ from client import cli as cli_app
 
 
 class ClientCLIHelpTests(unittest.TestCase):
-    def test_help_catalogues_all_eight_commands(self):
+    def test_help_catalogues_all_commands(self):
         text = cli_app._help_text()
-        for command in ("/v", "/c", "/h", "/sync", "/d", "/status", "/retry", "/model"):
+        for command in ("/v", "/c", "/h", "/d", "/status", "/retry", "/model"):
             self.assertIn(command, text)
-        # 不再区分模式（旧 /mode 已移除）
+        # 不再区分模式（旧 /mode 已移除），且已去掉手动 /sync
         self.assertNotIn(" 模式", text)
+        self.assertNotIn("/sync", text)
 
 
 class ClientCLIUnconfiguredOfflineTests(unittest.TestCase):
@@ -172,13 +172,13 @@ class ClientCLICommandRoutingTests(unittest.TestCase):
 
             with patch(
                 "builtins.input",
-                side_effect=["/c", "/h", "/v", "/sync", "/d", "/status", "/model", EOFError],
+                side_effect=["/c", "/h", "/v", "/d", "/status", "/model", EOFError],
             ):
                 cli_app.run_interactive()
 
             clear.assert_called_once()
             show_day.assert_called_once()
-            # 启动时 full_sync 一次，/sync 手动再触发一次
+            # 启动时 full_sync 一次（连接即完整对账），后台自动持续同步
             client.full_sync.assert_called()
             client.delete_latest.assert_called_once()  # 当天最新一条
             client.status.assert_called()

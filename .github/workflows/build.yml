@@ -36,6 +36,8 @@ jobs:
       # 入口取 client/__main__.py（等价 `python -m client`）。config.yaml 与凭据样板
       # 放到 exe 同级目录：打包版从 sys.executable 旁读取 config/credentials/状态/data
       # （见 client/config.py / identity.py / sync.py 的 sys.frozen 分支），不读临时 _MEIPASS。
+      # 客户端现在复用 server/hub/render.py 与 common/atomic_write.py（--paths . 从仓库根
+      # 解析并打包进 exe），不依赖外部 server 工程。
       - name: Build client executable
         run: |
           pyinstaller --onefile --clean --name MyRecord --paths . `

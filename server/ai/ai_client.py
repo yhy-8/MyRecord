@@ -36,10 +36,6 @@ def is_network_failure(message: str) -> bool:
     return NETWORK_ERROR_MARKER in str(message)
 
 
-def is_rate_limit_failure(message: str) -> bool:
-    return RATE_LIMIT_ERROR_MARKER in str(message)
-
-
 def is_config_failure(message: str) -> bool:
     return CONFIG_ERROR_MARKER in str(message)
 

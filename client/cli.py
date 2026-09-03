@@ -1,7 +1,8 @@
-"""交互入口（统一单模式，共 /v /c /h /d /status /retry /model /sync 八个命令）。
+"""交互入口（统一单模式，共 /v /c /h /d /status /retry /model 七个命令）。
 
-同步规范：客户端不密集轮询云端。启动时一次性完整同步（full_sync）；运行期间保持
-一条长连接（长轮询挂起，扇出即拉取），每条记录写入即触发 push；手动同步用 /sync。
+同步规范：客户端不密集轮询云端，**同步是全自动、无感知的**。运行期间后台线程
+保持一条长连接（长轮询挂起，扇出即拉取）+ 断线自动重连完整对账；每条记录写入即
+触发 push，无需手动同步。
 """
 
 import datetime
@@ -20,8 +21,6 @@ from .terminal import safe_input
 
 
 def _banner() -> None:
-    from rich.console import Console
-
     console = Console()
     console.print(Panel.fit("[bold]MyRecord 客户端[/bold]", border_style="cyan"))
 
@@ -32,7 +31,6 @@ def _help_text() -> str:
         "              日期：今天/昨天/-N/MM-DD/YYYY-MM-DD\n"
         "/c            清屏\n"
         "/h            帮助\n"
-        "/sync         立即手动同步一次（推送离线队列、拉取对账、同步报告）\n"
         "/d            在线删除当天最新一条（需联网，服务端确认，入垃圾桶）\n"
         "/status       查看服务端 AI 自动任务状态\n"
         "/retry        直接重试全部失败的服务端自动任务（顺序无关）\n"
@@ -42,9 +40,6 @@ def _help_text() -> str:
 
 def _show_help() -> None:
     """把帮助文本包装成与开头一致的 Panel 展示。"""
-    from rich.console import Console
-    from rich.panel import Panel
-
     Console().print(Panel.fit(_help_text(), title="帮助", border_style="cyan"))
 
 
@@ -141,8 +136,6 @@ def _render_day_markdown(text: str) -> str:
 
 def _handle_command(client: SyncClient, text: str) -> None:
     """统一命令解析：以 / 开头的输入只按命令处理，未知命令提示而不写入。"""
-    from rich.console import Console
-
     cmd, _, arg = text.partition(" ")
     arg = arg.strip()
     handlers = {
@@ -150,7 +143,6 @@ def _handle_command(client: SyncClient, text: str) -> None:
         "/h": lambda: _show_help(),
         "/v": lambda: show_day(arg),
         "/d": lambda: _handle_delete(client),
-        "/sync": lambda: _handle_sync(client),
         "/status": lambda: _handle_status(client),
         "/retry": lambda: _handle_retry(client),
         "/model": lambda: _handle_model(client),
@@ -164,8 +156,6 @@ def _handle_command(client: SyncClient, text: str) -> None:
 
 def _print_automation_status(automation: dict) -> None:
     """展示自动任务逐任务状态（ok/failed/pending/blocked）。"""
-    from rich.console import Console
-
     tasks = automation.get("tasks") or {}
     if not tasks:
         return
@@ -189,8 +179,6 @@ def _print_automation_status(automation: dict) -> None:
 
 
 def _handle_status(client: SyncClient) -> None:
-    from rich.console import Console
-
     console = Console()
     try:
         status = client.status()
@@ -206,21 +194,7 @@ def _handle_status(client: SyncClient) -> None:
     _print_automation_status(status.get("automation") or {})
 
 
-def _handle_sync(client: SyncClient) -> None:
-    from rich.console import Console
-
-    console = Console()
-    try:
-        client.full_sync()
-    except SyncError as error:
-        console.print(f"[red][!][/red] 同步失败：{error}")
-        return
-    console.print("[green][*][/green] 已与云端完成同步（推送离线队列、拉取对账、同步报告）。")
-
-
 def _handle_delete(client: SyncClient) -> None:
-    from rich.console import Console
-
     console = Console()
     today = datetime.date.today().isoformat()
     try:
@@ -235,8 +209,6 @@ def _handle_delete(client: SyncClient) -> None:
 
 
 def _handle_retry(client: SyncClient) -> None:
-    from rich.console import Console
-
     console = Console()
     try:
         result = client.admin_retry()
@@ -251,8 +223,6 @@ def _handle_retry(client: SyncClient) -> None:
 
 def _handle_model(client: SyncClient) -> None:
     """永久切换服务端 AI 模型；不带参数时按模型列表循环。"""
-    from rich.console import Console
-
     console = Console()
     name = ""
 
@@ -306,14 +276,19 @@ def _write_record(client: SyncClient, text: str) -> None:
     client.push_new(entry)
 
 
-def _longpoll_loop(client: SyncClient) -> None:
-    """维持同一条长连接（长轮询挂起）：服务端有更新（扇出）即立即应用并同步报告。
+def _sync_loop(client: SyncClient, synced: bool = False) -> None:
+    """持续同步（无感知）：连接成功即完整对账一次，之后保持长连接接收扇出。
 
-    长轮询超时会立即重新挂起，等效于一直保持一条长连接；不密集访问云端。
-    每次成功返回都冲刷一次离线队列（空队列时零网络请求），处理断网后回连补齐。
+    服务端离线再上线后，本循环会自动重新完整对账（推送离线队列、重建本地镜像、
+    同步报告），无需手动同步。断线时静默等待并保留离线队列。
+
+    ``synced`` 为 True 时表示启动时已完成过一次完整对账（避免重复），否则先做一次。
     """
     while True:
         try:
+            if not synced:
+                client.full_sync()
+                synced = True
             changed = client.longpoll()
             if changed:
                 # 扇出增量已应用；顺带把新报告同步到本地
@@ -321,7 +296,8 @@ def _longpoll_loop(client: SyncClient) -> None:
             # 冲刷离线队列（空队列时 send_pending 直接返回，不产生请求）
             client.send_pending()
         except SyncError:
-            # 离线/服务端不可达：静默等待，保留离线队列
+            # 离线/服务端不可达：静默等待，保留离线队列；重连成功后重新完整对账
+            synced = False
             time.sleep(5)
         time.sleep(0.5)
 
@@ -341,9 +317,9 @@ def _report_startup_status(client: SyncClient, status: dict) -> None:
         reason = f"（{status['error']}）" if status.get("error") else ""
         console.print(f"[red][!][/red] 无法连接服务端：{client.base_url}{reason}")
     if status["has_credentials"]:
-        console.print("[green][*][/green] 凭据：已配置，可同步与修改数据")
+        console.print("[green][*][/green] 凭据：已配置，可同步与修改数据（后台持续同步）")
     else:
-        console.print("[yellow][!][/yellow] 凭据：未配置，仅本地记录；上线前请先写入 credentials.json")
+        console.print("[yellow][!][/yellow] 凭据：未配置，仅本地记录；上线前请先写入 credentials.json（后台会自动重连同步）")
 
 
 def run_interactive() -> None:
@@ -355,23 +331,25 @@ def run_interactive() -> None:
     status = client.probe()
     _report_startup_status(client, status)
 
-    # 启动时一次性链接云端并完整同步（拉取对账 + 冲刷离线队列 + 同步报告）
-    # 仅在「服务端可达 + 持凭据」时才可能成功；其余情况本地优先，暂不复现同一失败。
+    # 启动时先做一次完整同步（推送离线队列 + 拉取对账 + 同步报告）。
+    # 成败都不影响本地记录：失败交由后台持续同步线程自动重连补齐。
+    synced = False
     if status["connected"] and status["has_credentials"]:
         try:
             client.full_sync()
             print("启动同步完成：本地已与云端对账一致。")
+            synced = True
         except SyncError as error:
-            Console().print(f"[yellow][!][/yellow] {error}（本地照常记录，上线后自动同步）")
+            Console().print(f"[yellow][!][/yellow] {error}（后台将持续尝试同步）")
     else:
-        print("本地照常记录；联网且凭据就绪后，可用 /sync 同步到云端。")
+        print("本地照常记录；后台将自动重连，联网且凭据就绪后自动同步。")
 
     _banner()
     _show_help()
 
-    # 运行期间保持一条长连接（长轮询），实现扇出即拉取；不密集轮询云端。
+    # 持续同步（无感知）：连接成功即完整对账，之后长连接接收扇出；断线自动重连补齐。
     thread = threading.Thread(
-        target=_longpoll_loop, args=(client,), daemon=True
+        target=_sync_loop, args=(client, synced), daemon=True
     )
     thread.start()
 

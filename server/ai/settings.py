@@ -6,12 +6,13 @@
 import json
 import re
 import sys
-import uuid
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
 import yaml
+
+from common.atomic_write import atomic_write
 
 
 ModelDict = dict[str, Any]
@@ -178,17 +179,7 @@ class ModelConfig:
             separator = "" if not content or content.endswith("\n") else "\n"
             updated = f"{content}{separator}{selected_line}\n"
 
-        temp_path = config_path.with_suffix(
-            config_path.suffix + f".{uuid.uuid4().hex}.tmp"
-        )
-        try:
-            temp_path.write_text(updated, encoding="utf-8")
-            temp_path.replace(config_path)
-        finally:
-            try:
-                temp_path.unlink(missing_ok=True)
-            except OSError:
-                pass
+        atomic_write(config_path, updated)
         CONFIG["current_model"] = model["name"]
         return model
 

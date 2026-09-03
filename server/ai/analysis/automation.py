@@ -16,8 +16,9 @@
 import datetime
 import json
 import logging
-import uuid
 from pathlib import Path
+
+from common.atomic_write import atomic_write
 
 from .. import journal, settings
 from ..file_lock import FileLock
@@ -66,19 +67,8 @@ def _load_automation_state() -> dict:
 
 
 def _save_automation_state(state: dict) -> None:
-    settings.ANALYSIS_DIR.mkdir(parents=True, exist_ok=True)
     path = settings.ANALYSIS_DIR / ".automation-state.json"
-    temp = settings.ANALYSIS_DIR / f".automation-state.{uuid.uuid4().hex}.tmp"
-    try:
-        temp.write_text(
-            json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-        temp.replace(path)
-    finally:
-        try:
-            temp.unlink(missing_ok=True)
-        except OSError:
-            pass
+    atomic_write(path, json.dumps(state, ensure_ascii=False, indent=2))
 
 
 def _task_record(state: dict, task: str) -> dict:
@@ -309,14 +299,17 @@ def run_due_automatic_tasks() -> None:
             lock.release()
 
 
-def retry_failed_automatic_tasks() -> tuple[str, bool]:
-    """手动 /retry：直接重试全部失败任务（重置计数立即再试一轮，顺序无关）。"""
+def retry_failed_automatic_tasks() -> tuple[bool, str]:
+    """手动 /retry：直接重试全部失败任务（重置计数立即再试一轮，顺序无关）。
+
+    返回 ``(ok, message)``，与 HTTP 层 (server/hub/server.py) 的解包顺序一致。
+    """
     automation = settings.CONFIG.get("automation", {})
     if not isinstance(automation, dict) or automation.get("enabled", True) is not True:
-        return "自动任务已停用。", False
+        return False, "自动任务已停用。"
     lock = _automation_lock()
     if lock is None:
-        return "另一个自动任务正在运行，请稍后重试。", False
+        return False, "另一个自动任务正在运行，请稍后重试。"
     try:
         state = _load_automation_state()
         now = datetime.datetime.now()
@@ -327,7 +320,7 @@ def retry_failed_automatic_tasks() -> tuple[str, bool]:
             and _task_record(state, task).get("status") in _FAILED_STATUSES
         ]
         if not failed:
-            return "当前没有失败的自动任务可重试。", True
+            return True, "当前没有失败的自动任务可重试。"
         for task in failed:
             _task_record(state, task).update(
                 status="pending", error="", attempts=0, next_retry_at=_now_text(now)
@@ -341,14 +334,14 @@ def retry_failed_automatic_tasks() -> tuple[str, bool]:
             and _task_record(state, task).get("status") in _FAILED_STATUSES
         ]
         if not remaining:
-            return "全部失败自动任务重试成功。", True
+            return True, "全部失败自动任务重试成功。"
         labels = "、".join(AUTOMATION_TASK_LABELS[task] for task in remaining)
-        return f"以下自动任务仍失败：{labels}", False
+        return False, f"以下自动任务仍失败：{labels}"
     except Exception as error:
         logger.error(
             "automation_retry_failed error_type=%s", error.__class__.__name__
         )
-        return f"重试失败: {error}", False
+        return False, f"重试失败: {error}"
     finally:
         state = _load_automation_state()
         state["last_retry_completed_at"] = _now_text(datetime.datetime.now())

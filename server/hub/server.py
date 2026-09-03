@@ -56,6 +56,23 @@ def _auth_ok(handler) -> bool:
     return ok
 
 
+def _query_version(query) -> int | None:
+    """解析 longpoll/pull 的 version 参数；无法解析时返回 None。"""
+    try:
+        return int((query.get("version") or ["0"])[0])
+    except ValueError:
+        return None
+
+
+def _authed(method):
+    """装饰器：被装饰的 handler 先做 Bearer 鉴权，默认统一返回 401。"""
+    def wrapper(self, *args, **kwargs):
+        if not _auth_ok(self):
+            return self._send_json(401, {"error": "unauthorized"})
+        return method(self, *args, **kwargs)
+    return wrapper
+
+
 _LOCKOUT_THRESHOLD = 5
 
 
@@ -137,9 +154,8 @@ class SyncHandler(BaseHTTPRequestHandler):
 
     # ---------- 同步 ----------
 
+    @_authed
     def _push(self):
-        if not _auth_ok(self):
-            return self._send_json(401, {"error": "unauthorized"})
         body = _read_json(self)
         if body is None or not isinstance(body.get("entries"), list):
             return self._send_json(400, {"error": "bad request"})
@@ -166,12 +182,10 @@ class SyncHandler(BaseHTTPRequestHandler):
             },
         )
 
+    @_authed
     def _pull(self, query):
-        if not _auth_ok(self):
-            return self._send_json(401, {"error": "unauthorized"})
-        try:
-            after_version = int((query.get("version") or ["0"])[0])
-        except ValueError:
+        after_version = _query_version(query)
+        if after_version is None:
             return self._send_json(400, {"error": "bad version"})
         delta = self.server.store.pull(after_version)
         logger.info(
@@ -184,12 +198,10 @@ class SyncHandler(BaseHTTPRequestHandler):
         )
         self._send_json(200, delta)
 
+    @_authed
     def _longpoll(self, query):
-        if not _auth_ok(self):
-            return self._send_json(401, {"error": "unauthorized"})
-        try:
-            after_version = int((query.get("version") or ["0"])[0])
-        except ValueError:
+        after_version = _query_version(query)
+        if after_version is None:
             return self._send_json(400, {"error": "bad version"})
         delta = self.server.store.wait_for_change(after_version, timeout=25.0)
         changed = bool(delta["entries"] or delta["tombstones"])
@@ -206,9 +218,8 @@ class SyncHandler(BaseHTTPRequestHandler):
 
     # ---------- 删除 ----------
 
+    @_authed
     def _delete(self):
-        if not _auth_ok(self):
-            return self._send_json(401, {"error": "unauthorized"})
         body = _read_json(self)
         if body is None:
             return self._send_json(400, {"error": "bad request"})
@@ -241,9 +252,8 @@ class SyncHandler(BaseHTTPRequestHandler):
 
     # ---------- 状态 ----------
 
+    @_authed
     def _status(self):
-        if not _auth_ok(self):
-            return self._send_json(401, {"error": "unauthorized"})
         snapshot = self.server.store.snapshot()
         logger.info(
             "status_request device=%s entries=%d tombstones=%d",
@@ -266,17 +276,15 @@ class SyncHandler(BaseHTTPRequestHandler):
 
     # ---------- 服务端 AI 管理 ----------
 
+    @_authed
     def _admin_retry(self):
-        if not _auth_ok(self):
-            return self._send_json(401, {"error": "unauthorized"})
         if self.server.admin_retry is None:
             return self._send_json(501, {"error": "AI 未接入"})
         ok, message = self.server.admin_retry()
         self._send_json(200, {"ok": ok, "message": message})
 
+    @_authed
     def _admin_model(self):
-        if not _auth_ok(self):
-            return self._send_json(401, {"error": "unauthorized"})
         if self.server.admin_set_model is None:
             return self._send_json(501, {"error": "AI 未接入"})
         body = _read_json(self)
@@ -287,18 +295,16 @@ class SyncHandler(BaseHTTPRequestHandler):
 
     # ---------- 报告 ----------
 
+    @_authed
     def _reports_list(self, query):
-        if not _auth_ok(self):
-            return self._send_json(401, {"error": "unauthorized"})
         kind = query.get("kind") or [""]
         kind_value = kind[0] if kind else ""
         files = self.server.list_reports(kind_value)
         logger.info("reports_list device=%s kind=%s count=%d", _device_id(self), kind_value, len(files))
         self._send_json(200, {"reports": files})
 
+    @_authed
     def _report_file(self, path):
-        if not _auth_ok(self):
-            return self._send_json(401, {"error": "unauthorized"})
         rel = path[len("/api/reports/"):].strip("/")
         content = self.server.read_report(rel)
         if content is None:

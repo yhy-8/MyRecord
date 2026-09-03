@@ -4,50 +4,26 @@
 `<!-- myrecord-id:<id> -->` 标记，删除位置写 tombstone 占位（不含正文）。
 `<summary>` 区域由服务端独占写。本地写入永不因同步失败回滚；对账（apply_delta）
 只做补齐与 tombstone 移除，不把已删条目推回。
+
+日记格式（标记常量、渲染函数、<summary> 区域）由 server/hub/render.py 单一维护，
+本模块直接复用（客户端与服务端不再严格分离，项目整体拷贝部署）。
 """
 
-import datetime
-import os
 import re
+
+from common.atomic_write import atomic_write
+from server.hub import render
 
 from . import config
 from .file_lock import file_lock
 
-ENTRY_MARKER_PREFIX = "<!-- myrecord-id:"
-DEVICE_MARKER_PREFIX = "<!-- myrecord-device:"
-TOMBSTONE_MARKER_PREFIX = "<!-- myrecord-tombstone-id:"
-
-_DEFAULT_SUMMARY = "暂无今日总结。"
-
-
-# ---------- 渲染格式 ----------
-
-
-def entry_block(entry: dict) -> str:
-    tag = (entry.get("tag") or "").strip()
-    dev = (entry.get("device_id") or "").strip()
-    hhmm = datetime.datetime.fromtimestamp(int(entry.get("ts", 0))).strftime("%H:%M")
-    entry_id = entry["entry_id"]
-    if tag:
-        header = f"**{hhmm} {tag}:** {entry.get('text', '')}"
-    elif dev:
-        header = f"**{hhmm} [{dev}]:** {entry.get('text', '')}"
-    else:
-        header = f"**{hhmm}:** {entry.get('text', '')}"
-    line = f"{ENTRY_MARKER_PREFIX}{entry_id} -->\n"
-    if dev:
-        line += f"{DEVICE_MARKER_PREFIX}{dev} -->\n"
-    return line + header + "\n"
-
-
-def tombstone_block(entry_id: str) -> str:
-    """只写一行 tombstone 占位（不含正文）。"""
-    return f"{TOMBSTONE_MARKER_PREFIX}{entry_id} -->\n"
-
-
-def day_header(date: str, summary: str = "") -> str:
-    text = summary.strip() or _DEFAULT_SUMMARY
-    return f"# {date}\n\n<summary>\n{text}\n</summary>\n\n---\n## 原始记录流\n\n"
+# 日记格式唯一来源：server/hub/render.py
+ENTRY_MARKER_PREFIX = render.ENTRY_MARKER_PREFIX
+DEVICE_MARKER_PREFIX = render.DEVICE_MARKER_PREFIX
+TOMBSTONE_MARKER_PREFIX = render.TOMBSTONE_MARKER_PREFIX
+entry_block = render.entry_block
+tombstone_block = render.tombstone_block
+day_header = render.day_header
 
 
 # ---------- 本地写入与对账 ----------
@@ -130,6 +106,4 @@ def _apply_tombstone(entry_id: str) -> None:
             + tombstone_block(entry_id)
             + content[match.end():]
         )
-        tmp = path.with_name(path.name + ".apply.tmp")
-        tmp.write_text(rebuilt, encoding="utf-8")
-        os.replace(tmp, path)
+        atomic_write(path, rebuilt)

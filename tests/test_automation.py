@@ -261,7 +261,7 @@ class RunAndRetryTests(AutomationBase):
         with patch.object(
             automation, "_run_generation", return_value=("总结成功", True)
         ) as generate:
-            message, ok = automation.retry_failed_automatic_tasks()
+            ok, message = automation.retry_failed_automatic_tasks()
         self.assertTrue(ok)
         self.assertIn("重试成功", message)
         generate.assert_called_once()
@@ -270,7 +270,7 @@ class RunAndRetryTests(AutomationBase):
         self.assertEqual([], automation.failed_automatic_tasks())
 
     def test_retry_returns_no_failed_when_nothing_to_retry(self):
-        message, ok = automation.retry_failed_automatic_tasks()
+        ok, message = automation.retry_failed_automatic_tasks()
         self.assertTrue(ok)
         self.assertIn("没有失败", message)
 

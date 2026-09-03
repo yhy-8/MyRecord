@@ -21,19 +21,6 @@ def _store(data_dir: Path) -> tuple[Store, Path]:
     return store, data_dir
 
 
-def _admin_retry_result(retry_callable) -> tuple[bool, str]:
-    """归一化重试结果：retry_callable 返回 (message, ok)，统一为 (ok, message)。
-
-    服务端 http.hub 的 _admin_retry 按 (ok, message) 解包，因此这里必须把
-    automation.retry_failed_automatic_tasks() 的 (message, ok) 顺序交换过来。
-    """
-    try:
-        message, ok = retry_callable()
-        return ok, message
-    except Exception as error:
-        return False, f"重试失败: {error}"
-
-
 def _command_run(args: argparse.Namespace) -> int:
     cfg = config.load()
     server_cfg = cfg["server"]
@@ -95,7 +82,7 @@ def _command_run(args: argparse.Namespace) -> int:
             last_render_version = current
 
     def admin_retry():
-        return _admin_retry_result(ai_analysis.retry_failed_automatic_tasks)
+        return ai_analysis.retry_failed_automatic_tasks()
 
     def admin_set_model(name):
         from .ai import settings as ai_settings
@@ -162,7 +149,7 @@ def _command_run(args: argparse.Namespace) -> int:
     return 0
 
 
-_CRED_LABEL = "sync"  # 唯一链接凭证的内部标签（单一凭证模型，无多设备）
+_CREDENTIAL_DEVICE_LABEL = "sync"  # 唯一链接凭证的内部设备标签（单一凭证模型，无多设备）
 
 
 def _confirm_overwrite_credential() -> bool:
@@ -200,7 +187,7 @@ def _command_token(args: argparse.Namespace) -> int:
             print("已取消。", file=sys.stderr)
             return 1
         token = auth.new_token()
-        store.register_device(_CRED_LABEL, token)  # 覆盖并删除旧 token
+        store.register_device(_CREDENTIAL_DEVICE_LABEL, token)  # 覆盖并删除旧 token
         print("链接凭证已签发。令牌只显示一次，请妥善保存（服务端只存哈希）。")
         print(f"token: {token}")
         return 0

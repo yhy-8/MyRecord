@@ -7,11 +7,11 @@
 import datetime
 import json
 import logging
-import os
 import re
 import threading
-import uuid
 from pathlib import Path
+
+from common.atomic_write import atomic_write
 
 from . import auth
 
@@ -52,21 +52,7 @@ class Store:
         return value
 
     def _write(self, data: dict) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = self.path.with_name(
-            self.path.name + f".{uuid.uuid4().hex}.tmp"
-        )
-        try:
-            tmp_path.write_text(
-                json.dumps(data, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-            os.replace(tmp_path, self.path)
-        finally:
-            try:
-                tmp_path.unlink(missing_ok=True)
-            except OSError:
-                pass
+        atomic_write(self.path, json.dumps(data, ensure_ascii=False, indent=2))
 
     def _save(self) -> None:
         self._write(self.data)
@@ -274,7 +260,7 @@ class Store:
                     tombs_by_date.get(date, []),
                     summary=_existing_summary(target),
                 )
-                self._atomic_write(target, text)
+                atomic_write(target, text)
         finally:
             if lock is not None:
                 lock.release()
@@ -285,20 +271,7 @@ class Store:
                     trash_entries, key=lambda e: (e["ts"], e["entry_id"])
                 )
             )
-            self._atomic_write(trash_dir / f"{date}.md", blocks)
-
-    @staticmethod
-    def _atomic_write(target: Path, text: str) -> None:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        tmp = target.with_name(target.name + f".{uuid.uuid4().hex}.tmp")
-        try:
-            tmp.write_text(text, encoding="utf-8")
-            os.replace(tmp, target)
-        finally:
-            try:
-                tmp.unlink(missing_ok=True)
-            except OSError:
-                pass
+            atomic_write(trash_dir / f"{date}.md", blocks)
 
     def snapshot(self) -> dict:
         with self._lock:

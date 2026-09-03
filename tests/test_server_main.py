@@ -15,46 +15,6 @@ from server import main as server_main
 from server.hub.store import Store
 
 
-class ServerMainAdminRetryGlueTests(unittest.TestCase):
-    """回归：automation.retry_failed_automatic_tasks 返回 (message, ok)，
-    但 HTTP 层按 (ok, message) 解包。_admin_retry_result 必须把顺序归一为 (ok, message)。"""
-
-    def test_normalizes_message_first_to_ok_first(self):
-        # automation 真实契约是 (message, ok)
-        def retry_callable():
-            return "全部失败自动任务重试成功。", True
-
-        ok, message = server_main._admin_retry_result(retry_callable)
-        self.assertIs(ok, True)
-        self.assertEqual(message, "全部失败自动任务重试成功。")
-
-    def test_failure_stays_message_first(self):
-        def retry_callable():
-            return "以下自动任务仍失败：自动周报", False
-
-        ok, message = server_main._admin_retry_result(retry_callable)
-        self.assertIs(ok, False)
-        self.assertEqual(message, "以下自动任务仍失败：自动周报")
-
-    def test_exception_returns_ok_false_and_error_message(self):
-        def retry_callable():
-            raise RuntimeError("boom")
-
-        ok, message = server_main._admin_retry_result(retry_callable)
-        self.assertIs(ok, False)
-        self.assertIn("boom", message)
-
-    def test_admin_retry_endpoint_shape_via_real_automation(self):
-        # 端到端契约：自动化失败时 /admin/retry 的 JSON 应含 ok=False 与真实文案。
-        # 直接调用真实 automation 函数会写 data 状态文件，这里改用一个等价的
-        # (message, ok) 契约的 stub，验证 main.py 的胶水不被绕过。
-        ok, message = server_main._admin_retry_result(
-            lambda: ("以下自动任务仍失败：自动月报", False)
-        )
-        self.assertIs(ok, False)
-        self.assertEqual(message, "以下自动任务仍失败：自动月报")
-
-
 def _data_dir_config(data_dir: Path) -> dict:
     """与真实 server.config.load 一致：包含由 data_dir 推导出的缺省 TLS 路径。"""
     return {

@@ -13,13 +13,11 @@ entry_id 是**内容派生、设备无关**的确定性编号：
 
 import hashlib
 import json
-import os
 import socket
 import sys
-import uuid
 from pathlib import Path
 
-from .file_lock import file_lock
+from common.atomic_write import atomic_write
 
 
 def credentials_path() -> Path:
@@ -61,17 +59,7 @@ def load() -> dict:
 
 
 def save(token: str) -> None:
-    path = credentials_path()
-    payload = {"token": token}
-    tmp = path.with_name(path.name + f".{uuid.uuid4().hex}.tmp")
-    try:
-        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.replace(tmp, path)
-    finally:
-        try:
-            tmp.unlink(missing_ok=True)
-        except OSError:
-            pass
+    atomic_write(credentials_path(), json.dumps({"token": token}, ensure_ascii=False, indent=2))
 
 
 def require() -> dict:
