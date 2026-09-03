@@ -1,9 +1,9 @@
 # MyRecord 客户端（薄端）
 
 本地优先的记录客户端：写当天日记、同步到服务端中枢、查看与常用命令。
-**不保存模型密钥、不做本地 AI**；鉴权凭据由服务端签发。本项目为**单仓整体部署**：
-客户端与服务端不再严格分离，共用 `common/` 与 `server/hub/render.py`；以 `python -m client`
-启动即为客户端，以 `python -m server.main run` 启动即为服务端。
+**不保存模型密钥、不做本地 AI**；鉴权凭据由服务端签发。本项目**客户端独立部署**：客户端与服务端
+严格分离，各自内置一份原子写入 `atomic_write.py` 与日记格式 `render.py`，互不导入、不共用 `common/`；
+以 `python -m client` 启动即为客户端，以 `python -m server.main run` 启动即为服务端。
 
 ## 交互入口
 
@@ -68,6 +68,8 @@ cp config.example.yaml config.yaml
 | `__main__.py` | 程序入口：`python -m client` → `run_interactive()` |
 | `config.py` / `config.example.yaml` | 读取本地配置（服务器地址、数据目录、长轮询秒数）。`config.example.yaml` 是提交的模板；运行时读取 `config.yaml`（已 gitignore），由用户复制模板并填服务器地址 |
 | `identity.py` | 链接凭证与设备身份：读写 `credentials.json`（单一共享 token）；`device_name()` 直接用本机名（电脑名/手机名，不允许自定义）；`make_entry_id(date,ts,text)` 生成设备无关的确定性 entry_id |
+| `atomic_write.py` | 原子文件写入（客户端自带小工具，与服务端各自独立） |
+| `render.py` | 日记文件格式本地渲染（标记/entry/tombstone/day_header；客户端自带，与服务端 hub/render.py 同款互不引用） |
 | `journal.py` | 本地日记渲染与写入：按天 `Records/YYYY-MM-DD.md` 原子追加、对账补齐、tombstone 移除 |
 | `file_lock.py` | 跨进程互斥（`.journal.lock` 等），保证原子写 |
 | `sync.py` | 与中枢的同步客户端：`push_new`（写后即 push）、`send_pending`（冲刷离线队列）、`pull`（拉取对账）、`longpoll`（长连接扇出）、`full_sync`（启动/手动完整同步）、`sync_reports`（同步报告）、`delete_latest`、`status/admin_retry/admin_set_model` |

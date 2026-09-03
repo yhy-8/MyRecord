@@ -1,8 +1,9 @@
 # MyRecord 服务端（中枢 + 云端 AI）
 
 数据中枢与云端 AI：设备鉴权、条目合并/对账/扇出、垃圾桶、自动任务（日总结、自然周报、
-自然月报）。模型密钥只存这里。日志不保存私密原文。本项目为**单仓整体部署**：客户端与
-服务端不再严格分离；以 `python -m server.main run` 启动即为服务端。
+自然月报）。模型密钥只存这里。日志不保存私密原文。本项目**服务端独立部署**：客户端与服务端
+严格分离，各自内置一份原子写入 `atomic_write.py` 与日记格式 `render.py`，互不导入、不共用 `common/`；
+以 `python -m server.main run` 启动即为服务端。
 
 ## 安装与启动
 
@@ -57,6 +58,7 @@ python -m server.main deploy            一键安装并启动 systemd 服务（�
 | `hub/server.py` | HTTP 同步服务（stdlib ThreadingHTTPServer）：`/api/sync/push`、`/api/sync/pull`、`/api/sync/longpoll`、`/api/entries/delete`、`/api/status`、`/api/reports`、`/api/admin/*`；Bearer + device_id 鉴权 |
 | `hub/store.py` | 权威条目存储：append-only 合并（按 entry_id 去重）、tombstone、垃圾桶、设备令牌、全局 `version` 同步游标、`wait_for_change`（长轮询等待）、拉取 `pull(version)` |
 | `hub/auth.py` | 链接凭证令牌哈希（scrypt，加盐、常量时间），只存哈希，不落明文 |
+| `hub/atomic_write.py` | 原子文件写入（服务端自带小工具，与客户端各自独立） |
 | `hub/render.py` | 日记文件格式（服务端权威；客户端独立镜像同款格式，由测试锁齐）：渲染 entry 标记、tombstone 占位、`<summary>` 区域，并反向解析文件为条目列表（兼容新旧 entry 标记） |
 
 ### 云端 AI（ai/）

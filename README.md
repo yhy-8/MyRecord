@@ -13,9 +13,6 @@ MyRecord 是一个**本地优先、多设备云端同步**的个人记录与周�
 ## 目录结构
 
 ```text
-common/                  客户端与服务端共用的工具（项目整体拷贝部署）
-  atomic_write.py        原文件原子写入（客户端/服务端共用，替换分散的 tmp+replace 重复）
-
 server/                  服务端中枢 + 云端 AI（以 `python -m server.main run` 启动）
   main.py                服务端 CLI（run / token / import / render / cert / deploy）
   config.example.yaml    服务端配置模板（复制为 config.yaml 并填入模型 api_key；真正的 config.yaml 已 gitignore）
@@ -30,17 +27,20 @@ server/                  服务端中枢 + 云端 AI（以 `python -m server.mai
     AnalysisReports/     报告目录
       .automation-state.json   自动任务状态
     Log/                 服务端日志
-  hub/                   同步协议、存储、鉴权、日记格式(render，单一来源)
+  hub/                   同步协议、存储、鉴权、日记格式(render)
+    atomic_write.py      原子文件写入（服务端自带小工具，与客户端各自独立）
   ai/                    云端 AI：agents / analysis(context,orchestrator,automation)
 
-client/                  客户端薄端（以 `python -m client` 启动）
+client/                  客户端薄端（以 `python -m client` 启动，独立部署）
   __main__.py            客户端入口（python -m client）
   config.example.yaml    客户端配置模板（复制为 config.yaml 并填入服务器地址等；真正的 config.yaml 已 gitignore）
   config.py              客户端配置读取
   identity.py            设备身份：credentials.json（凭据）、entry_id 生成
-  outbox.json            离线待推送队列
-  journal.py             本地日记写入与对账（渲染格式复用 server/hub/render.py）
+  atomic_write.py        原子文件写入（客户端自带小工具，与服务端各自独立）
+  render.py              日记格式本地渲染（客户端自带；与服务端 hub/render.py 同款、互不引用）
+  journal.py             本地日记写入与对账（渲染用客户端本地 render.py）
   file_lock.py           跨进程排他锁（原子写保护）
+  outbox.json            离线待推送队列
   sync.py                同步：写后即时 push / 离线队列 / full_sync / 长轮询扇出 / 报告同步
   cli.py                交互界面：命令路由/查看/清屏/日期解析、后台持续同步线程
   terminal.py           跨平台终端输入：逐字符、Unicode 感知整字符退格（Windows + POSIX）
@@ -49,9 +49,10 @@ Docs/                    设计与深度说明文档（仓库级）
 tests/                   测试（仓库级：server hub / client sync / ai analysis …）
 ```
 
-> `client/` 与 `server/` **不再严格分离**：整个项目一并拷贝/部署，二者共用 `common/`（原子写入）与
-> `server/hub/render.py`（日记格式单一来源）。以启动命令决定它作为客户端还是服务端运行
-> （`python -m server.main run` / `python -m client`）。仓库根目录只保留联合开发/测试/文档脚手架。
+> `client/` 与 `server/` **严格分离、各自独立部署**：二者只有极少代码重合（原子写入 `atomic_write`、
+> 日记文件格式 `render`），直接各自内置一份本地小工具，不做跨模块导入、不共用 `common/`。以启动命令
+> 决定它作为客户端还是服务端运行（`python -m server.main run` / `python -m client`）。仓库根目录只
+> 保留联合开发/测试/文档脚手架。
 
 ## 启动
 

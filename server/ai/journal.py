@@ -9,7 +9,7 @@
 import hashlib
 import re
 
-from common.atomic_write import atomic_write
+from ..hub.atomic_write import atomic_write
 
 from ..hub import render  # 日记格式权威：标记/day_header/extract_summary/DEFAULT_SUMMARY
 from . import settings

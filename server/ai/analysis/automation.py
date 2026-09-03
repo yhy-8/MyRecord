@@ -18,7 +18,7 @@ import json
 import logging
 from pathlib import Path
 
-from common.atomic_write import atomic_write
+from ...hub.atomic_write import atomic_write
 
 from .. import journal, settings
 from ..file_lock import FileLock

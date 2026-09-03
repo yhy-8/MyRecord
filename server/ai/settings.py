@@ -12,7 +12,7 @@ from urllib.parse import urlsplit
 
 import yaml
 
-from common.atomic_write import atomic_write
+from ..hub.atomic_write import atomic_write
 
 
 ModelDict = dict[str, Any]

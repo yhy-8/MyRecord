@@ -27,7 +27,7 @@ from ..ai_client import (
     call_ai,
 )
 from ..file_lock import FileLock
-from common.atomic_write import atomic_write
+from ...hub.atomic_write import atomic_write
 from .context import (
     _analysis_report_path,
     _existing_logs,

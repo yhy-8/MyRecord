@@ -11,7 +11,7 @@ import re
 import threading
 from pathlib import Path
 
-from common.atomic_write import atomic_write
+from .atomic_write import atomic_write
 
 from . import auth
 

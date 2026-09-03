@@ -11,7 +11,7 @@ import warnings
 import requests
 import urllib3
 
-from common.atomic_write import atomic_write
+from .atomic_write import atomic_write
 
 from . import config, identity, journal
 from .file_lock import file_lock

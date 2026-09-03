@@ -5,19 +5,17 @@
 `<summary>` 区域由服务端独占写。本地写入永不因同步失败回滚；对账（apply_delta）
 只做补齐与 tombstone 移除，不把已删条目推回。
 
-日记格式（标记常量、渲染函数、<summary> 区域）由 server/hub/render.py 单一维护，
-本模块直接复用（客户端与服务端不再严格分离，项目整体拷贝部署）。
+日记格式（标记常量、渲染函数、<summary> 区域）由客户端本地的 render 模块维护，
+与 server/hub/render.py 独立、互不引用（客户端与服务端严格分离、各自独立部署）。
 """
 
 import re
 
-from common.atomic_write import atomic_write
-from server.hub import render
-
-from . import config
+from . import config, render
+from .atomic_write import atomic_write
 from .file_lock import file_lock
 
-# 日记格式唯一来源：server/hub/render.py
+# 日记格式：客户端本地 render.py
 ENTRY_MARKER_PREFIX = render.ENTRY_MARKER_PREFIX
 DEVICE_MARKER_PREFIX = render.DEVICE_MARKER_PREFIX
 TOMBSTONE_MARKER_PREFIX = render.TOMBSTONE_MARKER_PREFIX
