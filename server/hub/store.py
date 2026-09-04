@@ -144,7 +144,9 @@ class Store:
                 self.data["entries"][entry_id] = {
                     "entry_id": entry_id,
                     "device_id": device_id,
-                    "date": str(entry.get("date") or derive_date(int(entry.get("ts", 0)))),
+                    # date 用于拼接文件名（<date>.md），必须规范为 YYYY-MM-DD，
+                    # 否则含 ../ 等字符的 date 会让渲染写出数据目录之外。
+                    "date": _normalized_date(entry.get("date"), int(entry.get("ts", 0))),
                     "ts": int(entry.get("ts", 0)),
                     "tag": entry.get("tag", ""),
                     "text": entry.get("text", ""),
@@ -265,8 +267,9 @@ class Store:
             if lock is not None:
                 lock.release()
         for date, trash_entries in trash_by_date.items():
+            # 垃圾桶也按逐块 + 空行渲染，避免已删正文连成一行。
             blocks = "".join(
-                render_mod.entry_block(e)
+                render_mod.entry_block(e) + "\n"
                 for e in sorted(
                     trash_entries, key=lambda e: (e["ts"], e["entry_id"])
                 )
@@ -299,6 +302,20 @@ def _existing_summary(path: Path) -> str:
         return ""
     match = _SUMMARY_RE.search(content)
     return match.group(1).strip() if match else ""
+
+
+def _normalized_date(value: object, ts: int) -> str:
+    """把 entry 的 date 规范为合法的 YYYY-MM-DD；非法时回退到由 ts 推导。
+
+    date 后续会被拼进文件名（<date>.md），禁止任何含路径分隔符/.. 的非日期值，
+    否则渲染时会把文件写出数据目录之外（路径穿越）。
+    """
+    if isinstance(value, str):
+        try:
+            return datetime.date.fromisoformat(value).isoformat()
+        except ValueError:
+            pass
+    return derive_date(ts)
 
 
 def derive_date(ts: int) -> str:

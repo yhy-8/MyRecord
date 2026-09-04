@@ -6,6 +6,7 @@
 """
 
 import json
+import logging
 import warnings
 
 import requests
@@ -15,6 +16,9 @@ from .atomic_write import atomic_write
 
 from . import config, identity, journal
 from .file_lock import file_lock
+
+
+logger = logging.getLogger(__name__)
 
 
 class SyncError(RuntimeError):
@@ -286,8 +290,13 @@ class SyncClient:
             return
         base = config.load()["client"]["analysis_dir"]
         base.mkdir(parents=True, exist_ok=True)
+        base_resolved = base.resolve()
         for rel in remote:
-            target = base / rel
+            target = (base / rel).resolve()
+            # 兜底：即使服务端返回带 ../ 的恶意相对路径，也绝不写到 analysis_dir 之外。
+            if not target.is_relative_to(base_resolved):
+                logger.warning("report_path_escapes_analysis_dir rel=%s", rel)
+                continue
             target.parent.mkdir(parents=True, exist_ok=True)
             content = self._report_content(rel)
             if content is None:

@@ -12,6 +12,7 @@ from urllib.parse import urlsplit
 
 import yaml
 
+from .. import config as server_config
 from ..hub.atomic_write import atomic_write
 
 
@@ -63,17 +64,24 @@ CONFIG = _load_config()
 CONFIG_DIR = _get_config_path().parent
 
 
-def _configured_path(key: str, default: str) -> Path:
+def _configured_path(key: str, default: str | Path) -> Path:
     value = CONFIG.get(key, default)
+    if isinstance(value, Path):
+        # 默认值已是绝对路径（见下方 _SERVER_DATA_DIR 推导），直接使用。
+        return value
     if not isinstance(value, str) or not value.strip():
         raise RuntimeError(f"config.yaml 中 {key} 必须是非空路径字符串")
     path = Path(value)
     return path if path.is_absolute() else CONFIG_DIR / path
 
 
-DIARY_DIR = _configured_path("diary_dir", "./Records")
-ANALYSIS_DIR = _configured_path("analysis_dir", "./AnalysisReports")
-LOG_DIR = _configured_path("log_dir", "./Log")
+# AI 数据空间默认与 server.config 的 data_dir 同根：diary/报告/日志都放在 data/ 下，
+# 与同步所用的 state.json/Records/Trash/tls 一致，避免「数据空间」分裂成多处。
+_SERVER_DATA_DIR = server_config.load()["server"]["data_dir"]
+
+DIARY_DIR = _configured_path("diary_dir", _SERVER_DATA_DIR / "Records")
+ANALYSIS_DIR = _configured_path("analysis_dir", _SERVER_DATA_DIR / "AnalysisReports")
+LOG_DIR = _configured_path("log_dir", _SERVER_DATA_DIR / "Log")
 if DIARY_DIR.resolve() == ANALYSIS_DIR.resolve():
     raise RuntimeError("config.yaml 中 diary_dir 与 analysis_dir 不能相同")
 DIARY_DIR.mkdir(parents=True, exist_ok=True)

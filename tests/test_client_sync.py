@@ -422,6 +422,37 @@ class ReportSyncTest(ClientSyncE2ETestBase):
             self._stop(pat)
 
 
+class ReportPathTraversalGuardTest(unittest.TestCase):
+    """客户端 sync_reports 必须拒绝写逃逸出 analysis_dir 的恶意相对路径（路径穿越兜底）。"""
+
+    def test_sync_reports_ignores_escaping_rel_but_writes_valid_rel(self):
+        root = _tmp_dir("cli-trav-")
+        base = root / "AnalysisReports"
+        outside = root / "outside_evil.md"
+        base.mkdir(parents=True, exist_ok=True)
+        cfg = {
+            "client": {
+                "records_dir": root / "Records",
+                "analysis_dir": base,
+                "server_url": "http://127.0.0.1:1",
+                "longpoll_timeout_seconds": 25,
+            }
+        }
+        with patch.object(client_config, "load", return_value=cfg):
+            client = SyncClient(server_url="http://127.0.0.1:1")
+            client._request = lambda *a, **k: {
+                "reports": ["../outside_evil.md", "Weekly/ok.md"]
+            }
+            client._report_content = lambda rel: "# 内容\n"
+            client.sync_reports()
+        # 恶意相对路径不得写到 analysis_dir 之外
+        self.assertFalse(outside.exists())
+        # 合法相对路径仍正常写入
+        ok = base / "Weekly" / "ok.md"
+        self.assertTrue(ok.exists())
+        self.assertIn("内容", ok.read_text(encoding="utf-8"))
+
+
 class VerifyWarningSuppressionTest(unittest.TestCase):
     """verify 留空（跳过校验）时抑制 urllib3 的 InsecureRequestWarning，避免污染交互终端。"""
 
@@ -438,6 +469,55 @@ class VerifyWarningSuppressionTest(unittest.TestCase):
                 client = SyncClient(server_url="https://localhost:8765")
                 self.assertEqual("/path/ca.crt", client._verify())
         disable.assert_not_called()
+
+
+class TombstonePlaceholderSyncTest(unittest.TestCase):
+    """tombstone 占位符必须完整同步：即使客户端从未持有被删条目，也要写入占位符。"""
+
+    def test_apply_delta_writes_placeholder_when_entry_never_seen(self):
+        root = _tmp_dir("cli-tomb-")
+        records = root / "Records"
+        records.mkdir(parents=True, exist_ok=True)
+        cfg = {
+            "client": {
+                "records_dir": records,
+                "analysis_dir": root / "AnalysisReports",
+                "server_url": "http://127.0.0.1:1",
+                "longpoll_timeout_seconds": 25,
+            }
+        }
+        with patch.object(client_config, "load", return_value=cfg):
+            # 只有一条 tombstone，对应条目从未在本地出现过
+            journal.apply_delta([], [{"entry_id": "never-had", "date": "2024-06-01"}])
+        content = (records / "2024-06-01.md").read_text(encoding="utf-8")
+        self.assertIn("myrecord-tombstone-id:never-had", content)
+
+    def test_apply_delta_keeps_existing_placeholder_idempotent(self):
+        """对账重复收到同一 tombstone 不应重复写入占位符。"""
+        root = _tmp_dir("cli-tomb2-")
+        records = root / "Records"
+        records.mkdir(parents=True, exist_ok=True)
+        cfg = {"client": {"records_dir": records, "analysis_dir": root / "A", "server_url": "http://x", "longpoll_timeout_seconds": 25}}
+        with patch.object(client_config, "load", return_value=cfg):
+            for _ in range(2):
+                journal.apply_delta([], [{"entry_id": "x", "date": "2024-06-01"}])
+        content = (records / "2024-06-01.md").read_text(encoding="utf-8")
+        self.assertEqual(1, content.count("myrecord-tombstone-id:x"))
+
+    def test_apply_delta_skips_entries_with_path_traversal_date(self):
+        """date 含 `../` 的条目不得写出 Records 之外（防御性跳过）。"""
+        root = _tmp_dir("cli-esc-")
+        records = root / "Records"
+        records.mkdir(parents=True, exist_ok=True)
+        outside = root / "escape.md"
+        cfg = {"client": {"records_dir": records, "analysis_dir": root / "A", "server_url": "http://x", "longpoll_timeout_seconds": 25}}
+        with patch.object(client_config, "load", return_value=cfg):
+            journal.apply_delta(
+                [{"entry_id": "e1", "date": "../escape", "ts": 1, "tag": "", "text": "x"}],
+                [],
+            )
+        self.assertFalse(outside.exists())
+        self.assertEqual([], list(records.glob("*.md")))  # 未写入任何日期文件
 
 
 if __name__ == "__main__":

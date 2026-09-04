@@ -76,8 +76,10 @@ def render_day_file(
     blocks = [entry_block(e) for e in ordered]
     for tombstone in tombstones or []:
         blocks.append(tombstone_block(tombstone["entry_id"]))
-    body = "".join(blocks) if blocks else "（当日暂无记录）\n"
-    return day_header(date, summary) + body + "\n"
+    # 每个条目/墓碑块后跟一个空行，与客户端本地 append_record 的逐块 + "\n" 格式一致；
+    # 否则服务端渲染（或任何按整页重建）会把多条记录挤在一起、丢失换行。
+    body = "".join(block + "\n" for block in blocks) if blocks else "（当日暂无记录）\n"
+    return day_header(date, summary) + body
 
 
 # ---------- 解析 ----------

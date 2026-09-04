@@ -109,6 +109,17 @@ class RenderParserTest(unittest.TestCase):
         self.assertEqual(parsed["entries"][1]["tag"], "[引用]")
         self.assertEqual(parsed["tombstones"], ["c-1"])
 
+    def test_render_separates_entry_blocks_with_blank_lines(self):
+        """渲染出的条目/墓碑块之间必须有空行，否则多端同步后记录会连成一行。"""
+        entries = [
+            {"entry_id": "a-1", "date": "2024-01-01", "ts": 1704067200, "tag": "", "text": "hello"},
+            {"entry_id": "b-1", "date": "2024-01-01", "ts": 1704067260, "tag": "", "text": "world"},
+        ]
+        tombstones = [{"entry_id": "c-1", "date": "2024-01-01", "v": 3, "ts": 1}]
+        text = render.render_day_file("2024-01-01", entries, tombstones)
+        self.assertIn("hello\n\n", text)
+        self.assertIn("world\n\n", text)
+
     def test_parse_legacy(self):
         legacy = (
             "# 2024-01-01\n\n<summary>\n暂无今日总结。\n</summary>\n\n---\n## 原始记录流\n\n"
@@ -262,6 +273,22 @@ class StoreRenderTest(unittest.TestCase):
         accepted = store.append_entries("a", [{"text": "no-id"}])
         self.assertEqual([], accepted)
         self.assertEqual(0, store.data["version"])
+
+    def test_append_normalizes_path_traversal_date(self):
+        """date 含 `../` 会被规范为合法日期，避免渲染写出数据目录之外。"""
+        data = _tmp_data_dir() / "state.json"
+        store = Store(data)
+        store.append_entries(
+            "a",
+            [{"entry_id": "x-1", "date": "../../escape", "ts": 1704067200, "tag": "", "text": "hi"}],
+        )
+        stored_date = store.data["entries"]["x-1"]["date"]
+        self.assertNotIn("..", stored_date)
+        datetime.date.fromisoformat(stored_date)  # 必须可解析为合法日期
+
+        records = _tmp_data_dir() / "Records"
+        store.render_records(records, records.parent / "Trash")
+        self.assertFalse((records.parent / "escape.md").exists())
 
 
 class AdminEndpointTest(unittest.TestCase):

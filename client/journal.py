@@ -9,11 +9,34 @@
 与 server/hub/render.py 独立、互不引用（客户端与服务端严格分离、各自独立部署）。
 """
 
+import datetime
+import logging
 import re
 
 from . import config, render
 from .atomic_write import atomic_write
 from .file_lock import file_lock
+
+
+logger = logging.getLogger(__name__)
+
+
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _valid_iso_date(value: object) -> bool:
+    """判断一个值是否为合法的 YYYY-MM-DD 日期。
+
+    date 会拼进文件名（<date>.md），含 ../ 等字符的值会让写入逃逸出 Records 目录，
+    因此同步写入前只接受规范日期。
+    """
+    if not isinstance(value, str) or not _ISO_DATE_RE.match(value):
+        return False
+    try:
+        datetime.date.fromisoformat(value)
+        return True
+    except ValueError:
+        return False
 
 # 日记格式：客户端本地 render.py
 ENTRY_MARKER_PREFIX = render.ENTRY_MARKER_PREFIX
@@ -72,20 +95,26 @@ def apply_delta(entries: list[dict], tombstones: list[dict]) -> None:
         by_date.setdefault(entry["date"], []).append(entry)
     with file_lock(records_dir() / ".journal.lock"):
         for date, day_entries in by_date.items():
+            if not _valid_iso_date(date):
+                # date 用于拼文件名；非法日期（如含 ../）会让写入逃逸出 Records，防御性跳过。
+                logger.warning("entry_date_invalid skips date=%r", date)
+                continue
             ensure_day_file(date)
             path = day_path(date)
             content = path.read_text(encoding="utf-8")
             existing = day_entry_ids(content)
             missing = [e for e in day_entries if e["entry_id"] not in existing]
             if missing:
-                body = "".join(entry_block(e) for e in missing)
+                # 每条块后跟一个空行，与 append_record 的逐块 + "\n" 格式一致，
+                # 避免对账/扇出补写时多条记录连在一起、失去换行。
+                body = "".join(entry_block(e) + "\n" for e in missing)
                 with path.open("a", encoding="utf-8") as handle:
-                    handle.write(body + "\n")
+                    handle.write(body)
         for tombstone in tombstones:
-            _apply_tombstone(tombstone["entry_id"])
+            _apply_tombstone(tombstone["entry_id"], tombstone.get("date", ""))
 
 
-def _apply_tombstone(entry_id: str) -> None:
+def _apply_tombstone(entry_id: str, date: str = "") -> None:
     prefix = re.escape(ENTRY_MARKER_PREFIX)
     dev_prefix = re.escape(DEVICE_MARKER_PREFIX)
     pattern = re.compile(
@@ -94,7 +123,8 @@ def _apply_tombstone(entry_id: str) -> None:
         r"[^\n]*\n",
         re.MULTILINE,
     )
-    for path in records_dir().glob("*.md"):
+    # ① 本地若已有该条：替换为 tombstone 占位符（防复活，保留原位）。
+    for path in list(records_dir().glob("*.md")):
         content = path.read_text(encoding="utf-8")
         match = pattern.search(content)
         if not match:
@@ -105,3 +135,15 @@ def _apply_tombstone(entry_id: str) -> None:
             + content[match.end():]
         )
         atomic_write(path, rebuilt)
+        return
+    # ② 本地从未有过该条：也把占位符补写到对应日文件，保证删除历史完整同步。
+    if not date or not _valid_iso_date(date):
+        return
+    ensure_day_file(date)
+    target = day_path(date)
+    content = target.read_text(encoding="utf-8")
+    marker = re.escape(f"{TOMBSTONE_MARKER_PREFIX}{entry_id} -->")
+    if re.search(rf"^{marker}\s*$", content, re.MULTILINE):
+        return  # 已存在占位符，幂等
+    with target.open("a", encoding="utf-8") as handle:
+        handle.write(tombstone_block(entry_id) + "\n")
