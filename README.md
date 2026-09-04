@@ -37,7 +37,7 @@ python -m server.main run
 
 ```bash
 pip install -r client/requirements.txt
-cp client/config.example.yaml client/config.yaml   # 填 server_url，verify 指向 server.crt
+cp client/config.example.yaml client/config.yaml   # 填 server_url（verify 默认空=不校验；可选设 server.crt 切严格）
 python -m client
 ```
 

@@ -18,4 +18,4 @@ client:
   records_dir: "../Records"                     # 本地日记（渲染）
   analysis_dir: "../AnalysisReports"            # 本地报告完整副本（云端同步）
   longpoll_timeout_seconds: 25                  # 长轮询单次挂起秒数（扇出即拉取）
-  verify: ""                                    # TLS 校验收信：空=不校验（自签直连默认，抑制 InsecureRequestWarning）；设服务端自签证书/CA 路径=严格校验
+  verify: ""                                   # TLS 校验收信：留空=不校验（自签直连默认，仍加密但不验服务器身份，抑制 InsecureRequestWarning）；要严格验真只需把服务端 server.crt 拷到客户端，改为 verify: "./server.crt"
