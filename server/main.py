@@ -341,7 +341,7 @@ _BACKUP_TIMER_PATH = Path("/etc/systemd/system/myrecord-backup.timer")
 
 
 def _deploy_dir() -> Path:
-    """部署文件所在目录（server/deploy：backup.sh、restore.sh、systemd 单元与定时器模板）。"""
+    """部署文件所在目录（server/deploy：backup.sh、systemd 单元与定时器模板）。"""
     return Path(__file__).resolve().parent / "deploy"
 
 

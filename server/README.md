@@ -104,7 +104,6 @@ sudo python -m server.main deploy
 - `myrecord-server.service` — 服务端单元（`deploy` 自动生成/写入；此文件为等价参照）。
 - `myrecord-backup.service` / `myrecord-backup.timer` — 每周自动备份单元与定时器（`deploy` 自动生成/写入；此为等价参照）。
 - `backup.sh` — 备份 `data` 空间为 tar（保留最近 N 份）。
-- `restore.sh` — 从备份恢复 `data` 空间。
 
 数据空间（运行时生成）：`server/data/` — `state.json`（权威条目/设备/垃圾桶）、
 `Records/`（渲染每日日记）、`Trash/`（被删正文）、`AnalysisReports/`（报告与自动任务状态）、
