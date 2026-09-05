@@ -50,3 +50,30 @@ def tombstone_block(entry_id: str) -> str:
 def day_header(date: str, summary: str = "") -> str:
     text = summary.strip() or DEFAULT_SUMMARY
     return f"# {date}\n\n<summary>\n{text}\n</summary>\n\n---\n## 原始记录流\n\n"
+
+
+def render_day_file(
+    date: str,
+    entries: list[dict],
+    tombstones: list[dict] | None = None,
+    summary: str = "",
+) -> str:
+    """把某日的条目与 tombstone 渲染成完整文件文本（按时间排序、墓碑插回原位）。
+
+    与服务端 `server/hub/render.py` 的 render_day_file 逻辑保持一致（各自独立维护），
+    使客户端本地镜像与服务端渲染的每日文件严格一致：墓碑占位按「原条目时间」插回
+    记录流的原位置，而不是堆到末尾。
+    """
+    placed = []
+    for entry in entries:
+        placed.append((int(entry.get("ts", 0)), entry["entry_id"], entry_block(entry)))
+    for tombstone in tombstones or []:
+        # 旧 tombstone 无 entry_ts：回退到删除时间 ts（通常晚于条目），仍有确定顺序。
+        sort_ts = int(tombstone.get("entry_ts", tombstone.get("ts", 0)))
+        placed.append(
+            (sort_ts, tombstone["entry_id"], tombstone_block(tombstone["entry_id"]))
+        )
+    placed.sort(key=lambda item: (item[0], item[1]))
+    blocks = [item[2] for item in placed]
+    body = "".join(block + "\n" for block in blocks) if blocks else "（当日暂无记录）\n"
+    return day_header(date, summary) + body

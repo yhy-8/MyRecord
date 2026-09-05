@@ -133,12 +133,24 @@ class Store:
     # ---------- 条目 ----------
 
     def append_entries(self, device_id: str, entries: list[dict]) -> list[str]:
-        """按 entry_id 去重合并多个条目，返回实际新增的 entry_id 列表。"""
+        """按 entry_id 去重合并多个条目，返回实际新增的 entry_id 列表。
+
+        已删（tombstone）的条目绝不能因离线队列重推而复活：entry_id 已在墓碑里时视为
+        「已被权威处理（删除）」，不重新加入 entries——否则删除会被离线重推回滚。
+        这类条目仍上报 accepted，让客户端把它从 outbox 清掉，避免永久重试。
+        """
         with self._lock:
             added = []
+            superseded = []
             for entry in entries:
                 entry_id = entry.get("entry_id")
-                if not entry_id or entry_id in self.data["entries"]:
+                if not entry_id:
+                    continue
+                if entry_id in self.data["tombstones"]:
+                    # 已删：不复活，但视为已被权威处理（客户端可清 outbox）。
+                    superseded.append(entry_id)
+                    continue
+                if entry_id in self.data["entries"]:
                     continue
                 self.data["version"] += 1
                 self.data["entries"][entry_id] = {
@@ -156,7 +168,7 @@ class Store:
             if added:
                 self._save()
                 self._changed.notify_all()
-            return added
+            return added + superseded
 
     def tombstone(self, entry_id: str, deleted_by: str) -> bool:
         """把条目移入垃圾桶并写 tombstone，返回是否成功。"""
@@ -173,6 +185,9 @@ class Store:
                 "date": entry["date"],
                 "v": self.data["version"],
                 "ts": int(datetime.datetime.now().timestamp()),
+                # 保留原条目的时间：占位符按它插回记录流的原位置，
+                # 与服务端渲染/客户端原位替换保持严格一致（否则所有墓碑都堆到末尾）。
+                "entry_ts": int(entry.get("ts", 0)),
             }
             self._save()
             self._changed.notify_all()
@@ -192,7 +207,12 @@ class Store:
     # ---------- 对账 / 拉取 ----------
 
     def pull(self, after_version: int) -> dict:
-        """返回 version 在 (after_version, 当前] 内的条目与 tombstone。"""
+        """返回 version 在 (after_version, 当前] 内的条目与 tombstone。
+
+        条目按时间顺序（ts, entry_id）、墓碑按原条目时间（entry_ts，缺失则回退删除
+        时间 ts）排序返回，而非按入库顺序（v）——使客户端按拉取顺序追加时也能得到
+        时间有序的镜像，与其本地渲染/全量重建保持一致。
+        """
         with self._lock:
             entries = [
                 value
@@ -206,8 +226,13 @@ class Store:
             ]
             return {
                 "version": self.data["version"],
-                "entries": sorted(entries, key=lambda e: e["v"]),
-                "tombstones": sorted(tombstones, key=lambda t: t["v"]),
+                "entries": sorted(
+                    entries, key=lambda e: (int(e.get("ts", 0)), e["entry_id"])
+                ),
+                "tombstones": sorted(
+                    tombstones,
+                    key=lambda t: (int(t.get("entry_ts", t.get("ts", 0))), t["entry_id"]),
+                ),
             }
 
     def wait_for_change(self, after_version: int, timeout: float = 25.0) -> dict:

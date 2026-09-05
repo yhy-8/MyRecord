@@ -72,6 +72,34 @@ class StoreTest(unittest.TestCase):
         self.assertEqual(store.data["trash"]["a-1"]["text"], "secret")
         self.assertIn("a-1", store.data["tombstones"])
 
+    def test_tombstone_preserves_original_entry_ts(self):
+        """墓碑记录原条目时间，供渲染时按它把占位符插回记录流原位置。"""
+        data = _tmp_data_dir() / "state.json"
+        store = Store(data)
+        store.append_entries("a", [{"entry_id": "a-1", "date": "2024-01-01", "ts": 1704067230, "tag": "", "text": "x"}])
+        store.tombstone("a-1", "a")
+        tomb = store.data["tombstones"]["a-1"]
+        self.assertEqual(1704067230, tomb["entry_ts"])
+
+    def test_append_entries_does_not_resurrect_tombstoned(self):
+        """重推已删条目不得复活：append_entries 须跳过墓碑中的 entry_id，且上报 accepted。
+
+        场景：客户端离线队列重推一条已被按删除标记删掉的条目（例如推送响应丢失后重发），
+        服务端不能把它重新加入 entries，否则删除会被回滚、在服务端与各端复活。
+        """
+        data = _tmp_data_dir() / "state.json"
+        store = Store(data)
+        store.append_entries("a", [{"entry_id": "x-1", "date": "2024-01-01", "ts": 5, "tag": "", "text": "将被删"}])
+        store.tombstone("x-1", "a")
+        # 删除后重推同一 entry_id（模拟客户端 outbox 重发）
+        accepted = store.append_entries("a", [{"entry_id": "x-1", "date": "2024-01-01", "ts": 5, "tag": "", "text": "将被删"}])
+        self.assertIn("x-1", accepted)  # 视为已接受，客户端可清掉 outbox
+        self.assertNotIn("x-1", store.data["entries"])  # 不复活
+        self.assertIn("x-1", store.data["tombstones"])
+        # 新条目不受影响
+        store.append_entries("a", [{"entry_id": "y-2", "date": "2024-01-01", "ts": 6, "tag": "", "text": "新"}])
+        self.assertIn("y-2", store.data["entries"])
+
     def test_latest_entry_for_date(self):
         data = _tmp_data_dir() / "state.json"
         store = Store(data)
@@ -119,6 +147,31 @@ class RenderParserTest(unittest.TestCase):
         text = render.render_day_file("2024-01-01", entries, tombstones)
         self.assertIn("hello\n\n", text)
         self.assertIn("world\n\n", text)
+
+    def test_render_interleaves_tombstone_in_original_position(self):
+        """墓碑必须按原条目时间插回记录流原位置，而不是堆到末尾。"""
+        entries = [
+            {"entry_id": "a-1", "date": "2024-01-01", "ts": 1704067200, "tag": "", "text": "first"},
+            {"entry_id": "c-1", "date": "2024-01-01", "ts": 1704067260, "tag": "", "text": "third"},
+        ]
+        # b-1 原本位于 ts=1704067230（第二条），被删后应占其原位置
+        tombstones = [
+            {"entry_id": "b-1", "date": "2024-01-01", "v": 4, "ts": 1704068000, "entry_ts": 1704067230},
+        ]
+        text = render.render_day_file("2024-01-01", entries, tombstones)
+        first_pos = text.index("first")
+        tomb_pos = text.index("myrecord-tombstone-id:b-1")
+        third_pos = text.index("third")
+        self.assertTrue(first_pos < tomb_pos < third_pos)
+
+    def test_render_old_tombstone_without_entry_ts_falls_back_to_deletion_ts(self):
+        """旧墓碑无 entry_ts：回退到删除时间 ts（通常晚于条目），排在活跃条目之后。"""
+        entries = [
+            {"entry_id": "a-1", "date": "2024-01-01", "ts": 1704067200, "tag": "", "text": "first"},
+        ]
+        tombstones = [{"entry_id": "b-1", "date": "2024-01-01", "v": 4, "ts": 1704068000}]
+        text = render.render_day_file("2024-01-01", entries, tombstones)
+        self.assertLess(text.index("first"), text.index("myrecord-tombstone-id:b-1"))
 
     def test_parse_legacy(self):
         legacy = (

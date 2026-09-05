@@ -71,11 +71,23 @@ def render_day_file(
     tombstones: list[dict] | None = None,
     summary: str = "",
 ) -> str:
-    """把某日的条目与 tombstone 渲染成完整文件文本。"""
-    ordered = sorted(entries, key=lambda e: (int(e.get("ts", 0)), e["entry_id"]))
-    blocks = [entry_block(e) for e in ordered]
+    """把某日的条目与 tombstone 渲染成完整文件文本。
+
+    墓碑（tombstone）占位按「原条目时间」插回记录流的原位置，与客户端本地
+    apply_delta 的原位替换保持一致，而不是把所有墓碑堆到文件末尾：已删条目的
+    占位落在它原来所在的时间位置，这样客户端与服务端渲染结果才严格一致。
+    """
+    placed = []
+    for entry in entries:
+        placed.append((int(entry.get("ts", 0)), entry["entry_id"], entry_block(entry)))
     for tombstone in tombstones or []:
-        blocks.append(tombstone_block(tombstone["entry_id"]))
+        # 旧 tombstone 无 entry_ts：回退到删除时间 ts（通常晚于条目），仍有确定顺序。
+        sort_ts = int(tombstone.get("entry_ts", tombstone.get("ts", 0)))
+        placed.append(
+            (sort_ts, tombstone["entry_id"], tombstone_block(tombstone["entry_id"]))
+        )
+    placed.sort(key=lambda item: (item[0], item[1]))
+    blocks = [item[2] for item in placed]
     # 每个条目/墓碑块后跟一个空行，与客户端本地 append_record 的逐块 + "\n" 格式一致；
     # 否则服务端渲染（或任何按整页重建）会把多条记录挤在一起、丢失换行。
     body = "".join(block + "\n" for block in blocks) if blocks else "（当日暂无记录）\n"

@@ -176,6 +176,162 @@ class TombstoneAntiResurrectionTest(ClientSyncE2ETestBase):
             self._stop(pb)
 
 
+class OutboxRepushResurrectionTest(ClientSyncE2ETestBase):
+    """回归：删除后，客户端 outbox 重推已删条目不得让它在服务端复活。
+
+    场景：推送响应丢失导致条目仍留在 outbox；随后该条被删除（服务端已写入 tombstone）。
+    客户端上线重推 outbox，服务端的 append_entries 若只去重 entries，会把墓碑里的条目
+    重新加入 entries，导致删除被回滚、在各端复活。
+    """
+
+    def test_tombstoned_entry_not_resurrected_by_outbox_repush(self):
+        import json
+
+        root_a = _tmp_dir("cli-repush-a-")
+        root_b = _tmp_dir("cli-repush-b-")
+        client_a, pa = self._new_client(self.device_a, self.token_a, root_a)
+        try:
+            # A 写入一条并推到服务端
+            client_a.push_new(self._entry(self.device_a, 1, 1717200060, "将被删"))
+            self.assertEqual(len(self.store.data["entries"]), 1)
+
+            # A 在线删除当天最新一条 → 服务端 tombstone，条目从 entries 移除
+            deleted = client_a.delete_latest("2024-06-01")
+            self.assertEqual(deleted, f"{self.device_a}-1")
+            self.assertEqual(self.store.data["entries"], {})
+            self.assertEqual(len(self.store.data["tombstones"]), 1)
+
+            # 模拟另一台客户端 B：其 outbox 里仍残留这条（推送响应丢失未清）
+            client_b, pb = self._new_client(
+                self.device_b, self.token_b, root_b, server_url=self.base
+            )
+            try:
+                outbox_path = root_b / "state" / "outbox.json"
+                outbox_path.write_text(
+                    json.dumps({"entries": [self._entry(self.device_a, 1, 1717200060, "将被删")]}),
+                    encoding="utf-8",
+                )
+
+                # B 上线冲刷 outbox → 服务端不得复活该条目
+                client_b.send_pending()
+                self.assertNotIn(f"{self.device_a}-1", self.store.data["entries"])
+                self.assertEqual(len(self.store.data["tombstones"]), 1)
+                # B 的 outbox 应被清空（视为已接受，避免永久重试）
+                self.assertEqual(
+                    json.loads(outbox_path.read_text(encoding="utf-8"))["entries"], []
+                )
+            finally:
+                self._stop(pb)
+        finally:
+            self._stop(pa)
+
+
+class MultiClientConsistencyTest(ClientSyncE2ETestBase):
+    """多端同步一致性：多设备离线记录乱序重建、删除跨端展开且不复活、客户端与服务端渲染严格一致。"""
+
+    def test_multi_device_offline_recording_converges_to_time_order(self):
+        """多设备离线记录（时间乱序入库）→ 各端上线全量对账后本地镜像按时间排序。"""
+        root_a = _tmp_dir("mc-a-")
+        root_b = _tmp_dir("mc-b-")
+        # 模拟离线批量推送：A 先连（晚 time 先入），B 后连（早 time 后入）→ 服务端 v 序乱、时间序不乱
+        self.store.append_entries(self.device_a, [
+            {"entry_id": "late", "date": "2024-06-01", "ts": 1717200120, "tag": "", "text": "A-晚"},
+        ])
+        self.store.append_entries(self.device_b, [
+            {"entry_id": "early", "date": "2024-06-01", "ts": 1717200000, "tag": "", "text": "B-早"},
+        ])
+        # 各客户端依次 reconcile 到自己的本地镜像（测试基底的 config 补丁不支持多个并发客户端共享，故逐个进行）
+        ca, pa = self._new_client(self.device_a, self.token_a, root_a)
+        try:
+            ca.full_sync()
+        finally:
+            self._stop(pa)
+        cb, pb = self._new_client(self.device_b, self.token_b, root_b)
+        try:
+            cb.full_sync()
+        finally:
+            self._stop(pb)
+        ca_content = (root_a / "Records" / "2024-06-01.md").read_text(encoding="utf-8")
+        cb_content = (root_b / "Records" / "2024-06-01.md").read_text(encoding="utf-8")
+        # 时间较早的 B-早 应排在时间较晚的 A-晚 之前（即使服务端按 v 序 push、时序乱）
+        self.assertLess(ca_content.index("B-早"), ca_content.index("A-晚"))
+        self.assertLess(cb_content.index("B-早"), cb_content.index("A-晚"))
+
+    def test_client_matches_server_render_after_reconcile(self):
+        """同一份权威数据：客户端重建后的每日文件与服务端渲染严格一致（含墓碑插回原位）。"""
+        root = _tmp_dir("mc-consist-")
+        self.store.append_entries(self.device_a, [
+            {"entry_id": "x1", "date": "2024-06-01", "ts": 1717200000, "tag": "", "text": "早"},
+            {"entry_id": "x3", "date": "2024-06-01", "ts": 1717200120, "tag": "", "text": "晚"},
+        ])
+        self.store.append_entries(self.device_b, [
+            {"entry_id": "x2", "date": "2024-06-01", "ts": 1717200060, "tag": "", "text": "中"},
+        ])
+        self.store.tombstone("x2", self.device_b)  # 中间的 x2 被删 → 墓碑应插回其原位置
+        client, pat = self._new_client(self.device_a, self.token_a, root)
+        try:
+            client.full_sync()
+            client_content = (root / "Records" / "2024-06-01.md").read_text(encoding="utf-8")
+            srv_records = _tmp_dir("mc-srv-") / "Records"
+            self.store.render_records(srv_records, srv_records.parent / "Trash")
+            server_content = (srv_records / "2024-06-01.md").read_text(encoding="utf-8")
+            # 客户端镜像与服务端渲染逐字节一致：同格式、同时序、墓碑同位置
+            self.assertEqual(client_content, server_content)
+            self.assertLess(client_content.index("早"), client_content.index("myrecord-tombstone-id:x2"))
+            self.assertLess(client_content.index("myrecord-tombstone-id:x2"), client_content.index("晚"))
+        finally:
+            self._stop(pat)
+
+    def test_delete_fans_out_and_never_resurrects_across_three_devices(self):
+        """A 删除当天最新一条；B、C（离线时本地已有该条）上线都不复活，且三端与服务端一致。"""
+        roots = {d: _tmp_dir(f"mc3-{d}-") for d in ("a", "b", "c")}
+        entry = self._entry(self.device_a, 1, 1717200060, "将被删")
+
+        # A 写入并落盘、推送到服务端
+        ca, pa = self._new_client(self.device_a, self.token_a, roots["a"])
+        try:
+            journal.append_record(entry)  # 本地落盘
+            ca.push_new(entry)            # 推送到服务端
+        finally:
+            self._stop(pa)
+
+        # B、C 各自同步到本地（离线前均持有该条）
+        _devices = {"a": self.device_a, "b": self.device_b, "c": "e2e-c"}
+        for dev in ("b", "c"):
+            c, p = self._new_client(_devices[dev], self.token, roots[dev])
+            try:
+                c.full_sync()
+            finally:
+                self._stop(p)
+        for dev in ("a", "b", "c"):
+            content = (roots[dev] / "Records" / "2024-06-01.md").read_text(encoding="utf-8")
+            self.assertIn("将被删", content)
+
+        # A 在线删除当天最新一条
+        ca, pa = self._new_client(self.device_a, self.token_a, roots["a"])
+        try:
+            deleted = ca.delete_latest("2024-06-01")
+        finally:
+            self._stop(pa)
+        self.assertEqual(deleted, f"{self.device_a}-1")
+        self.assertEqual(len(self.store.data["tombstones"]), 1)
+
+        # B、C 上线拉取 → 本地移除且不复活
+        for dev in ("b", "c"):
+            c, p = self._new_client(_devices[dev], self.token, roots[dev])
+            try:
+                c.full_sync()
+            finally:
+                self._stop(p)
+
+        # 三端 + 服务端一致：已被删、无复活
+        self.assertEqual(self.store.data["entries"], {})
+        self.assertEqual(len(self.store.data["tombstones"]), 1)
+        for dev in ("a", "b", "c"):
+            content = (roots[dev] / "Records" / "2024-06-01.md").read_text(encoding="utf-8")
+            self.assertNotIn("将被删", content)
+
+
 class OfflineQueueTest(ClientSyncE2ETestBase):
     """离线时写入先落本地并进 outbox；上线后 send_pending 冲刷到服务端。"""
 
@@ -266,6 +422,27 @@ class FullSyncTest(ClientSyncE2ETestBase):
             self.assertIn("周报", target.read_text(encoding="utf-8"))
         finally:
             self._stop(pa)
+
+    def test_full_sync_rebuilds_local_file_in_time_order(self):
+        """多端离线记录后全量对账：本地镜像按时间排序重建，而非按推送顺序（v）。
+
+        回归：多端离线写入后各端批量上传，服务端按推送顺序（v）入库，条目时间反而
+        乱序；全量对账（reconcile）须把本地文件重建为与服务端渲染一致的时间有序结构。
+        """
+        root = _tmp_dir("cli-order-")
+        # 服务端先有按推送顺序（v）到达但时间乱序的条目（late 先入、early 后入）
+        self.store.append_entries("a", [
+            {"entry_id": "late", "date": "2024-06-01", "ts": 1717200120, "tag": "", "text": "晚"},
+            {"entry_id": "early", "date": "2024-06-01", "ts": 1717200000, "tag": "", "text": "早"},
+        ])
+        client, pat = self._new_client(self.device_a, self.token_a, root)
+        try:
+            client.full_sync()
+            content = (root / "Records" / "2024-06-01.md").read_text(encoding="utf-8")
+            # 早(ts=1717200000) 应排在 晚(ts=1717200120) 之前
+            self.assertLess(content.index("早"), content.index("晚"))
+        finally:
+            self._stop(pat)
 
 
 class FullSyncRecoveryTest(ClientSyncE2ETestBase):

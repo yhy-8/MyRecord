@@ -12,6 +12,7 @@
 import datetime
 import logging
 import re
+from pathlib import Path
 
 from . import config, render
 from .atomic_write import atomic_write
@@ -112,6 +113,51 @@ def apply_delta(entries: list[dict], tombstones: list[dict]) -> None:
                     handle.write(body)
         for tombstone in tombstones:
             _apply_tombstone(tombstone["entry_id"], tombstone.get("date", ""))
+
+
+_SUMMARY_RE = re.compile(r"<summary>(.*?)</summary>", re.DOTALL)
+
+
+def _existing_summary(path: Path) -> str:
+    """读取目标文件里已有的 `<summary>` 正文，供重建时保留（与服务端行为一致）。"""
+    if not path.exists():
+        return ""
+    try:
+        content = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return ""
+    match = _SUMMARY_RE.search(content)
+    return match.group(1).strip() if match else ""
+
+
+def rebuild_records(entries: list[dict], tombstones: list[dict]) -> None:
+    """从权威全量数据重建本地记录文件：按时间排序、墓碑插回原位置，并保留 summary。
+
+    用于完整对账（pull?version=0）：把本地镜像重建为与服务端渲染一致的时间有序结构，
+    修复多端离线写入导致的本地乱序（这类乱序通常来自离线批量按推送顺序而非时间顺序入库）。
+    局部增量（apply_delta）仍只追加/原位替换，不整页重排，避免每次扇出都重写整个文件。
+    """
+    by_date: dict[str, list[dict]] = {}
+    for entry in entries:
+        by_date.setdefault(entry["date"], []).append(entry)
+    tombs_by_date: dict[str, list[dict]] = {}
+    for tombstone in tombstones:
+        tombs_by_date.setdefault(tombstone.get("date", ""), []).append(tombstone)
+    with file_lock(records_dir() / ".journal.lock"):
+        for date in sorted(set(by_date) | set(tombs_by_date)):
+            if not _valid_iso_date(date):
+                # date 用于拼文件名；非法日期（如含 ../）会让写入逃逸出 Records，防御性跳过。
+                logger.warning("entry_date_invalid skips date=%r", date)
+                continue
+            ensure_day_file(date)
+            path = day_path(date)
+            text = render.render_day_file(
+                date,
+                by_date.get(date, []),
+                tombs_by_date.get(date, []),
+                summary=_existing_summary(path),
+            )
+            atomic_write(path, text)
 
 
 def _apply_tombstone(entry_id: str, date: str = "") -> None:

@@ -7,7 +7,6 @@
 
 import json
 import logging
-import warnings
 
 import requests
 import urllib3
@@ -23,10 +22,6 @@ logger = logging.getLogger(__name__)
 
 class SyncError(RuntimeError):
     """同步失败（网络/鉴权/协议）。"""
-
-
-# verify 为空（跳过 TLS 校验）时只提示一次，避免长连接循环里反复刷屏。
-_VERIFY_WARNED = False
 
 
 def _state_path():
@@ -82,21 +77,12 @@ class SyncClient:
           该警告打进 stderr，污染交互终端并在长连接循环里反复刷屏。
         - 某路径 → 交给 requests 校验该 CA/自签证书
 
-        注意：verify 为空即关闭证书校验（默认），存在中间人风险。这里给出一次性
-        显式警示，避免“不安全且静默”。
+        注意：verify 为空即关闭证书校验（默认），存在中间人风险。这里不再额外
+        打印 UserWarning（避免启动时污染交互终端），仅静默抑制 urllib3 警告；
+        是否严格校验由用户在 config.yaml 里自行权衡。
         """
         verify = config.load()["client"].get("verify")
         if not verify:
-            # 只提示一次，避免长连接循环里每次请求都刷一条告警。
-            global _VERIFY_WARNED
-            if not _VERIFY_WARNED:
-                warnings.warn(
-                    "当前未配置 client.verify，TLS 证书校验已关闭（存在中间人风险）。"
-                    "建议把服务端自签的 server.crt 拷到客户端并把它设为 verify 路径。",
-                    UserWarning,
-                    stacklevel=2,
-                )
-                _VERIFY_WARNED = True
             urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
             return False
         return verify
@@ -167,11 +153,16 @@ class SyncClient:
 
     # ---------- 对账应用 ----------
 
-    def _apply_delta(self, delta: dict) -> None:
+    def _apply_delta(self, delta: dict, full: bool = False) -> None:
         entries = delta.get("entries", []) or []
         tombstones = delta.get("tombstones", []) or []
         with file_lock(_state_path()):
-            journal.apply_delta(entries, tombstones)
+            if full:
+                # 全量对账：用权威全量数据重建本地镜像（按时间排序、墓碑插回原位），
+                # 修复多端离线写入导致的本地乱序。
+                journal.rebuild_records(entries, tombstones)
+            else:
+                journal.apply_delta(entries, tombstones)
             _save_state(int(delta.get("version", _read_state())))
 
     # ---------- push / 离线队列 ----------
@@ -219,9 +210,14 @@ class SyncClient:
         self.sync_reports()
 
     def reconcile(self) -> None:
-        """从服务端权威状态完整对账：拉取全部条目与墓碑，重建/补齐本地镜像。"""
+        """从服务端权威状态完整对账：拉取全部条目与墓碑，重建/补齐本地镜像。
+
+        用 version=0 全量拉取后当作权威全量重建本地文件（rebuild_records），而非只对
+        增量追加/原位替换——既保证本地文件按时间排序（多端离线写入后不乱序），又能覆盖
+        本地文件丢失、墓碑位置恢复等场景。
+        """
         delta = self._request("GET", "/api/sync/pull?version=0")
-        self._apply_delta(delta)
+        self._apply_delta(delta, full=True)
 
     # ---------- 拉取 / 长轮询 ----------
 
