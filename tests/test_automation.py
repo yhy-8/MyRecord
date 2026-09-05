@@ -123,6 +123,13 @@ class MissingDetectionTests(AutomationBase):
         self._diary("2026-07-14", "已完成")
         self.assertFalse(automation._task_missing("daily_summary", now))
 
+    def test_daily_summary_missing_when_summary_region_absent(self):
+        # extract_summary 对缺失 <summary> 区域返回 "(无总结)"，也应视为需要生成。
+        now = self._now()
+        path = settings.DIARY_DIR / "2026-07-14.md"
+        path.write_text("# 2026-07-14\n\n**09:00:** 内容", encoding="utf-8")
+        self.assertTrue(automation._task_missing("daily_summary", now))
+
     def test_weekly_monthly_missing_depends_on_period_and_report_file(self):
         now = self._now()  # 上一周 07-06..07-12，上一月 06-01..06-30
         self.assertFalse(automation._task_missing("weekly_report", now))

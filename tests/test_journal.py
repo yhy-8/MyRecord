@@ -36,6 +36,23 @@ class JournalTests(unittest.TestCase):
         self.assertEqual("R-20260715-3", second_line["source_id"])  # 第 3 行
         self.assertEqual(3, second_line["line"])
 
+    def test_period_records_skips_summary_region_and_keeps_line_numbers(self):
+        # 报告不读取每日总结（§8.1）：<summary> 内形如 `**HH:MM ...:**` 的加粗行不能被
+        # 当成记录；同时记录行号仍按原始文件计算（总结区的新行不影响下面记录的行号）。
+        content = (
+            "# 2026-07-15\n\n"
+            "<summary>\n**09:00 会议:** 总结里的一条假记录\n</summary>\n"
+            "\n---\n## 原始记录流\n\n"
+            "**09:00:** 真实记录\n"
+        )
+        records = _period_records([("2026-07-15", content)])
+
+        self.assertEqual(1, len(records))
+        self.assertEqual("真实记录", records[0]["text"])
+        # 行号以原始文件为准：真实记录在文件中的 1-based 行号（不因总结区多行而偏移）。
+        self.assertEqual("R-20260715-10", records[0]["source_id"])
+        self.assertEqual(10, records[0]["line"])
+
     def test_summary_replacement_preserves_backslashes_literally(self):
         path = settings.DIARY_DIR / "2026-07-15.md"
         path.write_text(

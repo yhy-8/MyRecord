@@ -81,7 +81,16 @@ def _period_records(logs: list[tuple[str, str]]) -> list[dict]:
     """
     records = []
     for date, content in logs:
+        # 报告不读取每日总结（§8.1）：跳过 <summary> 区域内的匹配，避免总结正文里
+        # 形如 `**HH:MM ...:**` 的加粗行被误当成记录注入输入；行号仍按原始文件计算，
+        # 保证 `R-YYYYMMDD-行号` 与文件中真实 1-based 行号一致。
+        summary_spans = [
+            (m.start(0), m.end(0))
+            for m in re.finditer(r"<summary>.*?</summary>", content, re.DOTALL)
+        ]
         for match in _RECORD_PATTERN.finditer(content):
+            if any(s <= match.start() < e for (s, e) in summary_spans):
+                continue
             tag = (match.group(2) or "").strip()
             speaker = "quoted_ai" if "[AI回复]" in tag else "user"
             text = match.group(3).strip()

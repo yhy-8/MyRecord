@@ -307,6 +307,22 @@ class AnalysisWorkflowTests(unittest.TestCase):
         self.assertEqual("正文。[1]", summary)
         self.assertEqual([{"id": 1, "source": "R-20260714-10"}], refs)
 
+    def test_report_parse_rejects_start_line_below_one(self):
+        records = [{"date": "2026-07-14", "line": 10, "text": "A"}]
+        raw = json.dumps(
+            {
+                "summary": "正文。[1]",
+                "references": [
+                    {"id": 1, "source": "R-20260714-0"},   # 起始行 0 < 1 → 丢弃
+                    {"id": 2, "source": "R-20260714-2-1"},  # 起始 > 结束 → 丢弃
+                ],
+            },
+            ensure_ascii=False,
+        )
+        summary, refs = orchestrator._parse_report_response(raw, records)
+        self.assertEqual("正文。[1]", summary)
+        self.assertEqual([], refs)
+
     def test_report_parse_rejects_non_json_body(self):
         with self.assertRaises(orchestrator.AgentPipelineError):
             orchestrator._parse_report_response("## 本周回顾\n- 纯 Markdown。", [])

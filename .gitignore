@@ -9,6 +9,10 @@ Log/
 # 服务端运行时数据空间（权威 state.json、Records、Trash、报告、日志、TLS 私钥）。
 server/data/
 
+# 客户端本地同步游标与离线待推送队列（运行时生成）。
+client/state.json
+client/outbox.json
+
 # 设备身份凭证（服务端签发的 device_id/token），等同密钥，不入版本库。
 client/credentials.json
 

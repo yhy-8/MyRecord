@@ -7,14 +7,16 @@
 
 ## 安装与启动
 
+在**独立 server 工程根**（即包含 `server/` 目录的那一层，`python -m server.main` 需从这一层运行）执行：
+
 ```bash
-pip install -r requirements.txt
-cp config.example.yaml config.yaml   # 生成运行配置，再在其中填入模型 api_key
+pip install -r server/requirements.txt
+cp server/config.example.yaml server/config.yaml   # 生成运行配置，再在其中填入模型 api_key
 python -m server.main run
 ```
 
-> 入口统一为 `python -m server.main run`（`server/main.py`）。
-> `config.example.yaml` 是**配置模板**（空白 api_key，已提交）；运行时读取的是 `config.yaml`
+> 入口统一为 `python -m server.main run`（`server/main.py`），需在包含 `server/` 工程根运行。
+> `server/config.example.yaml` 是**配置模板**（空白 api_key，已提交）；运行时读取的是 `server/config.yaml`
 > （含 api_key，已 gitignore，不入版本库），请按上面两步用模板生成并**填入你的模型密钥**。
 > 启动后自带**后台调度线程**：每 15 分钟检测缺失，并独立执行到期任务（日总结 / 周报 / 月报
 > 互不依赖、无顺序要求）。该线程属服务端调度，与客户端同步无关。
@@ -80,7 +82,7 @@ python -m server.main deploy            一键安装并启动 systemd 服务（�
 `server/config.yaml`（已 gitignore，不入版本库），由用户复制模板后填写：
 
 ```bash
-cp config.example.yaml config.yaml
+cp server/config.example.yaml server/config.yaml
 # 编辑 config.yaml：在 models 的 api_key 处填入你的模型密钥
 ```
 

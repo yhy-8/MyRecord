@@ -226,9 +226,8 @@ def _handle_retry(client: SyncClient) -> None:
 
 
 def _handle_model(client: SyncClient) -> None:
-    """永久切换服务端 AI 模型；不带参数时按模型列表循环。"""
+    """永久切换服务端 AI 模型（无参数时按模型列表循环到下一个）。"""
     console = Console()
-    name = ""
 
     try:
         status = client.status()
@@ -240,12 +239,11 @@ def _handle_model(client: SyncClient) -> None:
         console.print("[yellow][!][/yellow] 服务端未配置模型。")
         return
     current = (status.get("ai") or {}).get("current_model", "")
-    if not name:
-        try:
-            index = models.index(current)
-        except ValueError:
-            index = -1
-        name = models[(index + 1) % len(models)]
+    try:
+        index = models.index(current)
+    except ValueError:
+        index = -1
+    name = models[(index + 1) % len(models)]
     try:
         result = client.admin_set_model(name)
     except SyncError as error:

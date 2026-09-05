@@ -20,6 +20,9 @@ server:
 
 # ---- 云端 AI（模型配置）----
 # 模型密钥（api_key）只在服务端本地；不入数据空间、不入日志。
+# json_mode：模型是否支持 JSON 输出（仅当某个 Agent 显式开启 structured_output 且模型
+# 声明 json_mode 时才会作为 response_format 下发）。周/月报 Agent 采用「纯文本 + 中控
+# 确定性校验」路径（见 Docs/设计基线.md §8.4-8.5），不依赖此开关；此处保留是为通用模型能力校验。
 models:
   - name: deepseek-v4-pro
     model_id: deepseek-v4-pro

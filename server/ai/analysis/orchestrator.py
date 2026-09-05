@@ -301,7 +301,7 @@ def _parse_report_response(
         if date not in max_line:
             logger.warning("report_reference_date_missing source=%s", source)
             continue
-        if start > end or end > max_line[date]:
+        if start < 1 or start > end or end > max_line[date]:
             logger.warning("report_reference_line_out_of_range source=%s date=%s", source, date)
             continue
         kept.append({"id": item.get("id"), "source": source})

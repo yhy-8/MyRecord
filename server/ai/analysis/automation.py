@@ -113,7 +113,7 @@ def _diary_summary_needs_generation(path: Path) -> bool:
         summary = journal.extract_summary(path.read_text(encoding="utf-8")).strip()
     except OSError:
         return False
-    return summary in {"", "(无)", "暂无今日总结。"}
+    return summary in {"", "(无)", "(无总结)", "暂无今日总结。"}
 
 
 def _task_missing(task: str, now: datetime.datetime, *, target=None) -> bool:

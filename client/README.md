@@ -7,6 +7,8 @@
 
 ## 交互入口
 
+在**独立 client 工程根**（即包含 `client/` 目录的那一层，`python -m client` 需从这一层运行）执行：
+
 ```bash
 python -m client
 ```
@@ -33,7 +35,7 @@ python -m client
 （已 gitignore，不入版本库），由用户复制模板后填写：
 
 ```bash
-cp config.example.yaml config.yaml
+cp client/config.example.yaml client/config.yaml
 # 编辑 config.yaml：把 server_url 改成你的服务端中枢地址,按需设置 verify
 ```
 
@@ -67,7 +69,7 @@ cp config.example.yaml config.yaml
 |---|---|
 | `__main__.py` | 程序入口：`python -m client` → `run_interactive()` |
 | `config.py` / `config.example.yaml` | 读取本地配置（服务器地址、数据目录、长轮询秒数）。`config.example.yaml` 是提交的模板；运行时读取 `config.yaml`（已 gitignore），由用户复制模板并填服务器地址 |
-| `identity.py` | 链接凭证与设备身份：读写 `credentials.json`（单一共享 token）；`device_name()` 直接用本机名（电脑名/手机名，不允许自定义）；`make_entry_id(date,ts,text)` 生成设备无关的确定性 entry_id |
+| `identity.py` | 链接凭证与设备身份：读写 `credentials.json`（单一共享 token）；`device_name()` 直接用本机名（电脑名/手机名，不允许自定义）；`make_entry_id(ts)` 以毫秒时间戳为 id（时间戳即标识，不做内容哈希） |
 | `atomic_write.py` | 原子文件写入（客户端自带小工具，与服务端各自独立） |
 | `render.py` | 日记文件格式本地渲染（标记/entry/tombstone/day_header；客户端自带，与服务端 hub/render.py 同款互不引用） |
 | `journal.py` | 本地日记渲染与写入：按天 `Records/YYYY-MM-DD.md` 原子追加、对账补齐、tombstone 移除 |
@@ -94,4 +96,4 @@ cp config.example.yaml config.yaml
   自签证书校验收信（自签直连，无需反向代理）。
 - **连接与修改需凭证**：所有同步/修改（推送、在线删除、拉取、状态、报告、AI 管理）都要携带服务端签发
   的凭证 token；无凭证或凭证错误时只能本地记录，无法把修改传上服务端或拉取/删除云端数据。
-- **无凭证/离线时照常本地记录**，上线拿到 token 后按内容一致 id 自动合并。
+- **无凭证/离线时照常本地记录**，上线后按 entry_id（=写入毫秒时间戳）自动合并去重。
