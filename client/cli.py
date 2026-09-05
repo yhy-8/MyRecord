@@ -20,6 +20,10 @@ from .sync import SyncClient, SyncError
 from .terminal import safe_input
 
 
+# 记录展示/分组统一时区：epoch 本身是无时区的绝对时间，展示不随运行机器，固定 UTC+8。
+_UTC8 = datetime.timezone(datetime.timedelta(hours=8))
+
+
 def _banner() -> None:
     console = Console()
     console.print(Panel.fit("[bold]MyRecord 客户端[/bold]", border_style="cyan"))
@@ -100,9 +104,9 @@ def show_day(arg: str) -> None:
 
 _SUMMARY_RE = re.compile(r"<summary>(.*?)</summary>", re.DOTALL)
 
-# 技术标记注释（myrecord-id / myrecord-device / myrecord-tombstone-id / myrecord-record 及
-# 旧代理 agentrecord-*）只在文件中用于对账与去重，不参与渲染。rich 会把独立成行的注释
-# 渲染成空段落，凭空多出空行，导致条目之间间隔过大——这里在展示前先剥掉这些注释行。
+# 技术标记注释（myrecord-time / myrecord-device / myrecord-tombstone-time / myrecord-record）
+# 只在文件中用于对账与去重，不参与渲染。rich 会把独立成行的注释渲染成空段落，凭空多出空行，
+# 导致条目之间间隔过大——这里在展示前先剥掉这些注释行。
 _MARKER_COMMENT_RE = re.compile(
     r"^[ \t]*<!--\s*(?:myrecord|agentrecord)[^>]*?-->[ \t]*$\n?",
     re.MULTILINE,
@@ -256,17 +260,18 @@ def _handle_model(client: SyncClient) -> None:
 def _write_record(client: SyncClient, text: str) -> None:
     """本地优先写入：不要求凭据/在线，始终先落盘；随后尽力即时同步。
 
-    entry_id 由内容+时间确定性生成（设备无关），所以哪怕在没有凭据、离线
-    的情况下记录，上线拿到凭据后也能被服务端按 entry_id 正确合并去重。
+    entry_id = 写入毫秒时间戳（即 id），所以哪怕在没有凭据、离线的情况下记录，
+    上线拿到凭据后也能被服务端按 entry_id（=时间戳）正确合并去重。
     """
-    now = datetime.datetime.now()
+    # ts 用毫秒精度：连续快速记录时秒级时间戳会碰撞（同秒多条），仅靠排序会被
+    # 打乱写入顺序。毫秒级让每条记录几乎都有唯一 ts，按 ts 排序即等于写入顺序。
+    ts_ms = int(datetime.datetime.now().timestamp() * 1000)
     entry = {
-        "entry_id": identity.make_entry_id(
-            now.strftime("%Y-%m-%d"), int(now.timestamp()), text
-        ),
+        "entry_id": identity.make_entry_id(ts_ms),
         "device_id": identity.device_name(),  # 设备名：本机名，用于区分设备
-        "date": now.strftime("%Y-%m-%d"),
-        "ts": int(now.timestamp()),
+        # date 用于按天分组（文件名 <date>.md），固定按 UTC+8 推导，与展示时间一致
+        "date": datetime.datetime.fromtimestamp(ts_ms / 1000, tz=_UTC8).date().isoformat(),
+        "ts": ts_ms,
         "tag": "",
         "text": text,
     }

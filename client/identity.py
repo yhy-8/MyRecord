@@ -1,17 +1,14 @@
-"""客户端本地身份与设备状态：凭据 + 设备无关的确定性条目编号。
+"""客户端本地身份与设备状态：凭据 + 以时间戳为唯一标识。
 
 credentials.json 保存服务端签发的**链接凭证 token**（不入中枢、不入数据空间）。
 凭证不绑定设备：只要持有有效 token，任何客户端都能链接服务端同步。设备身份由
 客户端自报本机名（device_name）区分，每条记录都会带上这个设备名。
 
-entry_id 是**内容派生、设备无关**的确定性编号：
-`sha256(date + ts + tag + text)` 截取前 16 位十六进制。任何客户端对同一条
-记录（同一天、同一写入秒、同一正文、同一标签）都会算出同一个 entry_id，
-因此离线多端各自记录、上线后合并时能被服务端按 entry_id 正确去重，
-不会因生成端不同而产生重复条目。
+entry_id 就是**写入的毫秒级时间戳字符串**（epoch ms）：`entry_id == str(ts)`。
+去重、删除、排序都直接按时间戳比对：同一毫秒即同一条记录。时间戳本身不含时区
+（epoch 是 UTC 绝对时间），展示时固定按 UTC+8 换算成分钟级 `HH:MM`。
 """
 
-import hashlib
 import json
 import socket
 import sys
@@ -72,18 +69,9 @@ def require() -> dict:
     return value
 
 
-def make_entry_id(date: str, ts: int, text: str, tag: str = "") -> str:
-    """设备无关的确定性 entry_id：同一记录在任何客户端都得到同一个 id。
+def make_entry_id(ts: int) -> str:
+    """条目标识 = 写入毫秒时间戳字符串（时间戳即 id）。
 
-    输入为记录本身（日期、写入秒级时间戳、标签、正文），不含设备身份，
-    因此离线多端各自生成后、上线合并时能被服务端按 id 正确去重。
-    时间戳参与哈希，避免同一天重复写相同文字被误合并成一条。
+    去重 / 删除都直接按时间戳比对：同一写入毫秒即同一条，离线重推不会重复入库。
     """
-    payload = json.dumps(
-        {"date": date, "ts": ts, "tag": tag, "text": text},
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
-    return f"e{digest[:16]}"
+    return str(int(ts))

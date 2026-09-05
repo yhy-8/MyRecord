@@ -184,7 +184,7 @@ class Store:
                 "deleted_by": deleted_by,
                 "date": entry["date"],
                 "v": self.data["version"],
-                "ts": int(datetime.datetime.now().timestamp()),
+                "ts": int(datetime.datetime.now().timestamp() * 1000),
                 # 保留原条目的时间：占位符按它插回记录流的原位置，
                 # 与服务端渲染/客户端原位替换保持严格一致（否则所有墓碑都堆到末尾）。
                 "entry_ts": int(entry.get("ts", 0)),
@@ -344,11 +344,13 @@ def _normalized_date(value: object, ts: int) -> str:
 
 
 def derive_date(ts: int) -> str:
-    """由秒级时间戳推导日期（UTC），仅作为缺少 date 字段时的兜底。"""
+    """由毫秒时间戳推导日期（UTC+8），仅作为缺少 date 字段时的兜底。"""
     if ts <= 0:
         return datetime.date.today().isoformat()
     return (
-        datetime.datetime.fromtimestamp(ts, tz=datetime.timezone.utc)
+        datetime.datetime.fromtimestamp(
+            ts / 1000.0, tz=datetime.timezone(datetime.timedelta(hours=8))
+        )
         .date()
         .isoformat()
     )

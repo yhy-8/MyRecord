@@ -1,8 +1,8 @@
 """日记文件格式：客户端本地渲染（标记常量 + 逐块/整页渲染）。
 
 每天仍是一个 `Records/YYYY-MM-DD.md` 容器。每条记录前带一个隐藏的
-`<!-- myrecord-id:<id> -->` 标记，删除位置写
-`<!-- myrecord-tombstone-id:<id> -->` 占位（不含正文）。这些标记在
+`<!-- myrecord-time:<毫秒时间戳> -->` 标记，删除位置写
+`<!-- myrecord-tombstone-time:<时间戳> -->` 占位（不含正文）。这些标记在
 Markdown 渲染中不可见，仅用于对账与去重。`<summary>` 区域由服务端独占写。
 
 客户端与服务端**严格分离、各自独立部署**：本文件是客户端自带的本地渲染
@@ -12,15 +12,18 @@ Markdown 渲染中不可见，仅用于对账与去重。`<summary>` 区域由�
 
 import datetime
 
-ENTRY_MARKER_PREFIX = "<!-- myrecord-id:"
+ENTRY_MARKER_PREFIX = "<!-- myrecord-time:"
 DEVICE_MARKER_PREFIX = "<!-- myrecord-device:"
-TOMBSTONE_MARKER_PREFIX = "<!-- myrecord-tombstone-id:"
+TOMBSTONE_MARKER_PREFIX = "<!-- myrecord-tombstone-time:"
 
 DEFAULT_SUMMARY = "暂无今日总结。"
 
+# 展示/分组统一时区：epoch 是无时区的绝对时间，记录时间统一按 UTC+8 展示。
+_UTC8 = datetime.timezone(datetime.timedelta(hours=8))
+
 
 def _fmt_hhmm(ts: int) -> str:
-    dt = datetime.datetime.fromtimestamp(ts)
+    dt = datetime.datetime.fromtimestamp(ts / 1000.0, tz=_UTC8)
     return f"{dt:%H:%M}"
 
 
@@ -68,7 +71,7 @@ def render_day_file(
     for entry in entries:
         placed.append((int(entry.get("ts", 0)), entry["entry_id"], entry_block(entry)))
     for tombstone in tombstones or []:
-        # 旧 tombstone 无 entry_ts：回退到删除时间 ts（通常晚于条目），仍有确定顺序。
+        # 墓碑缺少原条目时间时回退到删除时间 ts（通常晚于条目），仍有确定顺序。
         sort_ts = int(tombstone.get("entry_ts", tombstone.get("ts", 0)))
         placed.append(
             (sort_ts, tombstone["entry_id"], tombstone_block(tombstone["entry_id"]))

@@ -13,7 +13,7 @@ LOG_BACKUP_COUNT = 2
 _HANDLER_NAME = "MyRecord.rotating_file"
 
 # 服务端代码通过 logger=getLogger(__name__) 落在 "server.*" 树（含 hub 与 ai）；
-# 历史/兼容层可能直接用 "MyRecord"。单一 handler 同时挂到这两个根上，避免
+# 另一些代码直接用 "MyRecord" 根 logger。单一 handler 同时挂到这两个根上，避免
 # AI 分析流程与同步请求的日志被静默丢弃。
 _LOGGER_ROOTS = ("MyRecord", "server")
 
@@ -39,7 +39,7 @@ def configure_logging(
             if same_path and not force:
                 return path
 
-    # 先移除旧的同名单一 handler，避免重复挂载造成重复写/重复滚动。
+    # 先移除可能已存在的同名单一 handler，避免重复挂载造成重复写/重复滚动。
     for root in roots:
         for handler in list(root.handlers):
             if handler.get_name() == _HANDLER_NAME:

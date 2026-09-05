@@ -277,8 +277,8 @@ class MultiClientConsistencyTest(ClientSyncE2ETestBase):
             server_content = (srv_records / "2024-06-01.md").read_text(encoding="utf-8")
             # 客户端镜像与服务端渲染逐字节一致：同格式、同时序、墓碑同位置
             self.assertEqual(client_content, server_content)
-            self.assertLess(client_content.index("早"), client_content.index("myrecord-tombstone-id:x2"))
-            self.assertLess(client_content.index("myrecord-tombstone-id:x2"), client_content.index("晚"))
+            self.assertLess(client_content.index("早"), client_content.index("myrecord-tombstone-time:x2"))
+            self.assertLess(client_content.index("myrecord-tombstone-time:x2"), client_content.index("晚"))
         finally:
             self._stop(pat)
 
@@ -667,7 +667,7 @@ class TombstonePlaceholderSyncTest(unittest.TestCase):
             # 只有一条 tombstone，对应条目从未在本地出现过
             journal.apply_delta([], [{"entry_id": "never-had", "date": "2024-06-01"}])
         content = (records / "2024-06-01.md").read_text(encoding="utf-8")
-        self.assertIn("myrecord-tombstone-id:never-had", content)
+        self.assertIn("myrecord-tombstone-time:never-had", content)
 
     def test_apply_delta_keeps_existing_placeholder_idempotent(self):
         """对账重复收到同一 tombstone 不应重复写入占位符。"""
@@ -679,7 +679,7 @@ class TombstonePlaceholderSyncTest(unittest.TestCase):
             for _ in range(2):
                 journal.apply_delta([], [{"entry_id": "x", "date": "2024-06-01"}])
         content = (records / "2024-06-01.md").read_text(encoding="utf-8")
-        self.assertEqual(1, content.count("myrecord-tombstone-id:x"))
+        self.assertEqual(1, content.count("myrecord-tombstone-time:x"))
 
     def test_apply_delta_skips_entries_with_path_traversal_date(self):
         """date 含 `../` 的条目不得写出 Records 之外（防御性跳过）。"""
@@ -695,6 +695,46 @@ class TombstonePlaceholderSyncTest(unittest.TestCase):
             )
         self.assertFalse(outside.exists())
         self.assertEqual([], list(records.glob("*.md")))  # 未写入任何日期文件
+
+
+class SubSecondOrderingTest(unittest.TestCase):
+    """同秒多条记录：毫秒级 ts 决定先后，而非被 entry_id 哈希打乱（客户端镜像）。"""
+
+    def test_render_orders_same_second_by_ms(self):
+        from client import render as client_render
+
+        # 同一秒(1717200000)但毫秒不同；entry_id 字典序与 ms 顺序相反
+        entries = [
+            {"entry_id": "z-2", "date": "2024-06-01", "ts": 1717200000123, "tag": "", "text": "1"},
+            {"entry_id": "a-1", "date": "2024-06-01", "ts": 1717200000246, "tag": "", "text": "2"},
+        ]
+        text = client_render.render_day_file("2024-06-01", entries)
+        # 按 ms 顺序（先 1 后 2），而非按 entry_id 字典序（a-1 本应在前）
+        self.assertLess(
+            text.index("<!-- myrecord-time:z-2 -->"),
+            text.index("<!-- myrecord-time:a-1 -->"),
+        )
+
+    def test_fmt_hhmm_from_ms(self):
+        from client import render as client_render
+
+        # 毫秒时间戳换算为正确 HH:MM
+        self.assertTrue(client_render._fmt_hhmm(1717200000246).endswith(":00"))
+
+    def test_fmt_hhmm_uses_utc8(self):
+        from client import render as client_render
+
+        # epoch 1717200000000ms = 2024-01-01 00:00 UTC = 08:00 UTC+8（客户端镜像同样固定 UTC+8）
+        self.assertEqual(client_render._fmt_hhmm(1717200000000), "08:00")
+        self.assertEqual(client_render._fmt_hhmm(1717200000123), "08:00")
+
+    def test_entry_marker_carries_timestamp_as_id(self):
+        from client import render as client_render
+
+        # id 就是毫秒时间戳（自描述时间），标签为 myrecord-time
+        entry = {"entry_id": "1717200000123", "date": "2024-06-01", "ts": 1717200000123, "tag": "", "text": "x"}
+        block = client_render.entry_block(entry)
+        self.assertIn("<!-- myrecord-time:1717200000123 -->", block)
 
 
 if __name__ == "__main__":

@@ -207,7 +207,7 @@ class ServerMainRenderImportTests(unittest.TestCase):
     def test_render_writes_records_from_store(self):
         store = Store(self.data_dir / "state.json")
         store.append_entries(
-            "legacy",
+            "import",
             [{
                 "entry_id": "a-1",
                 "date": "2024-01-01",
@@ -225,25 +225,25 @@ class ServerMainRenderImportTests(unittest.TestCase):
         self.assertIn("hello", rendered)
         self.assertIn("a-1", rendered)
 
-    def test_import_legacy_records_appends_and_renders(self):
-        legacy = self.root / "legacy-records"
-        legacy.mkdir()
-        (legacy / "2024-01-01.md").write_text(
+    def test_import_records_appends_and_renders(self):
+        src = self.root / "records-import"
+        src.mkdir()
+        (src / "2024-01-01.md").write_text(
             "# 2024-01-01\n\n<summary>\n暂无今日总结。\n</summary>\n\n---\n"
-            "## 原始记录流\n\n<!-- agentrecord-record -->\n**08:00:** 旧记录\n",
+            "## 原始记录流\n\n**08:00:** 旧记录\n",
             encoding="utf-8",
         )
         # 非日期文件应被跳过
-        (legacy / "notes.md").write_text("不是日记", encoding="utf-8")
+        (src / "notes.md").write_text("不是日记", encoding="utf-8")
 
         with patch("sys.stdout", io.StringIO()):
-            rc = server_main.main(["import", "--records", str(legacy)])
+            rc = server_main.main(["import", "--records", str(src)])
         self.assertEqual(0, rc)
 
         store = Store(self.data_dir / "state.json")
         self.assertEqual(1, len(store.data["entries"]))
         entry = next(iter(store.data["entries"].values()))
-        self.assertEqual("legacy", entry["device_id"])
+        self.assertEqual("import", entry["device_id"])
         self.assertEqual("旧记录", entry["text"])
         rendered = (self.data_dir / "Records" / "2024-01-01.md").read_text(
             encoding="utf-8"

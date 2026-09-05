@@ -159,7 +159,7 @@ class SyncClient:
         with file_lock(_state_path()):
             if full:
                 # 全量对账：用权威全量数据重建本地镜像（按时间排序、墓碑插回原位），
-                # 修复多端离线写入导致的本地乱序。
+                # 使多端离线写入后本地也保持时间有序，而非按推送顺序入库。
                 journal.rebuild_records(entries, tombstones)
             else:
                 journal.apply_delta(entries, tombstones)

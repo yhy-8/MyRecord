@@ -139,6 +139,8 @@ class ClientCLIPlainInputTests(unittest.TestCase):
             self.assertEqual("e2e-a", entry["device_id"])
             self.assertEqual("普通记录", entry["text"])
             self.assertIn("ts", entry)
+            # ts 应为毫秒精度：连续快速记录时同秒不会碰撞，按 ts 排序即等于写入顺序
+            self.assertGreaterEqual(entry["ts"], 10_000_000_000)
             journal.append_record.assert_called_once_with(entry)
 
 
@@ -310,9 +312,9 @@ class ClientRenderMarkdownTests(unittest.TestCase):
         text = (
             "# 2026-08-16\n\n<summary>\n今日总结\n</summary>\n\n"
             "---\n## 原始记录流\n\n"
-            "<!-- myrecord-id:e1 -->\n<!-- myrecord-device:MK8 -->\n"
+            "<!-- myrecord-time:e1 -->\n<!-- myrecord-device:MK8 -->\n"
             "**20:33 [MK8]:** 今天去了公园。\n\n"
-            "<!-- myrecord-tombstone-id:e2 -->\n"
+            "<!-- myrecord-tombstone-time:e2 -->\n"
             "**20:34 [MK8]:** 下午和朋友聊天。\n"
         )
         rendered = cli_app._render_day_markdown(text)
@@ -328,10 +330,10 @@ class ClientRenderMarkdownTests(unittest.TestCase):
         text = (
             "# 2026-08-16\n\n<summary>\n总结\n</summary>\n\n"
             "---\n## 原始记录流\n\n"
-            "**20:33 [MK8]:** 提到 myrecord-id:xxx 这个词\n"
+            "**20:33 [MK8]:** 提到 myrecord-time:xxx 这个词\n"
         )
         rendered = cli_app._render_day_markdown(text)
-        self.assertIn("myrecord-id:xxx", rendered)
+        self.assertIn("myrecord-time:xxx", rendered)
 
 
 if __name__ == "__main__":

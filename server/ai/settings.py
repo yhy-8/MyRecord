@@ -39,7 +39,7 @@ def is_valid_http_url(value: object) -> bool:
 
 
 def _get_config_path() -> Path:
-    """获取 config.yaml 路径，兼容 PyInstaller 打包后的路径。"""
+    """获取 config.yaml 路径；打包（PyInstaller）运行时指向 exe 同级目录。"""
     if getattr(sys, "frozen", False):
         base = Path(sys.executable).parent
     else:

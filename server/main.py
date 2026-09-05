@@ -1,4 +1,4 @@
-"""服务端 CLI：启动 hub、设备令牌管理、旧数据导入、Records 渲染。"""
+"""服务端 CLI：启动 hub、设备令牌管理、Records 导入、Records 渲染。"""
 
 import argparse
 import datetime
@@ -220,7 +220,7 @@ def _command_import(args: argparse.Namespace) -> int:
                     "text": entry["text"],
                 }
             )
-        accepted = store.append_entries("legacy", entries)
+        accepted = store.append_entries("import", entries)
         total += len(accepted)
     store.render_records(data_dir / "Records", data_dir / "Trash")
     print(f"导入完成：新增 {total} 条记录（来自 {source}）。")
@@ -441,7 +441,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     sub.add_parser("run", help="启动 hub 服务")
     token = sub.add_parser("token", help="链接凭证管理（create/list）")
     token.add_argument("action", choices=["create", "list"])
-    imp = sub.add_parser("import", help="导入旧版 Records 目录")
+    imp = sub.add_parser("import", help="导入 Records 目录")
     imp.add_argument("--records", required=True)
     sub.add_parser("render", help="重新渲染当天 Records")
     rep = sub.add_parser("report", help="手动生成周报/月报（同一流程，直接覆盖）")

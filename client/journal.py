@@ -1,7 +1,7 @@
 """客户端本地日记：本地渲染 + 按天写入与对账。
 
 每天一个 Records/YYYY-MM-DD.md 容器。每条记录前带一个隐藏的
-`<!-- myrecord-id:<id> -->` 标记，删除位置写 tombstone 占位（不含正文）。
+`<!-- myrecord-time:<毫秒时间戳> -->` 标记，删除位置写 tombstone 占位（不含正文）。
 `<summary>` 区域由服务端独占写。本地写入永不因同步失败回滚；对账（apply_delta）
 只做补齐与 tombstone 移除，不把已删条目推回。
 
@@ -134,7 +134,7 @@ def rebuild_records(entries: list[dict], tombstones: list[dict]) -> None:
     """从权威全量数据重建本地记录文件：按时间排序、墓碑插回原位置，并保留 summary。
 
     用于完整对账（pull?version=0）：把本地镜像重建为与服务端渲染一致的时间有序结构，
-    修复多端离线写入导致的本地乱序（这类乱序通常来自离线批量按推送顺序而非时间顺序入库）。
+    使多端离线写入时也按时间而非推送顺序入库。
     局部增量（apply_delta）仍只追加/原位替换，不整页重排，避免每次扇出都重写整个文件。
     """
     by_date: dict[str, list[dict]] = {}

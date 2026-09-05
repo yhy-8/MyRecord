@@ -53,20 +53,17 @@ class ClientIdentityCredentialsTests(unittest.TestCase):
 
 
 class ClientEntryIdTests(unittest.TestCase):
-    """设备无关的确定性 entry_id：同一记录在任何客户端都得到同一个 id。"""
+    """条目标识 = 写入毫秒时间戳：时间戳即 id，去重 / 删除直接按时间戳比对。"""
 
-    def test_entry_id_deterministic_and_device_independent(self):
-        i1 = identity.make_entry_id("2024-06-01", 1717200000, "第一条")
-        i2 = identity.make_entry_id("2024-06-01", 1717200000, "第一条")
-        self.assertEqual(i1, i2)  # 同记录同 id（跨客户端一致）
-        self.assertTrue(i1.startswith("e"))
-
-        # 不同时间写相同文字 → 不同 id（不误合并同一天重复句子）
-        self.assertNotEqual(i1, identity.make_entry_id("2024-06-01", 1717200060, "第一条"))
-        # 不同文字 → 不同 id
-        self.assertNotEqual(i1, identity.make_entry_id("2024-06-01", 1717200000, "另一条"))
-        # 不同日期 → 不同 id
-        self.assertNotEqual(i1, identity.make_entry_id("2024-06-02", 1717200000, "第一条"))
+    def test_entry_id_is_the_ts_string(self):
+        i1 = identity.make_entry_id(1717200000123)
+        # id 就是毫秒时间戳字符串，不再做内容哈希
+        self.assertEqual(i1, "1717200000123")
+        # 同时间戳 → 同 id（同一写入即同一条，离线重推不会重复入库）
+        self.assertEqual(i1, identity.make_entry_id(1717200000123))
+        # 不同时间戳 → 不同 id
+        self.assertNotEqual(i1, identity.make_entry_id(1717200000124))
+        self.assertEqual(identity.make_entry_id(1717200000124), "1717200000124")
 
     def test_device_name_defaults_to_hostname(self):
         with patch.object(identity, "load", return_value={}):

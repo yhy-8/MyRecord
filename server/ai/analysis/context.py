@@ -69,10 +69,8 @@ def _analysis_report_path(
 
 
 _RECORD_PATTERN = _format.RECORD_PATTERN  # 单一来源：见 server/hub/render.py
-# 说明：记录一律只按 `**HH:MM:**` 头部行用统一 _RECORD_PATTERN 解析，行号即该头部行在所属
-# 日期文件中的 1-based 行号。旧设计为带 myrecord-record 标记的记录另设了匹配分支，但该标记
-# 只在已废弃的 append_log 路径产生（生产不再写），且会令行号定位到标记行而非可视头部行（差 1），
-# 因此移除。兼容旧数据仅做 ESCAPED_RECORD_MARKER->RECORD_MARKER 的文本还原。
+# 记录一律只按 `**HH:MM:**` 头部行用统一 _RECORD_PATTERN 解析，行号即该头部行在所属日期文件中的
+# 1-based 行号，定位到可视头部行；记录文本中被转义的技术标记在解析时还原。
 
 
 def _period_records(logs: list[tuple[str, str]]) -> list[dict]:
@@ -87,7 +85,7 @@ def _period_records(logs: list[tuple[str, str]]) -> list[dict]:
             tag = (match.group(2) or "").strip()
             speaker = "quoted_ai" if "[AI回复]" in tag else "user"
             text = match.group(3).strip()
-            # 旧数据兼容：把被转义的技术标记还原回来（仅当记录文本确以该标记占一行时）。
+            # 还原被转义的技术标记行为普通标记（仅当记录文本确以该标记占一行时）。
             text = re.sub(
                 rf"^{re.escape(journal.ESCAPED_RECORD_MARKER)}\s*$",
                 journal.RECORD_MARKER,

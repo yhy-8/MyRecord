@@ -160,28 +160,65 @@ class RenderParserTest(unittest.TestCase):
         ]
         text = render.render_day_file("2024-01-01", entries, tombstones)
         first_pos = text.index("first")
-        tomb_pos = text.index("myrecord-tombstone-id:b-1")
+        tomb_pos = text.index("myrecord-tombstone-time:b-1")
         third_pos = text.index("third")
         self.assertTrue(first_pos < tomb_pos < third_pos)
 
-    def test_render_old_tombstone_without_entry_ts_falls_back_to_deletion_ts(self):
-        """旧墓碑无 entry_ts：回退到删除时间 ts（通常晚于条目），排在活跃条目之后。"""
+    def test_render_tombstone_without_entry_ts_falls_back_to_deletion_ts(self):
+        """墓碑缺少原条目时间：回退到删除时间 ts（通常晚于条目），排在活跃条目之后。"""
         entries = [
             {"entry_id": "a-1", "date": "2024-01-01", "ts": 1704067200, "tag": "", "text": "first"},
         ]
         tombstones = [{"entry_id": "b-1", "date": "2024-01-01", "v": 4, "ts": 1704068000}]
         text = render.render_day_file("2024-01-01", entries, tombstones)
-        self.assertLess(text.index("first"), text.index("myrecord-tombstone-id:b-1"))
+        self.assertLess(text.index("first"), text.index("myrecord-tombstone-time:b-1"))
 
-    def test_parse_legacy(self):
-        legacy = (
-            "# 2024-01-01\n\n<summary>\n暂无今日总结。\n</summary>\n\n---\n## 原始记录流\n\n"
-            "<!-- agentrecord-record -->\n**08:00:** 旧记录\n\n"
-            "<!-- agentrecord-record-text -->\n**09:00 [引用]:** 引用记录\n"
+    def test_render_orders_same_second_by_ms(self):
+        """同秒多条记录：毫秒级 ts 决定先后，而非被 entry_id 哈希打乱。"""
+        entries = [
+            # 同一秒(1704067200)，毫秒不同；entry_id 字典序与 ms 顺序相反
+            {"entry_id": "z-2", "date": "2024-01-01", "ts": 1704067200123, "tag": "", "text": "1"},
+            {"entry_id": "a-1", "date": "2024-01-01", "ts": 1704067200246, "tag": "", "text": "2"},
+        ]
+        text = render.render_day_file("2024-01-01", entries)
+        # 按 ms 顺序（先 1 后 2），而非按 entry_id 字典序（a-1 本应在前）
+        self.assertLess(
+            text.index("<!-- myrecord-time:z-2 -->"),
+            text.index("<!-- myrecord-time:a-1 -->"),
         )
-        parsed = parse_day_file("2024-01-01", legacy)
+
+    def test_fmt_hhmm_from_ms(self):
+        """毫秒时间戳换算为正确 HH:MM。"""
+        self.assertTrue(render._fmt_hhmm(1704067200246).endswith(":00"))
+
+    def test_fmt_hhmm_uses_utc8(self):
+        """展示时间固定按 UTC+8：epoch 1717200000000ms = 2024-01-01 00:00 UTC = 08:00 UTC+8。"""
+        self.assertEqual(render._fmt_hhmm(1717200000000), "08:00")
+        self.assertEqual(render._fmt_hhmm(1717200000123), "08:00")
+
+    def test_parse_recovers_exact_ts_from_timestamp_id(self):
+        """新格式 id=毫秒时间戳：解析文件可还原精确子秒 ts，往返不丢精度。"""
+        entries = [
+            {"entry_id": "1717200000123", "date": "2024-06-01", "ts": 1717200000123, "tag": "", "text": "a"},
+            {"entry_id": "1717200001240", "date": "2024-06-01", "ts": 1717200001240, "tag": "", "text": "b"},
+        ]
+        text = render.render_day_file("2024-06-01", entries)
+        parsed = parse_day_file("2024-06-01", text)
+        got = {e["entry_id"]: e["ts"] for e in parsed["entries"]}
+        self.assertEqual(got["1717200000123"], 1717200000123)
+        self.assertEqual(got["1717200001240"], 1717200001240)
+
+    def test_parse_bare_records(self):
+        """无 myrecord-time 标记的裸 `**HH:MM:**` 记录也能解析，并按位置派生确定性 id。"""
+        bare = (
+            "# 2024-01-01\n\n<summary>\n暂无今日总结。\n</summary>\n\n---\n## 原始记录流\n\n"
+            "**08:00:** 旧记录\n\n"
+            "**09:00 [引用]:** 引用记录\n"
+        )
+        parsed = parse_day_file("2024-01-01", bare)
         self.assertEqual(len(parsed["entries"]), 2)
-        self.assertTrue(parsed["entries"][0]["entry_id"].startswith("legacy-"))
+        self.assertTrue(parsed["entries"][0]["entry_id"].startswith("bare-"))
+        self.assertEqual(parsed["entries"][1]["tag"], "[引用]")
         # 旧标记是注释，不允许混入正文；AI 只应读到纯文本。
         for entry in parsed["entries"]:
             self.assertNotIn("<!--", entry["text"])
