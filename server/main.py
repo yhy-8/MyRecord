@@ -17,7 +17,7 @@ from .hub.store import Store
 def _store(data_dir: Path) -> tuple[Store, Path]:
     data_dir.mkdir(parents=True, exist_ok=True)
     state_path = data_dir / "state.json"
-    store = Store(state_path)
+    store = Store(state_path, data_dir / "Records", data_dir / "Trash")
     return store, data_dir
 
 
@@ -63,23 +63,20 @@ def _command_run(args: argparse.Namespace) -> int:
         except (OSError, ValueError):
             return {}
 
-    last_render_version = store.data["version"]
-
     def run_ai_cycle() -> None:
         """一次自动任务循环：仅在权威数据版本变化时重渲染 Records。
 
         后台只是用它将 Records 与 state.json 保持同步；没有新条目/墓碑时跳过
-        全量重渲染，避免每分钟对全部日期做无谓的磁盘写。
+        全量重渲染，避免每分钟对全部日期做无谓的磁盘写。新条目/墓碑已被
+        Store 写后即时渲染（见 append_entries/tombstone），这里只作为兜底。
         """
         try:
             ai_analysis.run_due_automatic_tasks()
         except Exception:
             pass
-        nonlocal last_render_version
         current = store.data["version"]
-        if current != last_render_version:
+        if current != store.rendered_version():
             store.render_records(data_dir / "Records", data_dir / "Trash")
-            last_render_version = current
 
     def admin_retry():
         return ai_analysis.retry_failed_automatic_tasks()

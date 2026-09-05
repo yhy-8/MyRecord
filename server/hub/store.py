@@ -20,11 +20,20 @@ logger = logging.getLogger(__name__)
 
 
 class Store:
-    def __init__(self, state_path: Path):
+    def __init__(
+        self,
+        state_path: Path,
+        records_dir: Path | None = None,
+        trash_dir: Path | None = None,
+    ):
         self.path = state_path
+        self.records_dir = records_dir
+        self.trash_dir = trash_dir
         self._lock = threading.RLock()
         self._changed = threading.Condition(self._lock)
         self.data = self._load()
+        # 最后一次渲染到的权威版本：后台用它在“写后已即时渲染”时跳过无谓的全量重渲。
+        self._rendered_version = int(self.data.get("version", 0))
 
     # ---------- 加载与保存 ----------
 
@@ -139,9 +148,10 @@ class Store:
         「已被权威处理（删除）」，不重新加入 entries——否则删除会被离线重推回滚。
         这类条目仍上报 accepted，让客户端把它从 outbox 清掉，避免永久重试。
         """
+        added = []
+        superseded = []
+        affected = set()
         with self._lock:
-            added = []
-            superseded = []
             for entry in entries:
                 entry_id = entry.get("entry_id")
                 if not entry_id:
@@ -153,22 +163,26 @@ class Store:
                 if entry_id in self.data["entries"]:
                     continue
                 self.data["version"] += 1
+                date = _normalized_date(entry.get("date"), int(entry.get("ts", 0)))
                 self.data["entries"][entry_id] = {
                     "entry_id": entry_id,
                     "device_id": device_id,
                     # date 用于拼接文件名（<date>.md），必须规范为 YYYY-MM-DD，
                     # 否则含 ../ 等字符的 date 会让渲染写出数据目录之外。
-                    "date": _normalized_date(entry.get("date"), int(entry.get("ts", 0))),
+                    "date": date,
                     "ts": int(entry.get("ts", 0)),
                     "tag": entry.get("tag", ""),
                     "text": entry.get("text", ""),
                     "v": self.data["version"],
                 }
                 added.append(entry_id)
+                affected.add(date)
             if added:
                 self._save()
                 self._changed.notify_all()
-            return added + superseded
+        if added:
+            self._render_dates(affected)
+        return added + superseded
 
     def tombstone(self, entry_id: str, deleted_by: str) -> bool:
         """把条目移入垃圾桶并写 tombstone，返回是否成功。"""
@@ -179,10 +193,11 @@ class Store:
             self.data["trash"][entry_id] = entry
             del self.data["entries"][entry_id]
             self.data["version"] += 1
+            date = entry["date"]
             self.data["tombstones"][entry_id] = {
                 "entry_id": entry_id,
                 "deleted_by": deleted_by,
-                "date": entry["date"],
+                "date": date,
                 "v": self.data["version"],
                 "ts": int(datetime.datetime.now().timestamp() * 1000),
                 # 保留原条目的时间：占位符按它插回记录流的原位置，
@@ -191,7 +206,8 @@ class Store:
             }
             self._save()
             self._changed.notify_all()
-            return True
+        self._render_dates({date})
+        return True
 
     def latest_entry_for_date(self, ts_date: str) -> dict | None:
         """返回某日期（YYYY-MM-DD）内最新一条 entry，供 /d 删除。"""
@@ -250,6 +266,29 @@ class Store:
         state.json，若直接重建会抹掉刚生成的总结，因此渲染前读取旧文件里
         的 summary 并在重写时带回。
         """
+        self._write_day_files(records_dir, trash_dir, None)
+
+    def _render_dates(self, dates: set[str]) -> None:
+        """只重渲染指定日期的 Records/Trash 文件（供写后即时落盘）。"""
+        if self.records_dir is None or not dates:
+            return
+        self._write_day_files(self.records_dir, self.trash_dir, set(dates))
+
+    def rendered_version(self) -> int:
+        """最后一次渲染所覆盖的权威版本（用于后台跳过无谓的全量重渲）。"""
+        return int(getattr(self, "_rendered_version", 0))
+
+    def _write_day_files(
+        self,
+        records_dir: Path,
+        trash_dir: Path,
+        targets: set[str] | None,
+    ) -> None:
+        """把权威状态渲染成 Records / Trash 文件。
+
+        ``targets`` 为 None 时重渲染全部有内容的日期（全量维护/后台兜底）；
+        为日期集合时只渲染这些日期（即使最终为空也照写），供「写后即时落盘」复用。
+        """
         from . import render as render_mod
 
         records_dir.mkdir(parents=True, exist_ok=True)
@@ -258,6 +297,7 @@ class Store:
         # 在 self._lock 内对权威状态做一次快照，避免渲染线程与 HTTP push/delete 并发
         # 迭代同一 dict 而触发 “dictionary changed size during iteration”。
         with self._lock:
+            version = int(self.data.get("version", 0))
             entries = list(self.data["entries"].values())
             tombs = list(self.data["tombstones"].values())
             trash = list(self.data["trash"].values())
@@ -272,7 +312,10 @@ class Store:
         for entry in trash:
             trash_by_date.setdefault(entry["date"], []).append(entry)
 
-        dates = sorted(set(entries_by_date) | set(tombs_by_date))
+        if targets is None:
+            dates = sorted(set(entries_by_date) | set(tombs_by_date))
+        else:
+            dates = sorted(set(targets))
         # 与 ai/journal.update_summary_for_date 共用同一把 .journal.lock（跨进程互斥），
         # 保证“读旧总结 → 写回”期间不被并发的日总结写入覆盖（避免丢失更新的竞态）。
         from ..ai.file_lock import FileLock
@@ -291,7 +334,14 @@ class Store:
         finally:
             if lock is not None:
                 lock.release()
-        for date, trash_entries in trash_by_date.items():
+        if targets is None:
+            trash_dates = sorted(trash_by_date)
+        else:
+            trash_dates = sorted(set(targets) & set(trash_by_date))
+        for date in trash_dates:
+            trash_entries = trash_by_date.get(date, [])
+            if not trash_entries:
+                continue
             # 垃圾桶也按逐块 + 空行渲染，避免已删正文连成一行。
             blocks = "".join(
                 render_mod.entry_block(e) + "\n"
@@ -300,6 +350,9 @@ class Store:
                 )
             )
             atomic_write(trash_dir / f"{date}.md", blocks)
+
+        # 记录本次渲染覆盖到的权威版本，供后台据以跳过已被“写后即时渲染”覆盖的全量重渲。
+        self._rendered_version = version
 
     def snapshot(self) -> dict:
         with self._lock:

@@ -381,6 +381,55 @@ class StoreRenderTest(unittest.TestCase):
         self.assertFalse((records.parent / "escape.md").exists())
 
 
+class StoreImmediateRenderTest(unittest.TestCase):
+    """构造时传入 records_dir/trash_dir 后，写操作应立即渲染对应日期文件（即时落盘）。"""
+
+    def test_append_entries_renders_date_immediately(self):
+        data = _tmp_data_dir() / "state.json"
+        records_dir = data.parent / "Records"
+        store = Store(data, records_dir, data.parent / "Trash")
+
+        store.append_entries(
+            "a",
+            [{"entry_id": "a-1", "date": "2024-01-01", "ts": 1704067200, "tag": "", "text": "即时正文"}],
+        )
+
+        target = records_dir / "2024-01-01.md"
+        self.assertTrue(target.exists())
+        self.assertIn("即时正文", target.read_text(encoding="utf-8"))
+        # 写后即时渲染已把权威版本推进到渲染版本，后台无需再全量重渲。
+        self.assertEqual(store.data["version"], store.rendered_version())
+
+    def test_tombstone_overwrites_date_file_immediately(self):
+        data = _tmp_data_dir() / "state.json"
+        records_dir = data.parent / "Records"
+        store = Store(data, records_dir, data.parent / "Trash")
+        store.append_entries(
+            "a",
+            [{"entry_id": "a-1", "date": "2024-01-01", "ts": 1704067200, "tag": "", "text": "将被删"}],
+        )
+        target = records_dir / "2024-01-01.md"
+        self.assertIn("将被删", target.read_text(encoding="utf-8"))
+
+        store.tombstone("a-1", "a")
+
+        content = target.read_text(encoding="utf-8")
+        self.assertNotIn("将被删", content)
+        self.assertIn("myrecord-tombstone", content)
+        trash = (data.parent / "Trash" / "2024-01-01.md").read_text(encoding="utf-8")
+        self.assertIn("将被删", trash)
+
+    def test_no_render_when_records_dir_absent(self):
+        # 未传 records_dir 的 Store（如离线/测试场景）写后不渲染，行为与旧版一致。
+        data = _tmp_data_dir() / "state.json"
+        store = Store(data)
+        store.append_entries(
+            "a",
+            [{"entry_id": "a-1", "date": "2024-01-01", "ts": 1704067200, "tag": "", "text": "x"}],
+        )
+        self.assertFalse((data.parent / "Records" / "2024-01-01.md").exists())
+
+
 class AdminEndpointTest(unittest.TestCase):
     def setUp(self):
         self._dir = _tmp_data_dir()
