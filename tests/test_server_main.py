@@ -143,6 +143,12 @@ class ServerMainDeployTests(unittest.TestCase):
         # 默认不启用开机自启：单元不带 [Install] 段
         self.assertNotIn("WantedBy=", text)
 
+    def test_render_systemd_uses_actual_package_name(self):
+        # 服务端工程改名后，`-m <新包名>.main` 应由当前包名反推，不硬编码 server。
+        with patch("server.main._package_name", return_value="backend"):
+            text = server_main._render_systemd("/usr/bin/python3", Path("/srv/myrecord"))
+        self.assertIn("ExecStart=/usr/bin/python3 -m backend.main run", text)
+
     def test_deploy_requires_root(self):
         err = io.StringIO()
         with patch("server.main.os.geteuid", return_value=1000, create=True), patch(
@@ -155,10 +161,12 @@ class ServerMainDeployTests(unittest.TestCase):
 
     def test_render_backup_unit_uses_backup_script_and_workdir(self):
         text = server_main._render_backup_unit(Path("/srv/myrecord"))
-        self.assertIn("ExecStart=/bin/bash /srv/myrecord/server/deploy/backup.sh", text)
+        backup_script = (server_main._deploy_dir() / "backup.sh").as_posix()
+        self.assertIn(f"ExecStart=/bin/bash {backup_script}", text)
         self.assertIn("WorkingDirectory=/srv/myrecord", text)
 
-    def test_deploy_installs_server_and_backup_and_enables_timer(self):
+    def test_deploy_installs_server_and_backup_and_starts_timer(self):
+        # 主服务与备份定时器都只 start、不 enable（不开机自启），防止部署出错后重启自动拉起损坏服务。
         server_unit = self.root / "systemd" / "myrecord-server.service"
         backup_unit = self.root / "systemd" / "myrecord-backup.service"
         timer_unit = self.root / "systemd" / "myrecord-backup.timer"
@@ -187,7 +195,7 @@ class ServerMainDeployTests(unittest.TestCase):
             [
                 ["systemctl", "daemon-reload"],
                 ["systemctl", "start", "myrecord-server"],
-                ["systemctl", "enable", "--now", "myrecord-backup.timer"],
+                ["systemctl", "start", "myrecord-backup.timer"],
             ],
         )
 

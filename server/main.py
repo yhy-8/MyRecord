@@ -107,7 +107,7 @@ def _command_run(args: argparse.Namespace) -> int:
     if not (Path(certfile).is_file() and Path(keyfile).is_file()):
         print(
             f"[!] TLS 证书/密钥不存在：{certfile}, {keyfile}\n"
-            "请先执行 `python -m server.main cert --ip 服务端IP` 生成自签证书。",
+            f"请先执行 `python -m {_package_name()}.main cert --ip 服务端IP` 生成自签证书。",
             file=sys.stderr,
         )
         return 2
@@ -347,8 +347,17 @@ def _deploy_dir() -> Path:
     return Path(__file__).resolve().parent / "deploy"
 
 
+def _package_name() -> str:
+    """当前 server 包的实际文件夹名，即 `python -m <名称>.main` 所用的包名。
+
+    由部署文件所在目录反推，避免硬编码 server/：服务端工程改名后，只要以
+    `python -m <新名>.main` 启动，一键部署仍能正确渲染单元与备份脚本路径。
+    """
+    return _deploy_dir().parent.name
+
+
 def _render_systemd(interpreter: str, project_root: Path) -> str:
-    """渲染 systemd 单元：解释器路径 + 工程根（使 `python -m server.main run` 可解析）。
+    """渲染 systemd 单元：解释器路径 + 工程根（使 `python -m <包名>.main run` 可解析）。
 
     systemd 单元是 Linux 格式，路径一律用正斜杠；Windows 上 Path 会渲染成反斜杠，
     这里用 as_posix() 归一化，避免在 Windows 上生成 `WorkingDirectory=\\srv\\...` 之类非法值。
@@ -361,7 +370,7 @@ def _render_systemd(interpreter: str, project_root: Path) -> str:
         "\n"
         "[Service]\n"
         "Type=simple\n"
-        f"ExecStart={interpreter} -m server.main run\n"
+        f"ExecStart={interpreter} -m {_package_name()}.main run\n"
         f"WorkingDirectory={project_root.as_posix()}\n"
         "Restart=on-failure\n"
         "RestartSec=3\n"
@@ -374,8 +383,9 @@ def _render_backup_unit(project_root: Path) -> str:
 
     backup.sh 从自身位置推断工程根并读取 config.yaml 的 data_dir，因此 WorkingDirectory
     仅作归属参考；ExecStart 用绝对路径调用，运行时不依赖当前目录。
+    backup.sh 路径取自当前包实际位置（server/deploy），不硬编码 server/，支持服务端工程改名。
     """
-    backup_script = (project_root / "server" / "deploy" / "backup.sh").as_posix()
+    backup_script = (_deploy_dir() / "backup.sh").as_posix()
     return (
         "[Unit]\n"
         "Description=MyRecord server data backup (weekly)\n"
@@ -398,7 +408,7 @@ def _command_deploy(args: argparse.Namespace) -> int:
     """
     if not hasattr(os, "geteuid") or os.geteuid() != 0:
         print(
-            "[!] 需要 root 权限：请用 sudo 运行，例如：sudo python -m server.main deploy",
+            f"[!] 需要 root 权限：请用 sudo 运行，例如：sudo python -m {_package_name()}.main deploy",
             file=sys.stderr,
         )
         return 2
@@ -427,13 +437,13 @@ def _command_deploy(args: argparse.Namespace) -> int:
         encoding="utf-8",
     )
     subprocess.run(["systemctl", "daemon-reload"], check=True)
-    # 只部署并立即启动服务端，不执行 `enable`，避免开机自启动（如需开机自启请自行 `systemctl enable`）。
+    # 只启动不 enable：主服务与备份定时器均不做开机自启，避免部署出错后重启自动拉起损坏服务、难以修复。
     subprocess.run(["systemctl", "start", "myrecord-server"], check=True)
-    # 备份定时器启用并即刻生效（Persistent=true 会在错过触发时间后补跑）。
-    subprocess.run(["systemctl", "enable", "--now", "myrecord-backup.timer"], check=True)
+    # 备份定时器仅本次启动期内生效；不 enable 开机自启（重启后需重新 deploy 或手动 activate）。
+    subprocess.run(["systemctl", "start", "myrecord-backup.timer"], check=True)
     print(f"已安装服务端单元：{server_dest}")
     print(f"已安装备份单元与定时器：{backup_dest}、{timer_dest}")
-    print("已启动 myrecord-server，并启用 myrecord-backup.timer（每周自动备份）。")
+    print("已启动 myrecord-server 与 myrecord-backup.timer（本次启动；均不启用开机自启动）。")
     return 0
 
 

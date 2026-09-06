@@ -101,7 +101,11 @@ sudo python -m server.main deploy
 ```
 
 `deploy` 写入服务端单元（`myrecord-server.service`），并安装与启用每周备份定时器
-（`myrecord-backup.service` + `myrecord-backup.timer`，`systemctl enable --now`）。
+（`myrecord-backup.service` + `myrecord-backup.timer`，均 `systemctl start`）。
+主服务与备份定时器都只 start、不 enable（不做开机自启，防止部署出错后重启自动拉起损坏服务、便于修复）。
+
+`deploy` 会从当前包实际位置自动推导解释器、工程根与 `backup.sh` 绝对路径（不写死 `server/`），
+因此 `server/` 目录可改名，只要以 `python -m <新包名>.main deploy` 启动即可正确生成单元。
 
 `server/deploy/`：
 
