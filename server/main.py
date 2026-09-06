@@ -371,6 +371,7 @@ def _render_systemd(interpreter: str, project_root: Path) -> str:
 
     systemd 单元是 Linux 格式，路径一律用正斜杠；Windows 上 Path 会渲染成反斜杠，
     这里用 as_posix() 归一化，避免在 Windows 上生成 `WorkingDirectory=\\srv\\...` 之类非法值。
+    解释器同样归一化：_command_deploy 传入 str(venv_py)，Windows 上会带反斜杠。
     """
     return (
         "[Unit]\n"
@@ -380,7 +381,7 @@ def _render_systemd(interpreter: str, project_root: Path) -> str:
         "\n"
         "[Service]\n"
         "Type=simple\n"
-        f"ExecStart={interpreter} -m {_package_name()}.main run\n"
+        f"ExecStart={Path(interpreter).as_posix()} -m {_package_name()}.main run\n"
         f"WorkingDirectory={project_root.as_posix()}\n"
         "Restart=on-failure\n"
         "RestartSec=3\n"
@@ -431,10 +432,10 @@ def _command_deploy(args: argparse.Namespace) -> int:
     venv_dir = _venv_dir()
     venv_py = _venv_python()
     if not venv_py.is_file():
-        subprocess.run([sys.executable, "-m", "venv", str(venv_dir)], check=True)
+        subprocess.run([sys.executable, "-m", "venv", venv_dir.as_posix()], check=True)
     reqs = Path(__file__).resolve().parent / "requirements.txt"
     subprocess.run(
-        [str(venv_py), "-m", "pip", "install", "-r", str(reqs)], check=True
+        [venv_py.as_posix(), "-m", "pip", "install", "-r", reqs.as_posix()], check=True
     )
     # 2) 配置提示：config.yaml 缺失时仍可部署（默认配置、无 AI），api_key 必须人工填。
     if not config.config_path().is_file():
