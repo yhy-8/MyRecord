@@ -36,10 +36,12 @@ python -m server.main deploy            一键安装并启动 systemd 服务（�
 
 ## 角色：与客户端的协作
 
-- **同步**：暴露 `push / pull / longpoll / delete / status / reports / health` HTTP 接口
-  （见 `hub/server.py`）。客户端以**长连接（长轮询）**挂起在 `longpoll`，服务端有新条目/
-  报告时立即返回（扇出）；客户端**后台持续同步**：连接成功即完整对账，之后保持长连接接收
-  扇出，断线自动重连补齐，不密集轮询、无需手动同步。
+- **同步**：暴露 `push / pull / longpoll / delete / records/<date> / status / reports / health` HTTP
+  接口（见 `hub/server.py`）。客户端以**长连接（长轮询）**挂起在 `longpoll`，服务端有新条目/报告时
+  立即返回（扇出）；客户端**后台持续同步**：连接成功即完整对账，之后保持长连接接收扇出，断线自动
+  重连补齐，不密集轮询、无需手动同步。
+  客户端**只能写“今天”（UTC+8）**：push 仅接受 `date == 今天`，历史日条目被服务端拒绝；历史日记以
+  `Records/*.md` 整文件为准，客户端启动时经 `GET /api/records/<date>` 校验并覆盖本地（只读）。
 - **云端 AI**：自动任务写入 `<summary>` 与周/月报告（`AnalysisReports/`），客户端通过
   `/api/reports` 拉取本地副本。
 - **数据空间**：`server/data/` 是权威事实源，客户端本地只是对账副本。
@@ -58,10 +60,10 @@ python -m server.main deploy            一键安装并启动 systemd 服务（�
 | 文件 | 职责 |
 |---|---|
 | `hub/server.py` | HTTP 同步服务（stdlib ThreadingHTTPServer）：`/api/sync/push`、`/api/sync/pull`、`/api/sync/longpoll`、`/api/entries/delete`、`/api/status`、`/api/reports`、`/api/admin/*`；Bearer + device_id 鉴权 |
-| `hub/store.py` | 权威条目存储：append-only 合并（按 entry_id 去重）、tombstone、垃圾桶、设备令牌、全局 `version` 同步游标、`wait_for_change`（长轮询等待）、拉取 `pull(version)` |
+| `hub/store.py` | 权威存储：`state.json` **仅“今天”**的条目/tombstone/垃圾桶/设备令牌/全局 `version` 游标；append-only 合并（按 entry_id 去重，仅今天）、`wait_for_change`（长轮询）、`pull(version)`（仅今天增量）、历史日整文件回传 |
 | `hub/auth.py` | 链接凭证令牌哈希（scrypt，加盐、常量时间），只存哈希，不落明文 |
 | `hub/atomic_write.py` | 原子文件写入（服务端自带小工具，与客户端各自独立） |
-| `hub/render.py` | 日记文件格式（服务端权威；客户端独立镜像同款格式，由测试锁齐）：渲染 entry 标记、tombstone 占位、`<summary>` 区域，并反向解析文件为条目列表（识别多种条目标记格式） |
+| `hub/render.py` | 日记文件格式（新格式；客户端独立镜像同款格式，由测试锁齐）：渲染 entry 标记、tombstone 占位、`<summary>` 区域；**不再解析旧格式/裸记录**（历史日整文件为准） |
 
 ### 云端 AI（ai/）
 
@@ -107,8 +109,8 @@ sudo python -m server.main deploy
 - `myrecord-backup.service` / `myrecord-backup.timer` — 每周自动备份单元与定时器（`deploy` 自动生成/写入；此为等价参照）。
 - `backup.sh` — 备份 `data` 空间为 tar（保留最近 N 份）。
 
-数据空间（运行时生成）：`server/data/` — `state.json`（权威条目/设备/垃圾桶）、
-`Records/`（渲染每日日记）、`Trash/`（被删正文）、`AnalysisReports/`（报告与自动任务状态）、
+数据空间(运行时生成):`server/data/` - `state.json`（**仅“今天”**的条目/设备/垃圾桶/version 游标）、
+`Records/`（权威每日日记；历史日整文件为准，可承载旧格式）、`Trash/`（被删正文）、`AnalysisReports/`（报告与自动任务状态）、
 `Log/`（服务端日志）。
 
 ## 数据与安全
@@ -122,6 +124,6 @@ sudo python -m server.main deploy
 - **服务端记录详细日志**到 `data/Log/MyRecord.log`：客户端连接/鉴权、对日志的推送与在线删除、AI 报告
   生成成败与每步 Agent 调用、自动任务重试；不记录日记正文、模型密钥、token 明文。
 - 模型密钥只在服务端；不入数据空间、不入日志。
-- 日记文件统一使用 `<!-- myrecord-* -->` 条目/删除标记。解析器识别 `myrecord-*` 条目/删除标记
-  并以 `**HH:MM ...:**` 头行作为记录（无标记裸行亦可）；`<!-- agentrecord-* -->` 等旧标记不会混入正文
-  （记录正文遇任意 `<!--` 即截止，AI 只读文本）。无 entry_id 的记录按位置生成确定性 id。
+- 日记文件统一使用 `<!-- myrecord-* -->` 条目/删除标记（新格式）。仅“今天”条目按此解析/合并；
+  历史日（含旧格式 `**HH:MM:**` 无标记行、`<!-- agentrecord-* -->` 等旧标记）**不解析、不回写、不重排**，
+  以整文件为单位由云端权威保存并原样回传（客户端只做整文件覆盖）。AI 只读正文文本。

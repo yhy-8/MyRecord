@@ -106,18 +106,29 @@ _BLOCK_START_RE = re.compile(
 )
 
 
-def _block_sort_ts(entry_id: str) -> int:
+# 展示/分组统一时区：epoch 是无时区的绝对时间，记录时间统一按 UTC+8 展示。
+_UTC8 = datetime.timezone(datetime.timedelta(hours=8))
+
+
+def _block_sort_ts(entry_id: str, date: str, block_text: str) -> int:
     """块的时间排序键：生产环境 id 即毫秒时间戳（entry_id == str(ts)）。
 
-    非数字 id（异常/测试数据）防御性取 0，仍有确定排序，不依赖 id 内容。
+    非数字 id（导入的裸记录 bare-...，ts 由显示 HH:MM 推导、分钟对齐会重复）则从
+    块内 `**HH:MM:` 显示时间按 UTC+8 还原 ts，使增量重排与服务端 (derived_ts, entry_id)
+    排序一致——裸记录之间 ts 常重复，entry_id 才是真正的次序键；无法还原时防御性取 0。
     """
-    try:
+    if entry_id.isdigit():
         return int(entry_id)
-    except ValueError:
-        return 0
+    match = re.search(r"\*\*(\d{2}:\d{2})", block_text)
+    if match and _valid_iso_date(date):
+        hour, minute = (int(part) for part in match.group(1).split(":"))
+        year, month, day = (int(part) for part in date.split("-"))
+        dt = datetime.datetime(year, month, day, hour, minute, tzinfo=_UTC8)
+        return int(dt.timestamp() * 1000)
+    return 0
 
 
-def _split_day_blocks(content: str) -> tuple[str, list[tuple[int, str, str]]]:
+def _split_day_blocks(content: str, date: str) -> tuple[str, list[tuple[int, str, str]]]:
     """把日记文件拆成头部文本 + 有序块列表。
 
     原始记录流由条目块 / 墓碑块组成，每块以 `myrecord-time:` 或
@@ -134,8 +145,9 @@ def _split_day_blocks(content: str) -> tuple[str, list[tuple[int, str, str]]]:
     for i, match in enumerate(matches):
         start = match.start()
         end = matches[i + 1].start() if i + 1 < len(matches) else len(content)
+        block_text = content[start:end]
         entry_id = match.group(2)
-        blocks.append((_block_sort_ts(entry_id), entry_id, content[start:end]))
+        blocks.append((_block_sort_ts(entry_id, date, block_text), entry_id, block_text))
     return header, blocks
 
 
@@ -165,7 +177,7 @@ def apply_delta(entries: list[dict], tombstones: list[dict]) -> None:
             content = path.read_text(encoding="utf-8")
             existing_entries = day_entry_ids(content)
             existing_tombs = day_tombstone_ids(content)
-            header, blocks = _split_day_blocks(content)
+            header, blocks = _split_day_blocks(content, date)
 
             # 补齐缺失条目（按时间排序并入，而非追加到末尾）
             for entry in entry_by_date.get(date, []):

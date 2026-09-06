@@ -812,6 +812,41 @@ class IncrementalApplyDeltaOrderTest(unittest.TestCase):
         self.assertEqual(1, content.count("myrecord-time:426853 -->"))
         self.assertEqual(1, content.count("myrecord-time:436841 -->"))
 
+    def test_apply_delta_orders_bare_imported_entries_by_derived_time(self):
+        """回归：导入的裸记录（非时间戳 id，ts 由 HH:MM 推导、分钟对齐）也按时间次序排列。
+
+        裸记录之间 ts 常重复，(ts, entry_id) 排序里 entry_id 才是真实次序键；客户端对
+        已有裸记录块重排时须还原其真实 ts（而非一刀切排到最前），否则与服务端渲染不一致。
+        """
+        root = _tmp_dir("cli-incr-bare-")
+        records = root / "Records"
+        records.mkdir(parents=True, exist_ok=True)
+        cfg = {
+            "client": {
+                "records_dir": records,
+                "analysis_dir": root / "A",
+                "server_url": "http://x",
+            }
+        }
+        with patch.object(client_config, "load", return_value=cfg):
+            # 裸记录：id 非时间戳，ts 由 08:00 推导（分钟对齐）
+            bare = {
+                "entry_id": "bare-20260906-001-aaaa",
+                "device_id": "MK8",
+                "date": "2026-09-06",
+                "ts": 1788678000000,
+                "tag": "",
+                "text": "裸记录",
+            }
+            journal.rebuild_records([bare], [])
+            # 之后增量补入一条时间更早的普通时间戳记录 → 应插在裸记录之前
+            journal.apply_delta([self._entry("1788677400000", 1788677400000, "早")], [])
+        content = (records / "2026-09-06.md").read_text(encoding="utf-8")
+        self.assertLess(
+            content.index("<!-- myrecord-time:1788677400000 -->"),
+            content.index("<!-- myrecord-time:bare-20260906-001-aaaa -->"),
+        )
+
     def test_apply_delta_tombstone_keeps_time_position(self):
         """墓碑补齐也按原条目时间插回原位置，而不是堆到文件末尾。"""
         root = _tmp_dir("cli-incr-tomb-")

@@ -20,14 +20,19 @@ python -m client
 
 客户端**不密集轮询云端**，且**同步是全自动、无感知的**：
 
-1. **启动即自动完整同步**：连接云端完整对账（从 `version=0` 重建/补齐本地镜像，
-   覆盖本地文件丢失；按删除标记移除）、冲刷离线队列、同步报告。
+1. **启动即自动完整同步**：连接云端完整对账（从 `version=0` 重建/补齐本地**“今天”**镜像，
+   覆盖本地文件丢失；按删除标记移除）、冲刷离线队列、同步报告；并对每个 `date < 今天` 的
+   历史日记做**整文件校验**，不一致即以云端为准覆盖本地（历史日只读）。
 2. **运行期间持续同步**：后台线程保持一条长连接（长轮询）挂起，服务端有更新（扇出）即
    返回并立即应用；写下的每条记录即触发 push（写后即时同步）。**服务端离线再上线后，
    后台线程会自动重新连接并完整对账**，无需手动同步。
 
 客户端只在前台交互运行时保持后台同步线程；关闭程序即无任何后台任务。断网时本地照常记录并
 进 `outbox.json` 离线队列，恢复后由后台线程自动冲刷补齐。
+
+> **只写“今天”（UTC+8，固定写死在代码中，非配置项）。** 客户端把当天记录写入本地并在当天推送；
+> 某条记录若未能在当天同步、拖到第二天，则**直接作废**（丢弃 `outbox.json` 中 `date < 今天` 的条目，
+> 不再推送）；服务端亦拒绝历史日的推送作双保险。历史日记从不被客户端改写。
 
 ## 配置
 
@@ -71,10 +76,10 @@ cp client/config.example.yaml client/config.yaml
 | `identity.py` | 链接凭证与设备身份：读写 `credentials.json`（单一共享 token）；`device_name()` 直接用本机名（电脑名/手机名，不允许自定义）；`make_entry_id(ts)` 以毫秒时间戳为 id（时间戳即标识，不做内容哈希） |
 | `atomic_write.py` | 原子文件写入（客户端自带小工具，与服务端各自独立） |
 | `render.py` | 日记文件格式本地渲染（标记/entry/tombstone/day_header；客户端自带，与服务端 hub/render.py 同款互不引用） |
-| `journal.py` | 本地日记渲染与写入：按天 `Records/YYYY-MM-DD.md` 原子追加、对账补齐（按 `(ts, entry_id)` 时间有序合并重排）、tombstone 移除 |
+| `journal.py` | 本地日记渲染与写入：**只写“今天”（UTC+8）** `Records/YYYY-MM-DD.md` 原子追加；对账**只对今天**做 `(ts, entry_id)` 时间有序合并；昨天及以前**整文件重放**（云端为准、覆盖本地）；过期未同步、`date < 今天` 的条目直接作废；tombstone 移除 |
 | `file_lock.py` | 跨进程互斥（`.journal.lock` 等），保证原子写 |
-| `sync.py` | 与中枢的同步客户端：`push_new`（写后即 push）、`send_pending`（冲刷离线队列）、`pull`（拉取对账）、`longpoll`（长连接扇出）、`full_sync`（启动/手动完整同步）、`sync_reports`（同步报告）、`delete_latest`、`status/admin_retry/admin_set_model` |
-| `cli.py` | 交互主循环：7 个命令路由、`/v` 查看本地日记、清屏与日期解析、启动时 `full_sync`、维持长连接后台线程 |
+| `sync.py` | 与中枢的同步客户端：`push_new`（写后即 push，**仅今天**）、`send_pending`（冲刷离线队列，过期即丢弃）、`pull`（拉取今天对账）、`longpoll`（长连接扇出）、`full_sync`（启动/手动完整同步 + 历史日整文件校验）、`sync_reports`（同步报告）、`delete_latest`（仅今天）、`status/admin_retry/admin_set_model` |
+| `cli.py` | 交互主循环：7 个命令路由、`/v` 查看本地日记、清屏与日期解析、启动时 `full_sync` + 历史日整文件校验、维持长连接后台线程 |
 | `terminal.py` | 跨平台终端输入：逐字符读取、Unicode 感知整字符退格（Windows 控制台事件 / POSIX raw），并处理后台线程通知展示 |
 
 ## 本地文件
