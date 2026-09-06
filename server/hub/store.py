@@ -72,7 +72,7 @@ class Store:
             value = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             # state.json 是唯一事实源：损坏时不能静默当成“空库”，否则会看似全部丢失。
-            # 记录告警（仍按原逻辑回退到空状态，写入是原子替换，正常不触发，但需可观测）。
+            # 记录告警并回退到空状态（写入是原子替换，正常不触发，但需可观测）。
             logger.warning("state.json 读取失败，已回退到空状态: %s", self.path)
             value = {}
         for key in ("version", "entries", "tombstones", "trash", "devices"):

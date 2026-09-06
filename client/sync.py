@@ -80,8 +80,8 @@ class SyncClient:
           该警告打进 stderr，污染交互终端并在长连接循环里反复刷屏。
         - 某路径 → 交给 requests 校验该 CA/自签证书
 
-        注意：verify 为空即关闭证书校验（默认），存在中间人风险。这里不再额外
-        打印 UserWarning（避免启动时污染交互终端），仅静默抑制 urllib3 警告；
+        注意：verify 为空即关闭证书校验（默认），存在中间人风险。这里不额外打印
+        UserWarning（避免污染交互终端），仅静默抑制 urllib3 警告；
         是否严格校验由用户在 config.yaml 里自行权衡。
         """
         verify = config.load()["client"].get("verify")
@@ -147,8 +147,6 @@ class SyncClient:
         - has_credentials: 本地是否已写入凭据 token（能否修改数据的前提）。
         - error: connected=False 时的失败原因。
 
-        过去启动时无条件打印「已连接服务端」，把「仅配置了服务器地址」误当成
-        「已连接」；服务端未启动也显示已连接。这里先真实探测，避免误报。
         能连上服务端不代表有改数据的凭据；有凭据也不代表当前在线——两者独立。
         """
         connected = False
@@ -215,7 +213,11 @@ class SyncClient:
             pass  # 离线：保留队列，等待下次拉取/推送补齐
 
     def send_pending(self) -> dict:
-        """冲刷离线队列：仅发“今天”的条目；过期（date < 今天）直接作废清除。"""
+        """冲刷离线队列：仅发“今天”的条目；过期（date < 今天）直接作废清除。
+
+        网络请求在 outbox 锁外进行：即使服务端慢或断连，也不一直占用 outbox 锁，
+        其余线程（写入 / 后台同步）仍可继续维护离线队列。
+        """
         with file_lock(_outbox_path()):
             outbox = _load_outbox()
             today = journal.today_utc8()
@@ -225,29 +227,34 @@ class SyncClient:
                 _save_outbox(pending)
             if not pending:
                 return {"accepted": [], "version": _read_state(), "entries": [], "tombstones": []}
-            status, delta = self._request_payload(
-                "POST",
-                "/api/sync/push",
-                json_body={"entries": pending, "version": _read_state()},
-            )
-            if status >= 400 and status != 422:
-                # 404/500 等非预期，交由上层当作网络问题重试（outbox 保留）。
-                raise SyncError(f"服务端返回 {status}。")
-            if status == 422:
-                # 服务端拒绝批次：rejected 里的 id 作废（不入库、不要重试）；其余保留待下次重推。
-                rejected = set((delta or {}).get("rejected", []) or [])
-                remaining = [e for e in pending if e["entry_id"] not in rejected]
-                _save_outbox(remaining)
-                return {
-                    "accepted": [],
-                    "version": _read_state(),
-                    "entries": [],
-                    "tombstones": [],
-                    "rejected": sorted(rejected),
-                }
+        status, delta = self._request_payload(
+            "POST",
+            "/api/sync/push",
+            json_body={"entries": pending, "version": _read_state()},
+        )
+        if status >= 400 and status != 422:
+            # 404/500 等非预期，交由上层当作网络问题重试（outbox 保留）。
+            raise SyncError(f"服务端返回 {status}。")
+        if status == 422:
+            # 服务端拒绝批次：rejected 里的 id 作废（不入库、不要重试）；其余保留待下次重推。
+            rejected = set((delta or {}).get("rejected", []) or [])
+            removed = {e["entry_id"] for e in pending if e["entry_id"] in rejected}
+        else:
             accepted = set((delta or {}).get("accepted", []) or [])
-            remaining = [e for e in pending if e["entry_id"] not in accepted]
-            _save_outbox(remaining)
+            removed = {e["entry_id"] for e in pending if e["entry_id"] in accepted}
+        with file_lock(_outbox_path()):
+            # 只移除本次已确认处理（被接受/被拒作废）的条目；
+            # 保留网络请求期间其它线程新增到 outbox 的条目。
+            current = _load_outbox()
+            _save_outbox([e for e in current if e["entry_id"] not in removed])
+        if status == 422:
+            return {
+                "accepted": [],
+                "version": _read_state(),
+                "entries": [],
+                "tombstones": [],
+                "rejected": sorted(rejected),
+            }
         self._apply_delta(delta)
         return delta
 

@@ -38,10 +38,13 @@ def _command_run(args: argparse.Namespace) -> int:
         base = data_dir / "AnalysisReports"
         if not base.exists():
             return []
-        prefix = base / (kind or "").strip("/")
-        if not prefix.exists() or not prefix.is_dir():
+        base_resolved = base.resolve()
+        prefix = (base / (kind or "").strip("/")).resolve()
+        # kind 来自客户端查询参数：只枚举 AnalysisReports 目录内的文件，
+        # 剔除 ../ 等越界组合，避免列出目录之外的路径。
+        if not prefix.is_relative_to(base_resolved) or not prefix.is_dir():
             return []
-        return sorted(str(path.relative_to(base)) for path in prefix.rglob("*.md"))
+        return sorted(str(path.relative_to(base_resolved)) for path in prefix.rglob("*.md"))
 
     def read_report(rel: str) -> str | None:
         base = data_dir / "AnalysisReports"
@@ -163,8 +166,7 @@ def _command_token(args: argparse.Namespace) -> int:
 
     - create：签发唯一 token；已有有效凭证时重签会覆盖并作废旧 token，需输入 yes 二次确认。
     - list：查看是否已配置有效凭证。
-    不再提供 rotate/revoke：凭证是连接许可，重签即等价于 rotate；无多设备/多凭证
-    分离的需求。凭证不绑定设备，设备由各端自报本机名区分。
+    凭证是连接许可，重签即等价于 rotate；凭证不绑定设备，设备由各端自报本机名区分。
     """
     store, _ = _store(Path(config.load()["server"]["data_dir"]))
     if args.action == "list":
@@ -195,7 +197,7 @@ def _command_token(args: argparse.Namespace) -> int:
 def _command_import(args: argparse.Namespace) -> int:
     """导入既有 Records：**整文件拷贝**，不做解析/重排。
 
-    方案 B 下历史日以 `Records/*.md` 整文件为权威（可承载旧格式）。用户把旧日记
+    历史日以 `Records/*.md` 整文件为权威（可承载旧格式）。用户把旧日记
     放上云端 = 目录整体拷贝，旧格式原样保留，无需解析成条目。日期合法才拷贝到
     `data_dir/Records/<date>.md`（存在则覆盖——云端权威）。
     只做整文件拷贝、不回调 `render_records`：导入不写入 state，尤其不能重渲染

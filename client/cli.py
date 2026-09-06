@@ -315,8 +315,7 @@ def _sync_loop(client: SyncClient, synced: bool = False) -> None:
 def _report_startup_status(client: SyncClient, status: dict) -> None:
     """按「能否连到服务端」与「是否持有凭据」两个独立维度分别播报启动状态。
 
-    过去无条件打印「已连接服务端」，把「仅配置了地址」误当成「已连接」，
-    服务端未启动也显示已连接；这里先真实探测（/api/health），再区分：
+    先真实探测（/api/health）再区分：
       - 连接：网络/TLS 能否建立（连得上不代表有改数据权限）
       - 凭据：是否持有 token（有凭据才能修改中心数据）
     """
@@ -338,7 +337,6 @@ def run_interactive() -> None:
     client = SyncClient()
 
     # 启动先真实探测，再按两维度分别播报：能否连到服务端、是否持有凭据。
-    # 过去无条件打印「已连接服务端」，服务端未启动也显示已连接，属误报。
     status = client.probe()
     _report_startup_status(client, status)
 
