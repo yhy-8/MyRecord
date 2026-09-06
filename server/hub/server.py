@@ -93,11 +93,13 @@ def _authed(method):
 _LOCKOUT_THRESHOLD = 5
 
 
-def _delete_after_version(value: object) -> int:
-    """删除请求的增量游标：优先用客户端传来的 version，非法/缺失时回退到 0（全量）。
+def _write_response_version(value: object) -> int:
+    """写操作（push/delete）响应的增量游标：优先用客户端传来的 version，
+    非法/缺失时回退到 0（全量）。
 
-    全量回退虽然偏重，但能保证 gap-free：即使客户端游标未知或落后，也只会临时
-    多推一次，不会因回退到一个中间版本而漏掉中间条目。
+    push/delete 的主操作（入库 / 删墓碑）不依赖 version，version 只决定响应里
+    返回哪段增量。非法/缺失时回退 0 会多返回一次，但保证 gap-free：即使客户端
+    游标未知或落后，也不会漏掉中间条目。
     """
     if value is None:
         return 0
@@ -212,7 +214,7 @@ class SyncHandler(BaseHTTPRequestHandler):
                 422,
                 {"ok": False, "error": "expired", "rejected": rejected},
             )
-        after_version = int(body.get("version", 0) or 0)
+        after_version = _write_response_version(body.get("version"))
         delta = store.pull(after_version)
         self._send_json(
             200,
@@ -277,8 +279,8 @@ class SyncHandler(BaseHTTPRequestHandler):
         store.tombstone(entry["entry_id"], _device_id(self))
         # 删除只影响当天最新一条。用客户端传来的游标做 gap-free 增量：只返回客户端
         # 缺失的部分（含本删除产生的墓碑），不重复下发客户端已持有的条目。
-        # 旧客户端未带 version 时回退到全量对账（见 _delete_after_version），仍保证无缺口。
-        after_version = _delete_after_version(body.get("version"))
+        # 客户端未带/非法 version 时回退到全量对账（见 _write_response_version），仍保证无缺口。
+        after_version = _write_response_version(body.get("version"))
         logger.info(
             "sync_delete device=%s date=%s deleted=%s version=%d after=%d",
             _device_id(self),
