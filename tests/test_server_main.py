@@ -172,15 +172,26 @@ class ServerMainDeployTests(unittest.TestCase):
         timer_unit = self.root / "systemd" / "myrecord-backup.timer"
         fake_venv = Path("/srv/myrecord/server/.venv")
         import sys as _sys
+        out = io.StringIO()
         with patch("server.main.os.geteuid", return_value=0, create=True), patch(
             "server.main._SYSTEMD_UNIT_PATH", server_unit
         ), patch("server.main._BACKUP_SERVICE_PATH", backup_unit), patch(
             "server.main._BACKUP_TIMER_PATH", timer_unit
         ), patch("server.main._venv_dir", return_value=fake_venv), patch(
-            "sys.stdout", io.StringIO()
+            "sys.stdout", out
         ), patch("server.main.subprocess.run") as run:
             rc = server_main.main(["deploy"])
         self.assertEqual(0, rc)
+
+        # 部署摘要：虚拟环境/自签证书/链接凭证/API 配置/服务部署都要说明到。
+        summary = out.getvalue()
+        self.assertIn("部署完成", summary)
+        self.assertIn("虚拟环境", summary)
+        self.assertIn("自签证书", summary)
+        self.assertIn("链接凭证", summary)
+        self.assertIn("API 配置", summary)
+        self.assertIn("服务部署", summary)
+        self.assertIn(str(fake_venv), summary)  # 明确服务切到虚拟环境
 
         self.assertIn(
             "ExecStart=/srv/myrecord/server/.venv/bin/python -m server.main run",
@@ -207,6 +218,76 @@ class ServerMainDeployTests(unittest.TestCase):
                 ["systemctl", "start", "myrecord-backup.timer"],
             ],
         )
+        # 主服务与备份定时器都只 start、不 enable 开机自启。
+        for c in calls:
+            self.assertNotIn("enable", c)
+
+    def test_deploy_redeploy_stops_existing_then_overwrites_and_starts(self):
+        """迭代升级/重装：同名服务单元已存在时，先 stop 旧服务，再覆盖新单元并重新 start。
+        仍是 start、不 enable 开机自启；覆盖后写入新单元内容。"""
+        server_unit = self.root / "systemd" / "myrecord-server.service"
+        backup_unit = self.root / "systemd" / "myrecord-backup.service"
+        timer_unit = self.root / "systemd" / "myrecord-backup.timer"
+        server_unit.parent.mkdir(parents=True, exist_ok=True)
+        # 模拟已部署过：旧单元与旧定时器文件已存在（旧进程正在跑旧代码）。
+        server_unit.write_text("old-server", encoding="utf-8")
+        timer_unit.write_text("old-timer", encoding="utf-8")
+        fake_venv = Path("/srv/myrecord/server/.venv")
+        import sys as _sys
+
+        with patch("server.main.os.geteuid", return_value=0, create=True), patch(
+            "server.main._SYSTEMD_UNIT_PATH", server_unit
+        ), patch("server.main._BACKUP_SERVICE_PATH", backup_unit), patch(
+            "server.main._BACKUP_TIMER_PATH", timer_unit
+        ), patch("server.main._venv_dir", return_value=fake_venv), patch(
+            "sys.stdout", io.StringIO()
+        ), patch("server.main.subprocess.run") as run:
+            rc = server_main.main(["deploy"])
+        self.assertEqual(0, rc)
+
+        calls = [c.args[0] for c in run.call_args_list]
+        venv_py = (fake_venv / "bin" / "python").as_posix()
+        reqs = (Path(server_main.__file__).resolve().parent / "requirements.txt").as_posix()
+        self.assertEqual(
+            calls,
+            [
+                [_sys.executable, "-m", "venv", fake_venv.as_posix()],
+                [venv_py, "-m", "pip", "install", "-r", reqs],
+                ["systemctl", "stop", "myrecord-server"],
+                ["systemctl", "stop", "myrecord-backup.timer"],
+                ["systemctl", "daemon-reload"],
+                ["systemctl", "start", "myrecord-server"],
+                ["systemctl", "start", "myrecord-backup.timer"],
+            ],
+        )
+        # 仍不 enable 开机自启。
+        for c in calls:
+            self.assertNotIn("enable", c)
+        # 旧单元被新内容覆盖。
+        self.assertIn(
+            "ExecStart=/srv/myrecord/server/.venv/bin/python -m server.main run",
+            server_unit.read_text(encoding="utf-8"),
+        )
+
+
+class ServerMainApiStatusTests(unittest.TestCase):
+    """deploy 摘要里的 API 配置状态：按 config.raw 判断活动模型 api_key 是否就绪。"""
+
+    def test_api_status_no_models(self):
+        self.assertIn("未配置模型", server_main._api_config_status({}))
+        self.assertIn("未配置模型", server_main._api_config_status({"models": []}))
+
+    def test_api_status_active_model_without_key(self):
+        raw = {"models": [{"name": "m1", "api_key": ""}], "current_model": "m1"}
+        self.assertIn("api_key 为空", server_main._api_config_status(raw))
+
+    def test_api_status_active_model_with_key(self):
+        raw = {"models": [{"name": "m1", "api_key": "sk-x"}], "current_model": "m1"}
+        self.assertIn("已配置 api_key", server_main._api_config_status(raw))
+
+    def test_api_status_falls_back_to_first_model_when_current_missing(self):
+        raw = {"models": [{"name": "m1", "api_key": "sk-x"}, {"name": "m2"}], "current_model": "ghost"}
+        self.assertIn("m1", server_main._api_config_status(raw))
 
 
 class ServerMainRenderImportTests(unittest.TestCase):

@@ -20,6 +20,9 @@ python -m server.main run
 > （含 api_key，已 gitignore，不入版本库），请按上面两步用模板生成并**填入你的模型密钥**。
 > 启动后自带**后台调度线程**：每 15 分钟检测缺失，并独立执行到期任务（日总结 / 周报 / 月报
 > 互不依赖、无顺序要求）。该线程属服务端调度，与客户端同步无关。
+>
+> **生产环境请用 `python -m server.main deploy` 一键部署为 systemd 常驻**（自动建 venv + 装依赖 +
+> cert + token + 写入并启动单元，见下文「部署」）；上面 `run` 用于前台调试/临时验证。
 
 ## 子命令
 
@@ -105,6 +108,15 @@ sudo python -m server.main deploy
 `deploy` 写入服务端单元（`myrecord-server.service`），并安装与启动每周备份定时器
 （`myrecord-backup.service` + `myrecord-backup.timer`，均 `systemctl start`）。
 主服务与备份定时器都只 start、不 enable（不做开机自启，防止部署出错后重启自动拉起损坏服务、便于修复）。
+
+`deploy` 保证服务端**运行在 `server/.venv` 虚拟环境**（`ExecStart` 用 venv 的 python，依赖装进 venv），
+并在结束时打印「部署完成」摘要块，把 **虚拟环境 / 自签证书 / 链接凭证 / API 配置 / 服务部署**
+五方面状态一次说明到位（缺 config.yaml 或 api_key 会给下一步提示）。
+
+**升级/重装（同名服务）**：迭代后再次运行 `sudo python -m server.main deploy` 即可。若检测到同名服务单元
+已存在（旧进程正在跑旧代码），`deploy` 会**先 `systemctl stop` 关停旧服务**、**覆盖写入新单元**后
+`daemon-reload` 并**重新 `start`**，**仍不 `enable` 开机自启**。无需先手动删旧单元或手动停服务；首次部署时
+单元尚不存在，`deploy` 会跳过 `stop`，直接写入并启动。
 
 `deploy` 会把 `server/.venv` 的 python 作为 `ExecStart` 解释器，并从当前包实际位置自动推导工程根与
 `backup.sh` 绝对路径（不写死 `server/`），因此 `server/` 目录可改名，只要以 `python -m <新包名>.main deploy`

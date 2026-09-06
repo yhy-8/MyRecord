@@ -5,6 +5,8 @@
 # 该命令会自动带出当前解释器与工程根、按需生成自签证书，写入本单元并执行
 # systemctl daemon-reload && systemctl start myrecord-server（只部署并启动，
 # 不启用开机自启动）。
+# 若同名服务已部署（升级/重装），deploy 会先 systemctl stop 关停旧服务，覆盖本单元后
+# 再 daemon-reload && start，仍不 enable 开机自启。
 #
 # 以下是 deploy 自动生成的等价内容（供手动/审阅参照）。
 [Unit]

@@ -411,13 +411,37 @@ def _render_backup_unit(project_root: Path) -> str:
     )
 
 
+def _api_config_status(raw: dict) -> str:
+    """按 config.raw 给出活动模型 api_key 是否就绪的简短描述（不泄露密钥）。
+
+    config.load() 返回的 raw 是 config.yaml 顶层对象（models/current_model 等）。
+    deploy 用它向用户说明 API 配置状态，避免用户误以为有了 config.yaml 就有 AI 能力。
+    """
+    models = raw.get("models", []) if isinstance(raw, dict) else []
+    if not models:
+        return "未配置模型（复制 server/config.example.yaml 为 config.yaml 并填入 api_key）"
+    current = raw.get("current_model")
+    active = next(
+        (m for m in models if isinstance(m, dict) and m.get("name") == current),
+        models[0] if models else None,
+    )
+    if not isinstance(active, dict):
+        return "模型配置无效（检查 server/config.yaml 的 models）"
+    name = active.get("name", "未命名")
+    if not str(active.get("api_key") or "").strip():
+        return f"活动模型 {name} 的 api_key 为空，AI 暂不可用"
+    return f"活动模型 {name} 已配置 api_key，AI 可用"
+
+
 def _command_deploy(args: argparse.Namespace) -> int:
     """一键安装并启动 systemd 服务（需 root，仅 Linux）。
 
     自动完成：创建 server/.venv 虚拟环境并安装 requirements、生成自签证书、签发链接凭证
     （唯一共享 token，仅当尚无有效凭证时，避免覆盖作废旧凭证），并按当前包实际路径渲染
     systemd 单元与备份脚本，然后 `systemctl daemon-reload` 并 `start` 主服务与备份定时器
-    （均不 `enable` 开机自启，防止部署出错后重启自动拉起损坏服务）。
+    （均不 `enable` 开机自启，防止部署出错后重启自动拉起损坏服务）。服务端 `ExecStart` 一律
+    用 venv 的 python 运行，部署完成会打印摘要：虚拟环境、自签证书、链接凭证、api_key、
+    systemd 单元五方面状态一目了然。
 
     模型 api_key 仍需人工填入 server/config.yaml（当前为空则无 AI 能力）；填好后只需
     `systemctl restart myrecord-server` 即可生效，无需重新部署。
@@ -428,26 +452,32 @@ def _command_deploy(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
-    # 1) 虚拟环境：缺失则创建，并安装依赖到 venv（用 venv 的 python 作为服务运行环境）。
+    # 1) 虚拟环境：缺失则创建，并安装依赖到 venv（服务端运行时用 venv 的 python）。
     venv_dir = _venv_dir()
     venv_py = _venv_python()
-    if not venv_py.is_file():
+    venv_created = not venv_py.is_file()
+    if venv_created:
+        print(f"正在创建虚拟环境 {venv_dir} ...")
         subprocess.run([sys.executable, "-m", "venv", venv_dir.as_posix()], check=True)
     reqs = Path(__file__).resolve().parent / "requirements.txt"
+    print("正在把服务端依赖安装到虚拟环境（venv 的 pip）...")
     subprocess.run(
         [venv_py.as_posix(), "-m", "pip", "install", "-r", reqs.as_posix()], check=True
     )
     # 2) 配置提示：config.yaml 缺失时仍可部署（默认配置、无 AI），api_key 必须人工填。
-    if not config.config_path().is_file():
+    config_missing = not config.config_path().is_file()
+    if config_missing:
         print("[!] 未找到 server/config.yaml：服务将以默认配置运行（无 AI 能力）。")
         print("    请复制 config.example.yaml 为 config.yaml，并填入模型 api_key。")
     cfg = config.load()
     data_dir = Path(cfg["server"]["data_dir"])
     # 3) 自签证书（缺失才生成）。
     certfile = Path(cfg["server"]["tls"]["certfile"])
+    cert_created = False
     if not certfile.is_file():
         try:
             _generate_cert(data_dir)
+            cert_created = True
         except RuntimeError as error:
             print(f"[!] 生成自签证书失败：{error}", file=sys.stderr)
             return 2
@@ -469,6 +499,13 @@ def _command_deploy(args: argparse.Namespace) -> int:
     timer_dest = _BACKUP_TIMER_PATH
     for dest in (server_dest, backup_dest, timer_dest):
         dest.parent.mkdir(parents=True, exist_ok=True)
+    # 迭代升级/重装：同名服务单元已存在（旧进程还在跑旧代码）时，先正确关停再覆盖新单元。
+    # 首次部署时单元尚不存在，跳过 stop（`systemctl stop` 未注册单元会报错）。
+    redeployed = server_dest.exists() or timer_dest.exists()
+    if redeployed:
+        print("检测到已部署的同名服务：先关停旧服务，再覆盖新单元并重新启动。")
+        subprocess.run(["systemctl", "stop", "myrecord-server"], check=False)
+        subprocess.run(["systemctl", "stop", "myrecord-backup.timer"], check=False)
     server_dest.write_text(
         _render_systemd(str(venv_py), project_root), encoding="utf-8"
     )
@@ -481,13 +518,26 @@ def _command_deploy(args: argparse.Namespace) -> int:
     subprocess.run(["systemctl", "daemon-reload"], check=True)
     subprocess.run(["systemctl", "start", "myrecord-server"], check=True)
     subprocess.run(["systemctl", "start", "myrecord-backup.timer"], check=True)
-    print(f"已安装服务端单元：{server_dest}")
-    print(f"已安装备份单元与定时器：{backup_dest}、{timer_dest}")
-    print("已启动 myrecord-server 与 myrecord-backup.timer（本次启动；均不启用开机自启动）。")
-    print("模型 api_key 需人工填入 server/config.yaml（当前为空则无 AI 能力）。")
-    print("填好后只需 `systemctl restart myrecord-server` 即可生效，无需重新部署。")
+    # 7) 部署摘要：虚拟环境/自签证书/链接凭证/api_key/服务状态一次说明到位。
+    api_status = _api_config_status(cfg.get("raw"))
+    print("\n================ 部署完成 ================")
+    print(f"· 虚拟环境 ：{'已新建' if venv_created else '沿用已有'} {venv_dir}")
+    print(f"  （服务端用 {venv_py} 运行，已切到虚拟环境）")
+    print(f"· 自签证书 ：{'已生成' if cert_created else '已存在'} {certfile}")
     if token:
-        print("请把上面的 token 写入客户端 client/credentials.json（若无则新建）。")
+        print("· 链接凭证 ：已新签发（token 见上方输出；服务端只存哈希，请勿丢失）")
+    else:
+        print("· 链接凭证 ：已存在有效凭证，跳过签发（如需轮换请运行 token create）")
+    print(f"· API 配置 ：{api_status}")
+    print(
+        f"· 服务部署 ：已{'覆盖并重新启动' if redeployed else '写入并启动'} "
+        "myrecord-server 与 myrecord-backup.timer（均不启用开机自启动）"
+    )
+    if config_missing:
+        print("· 配置提醒 ：未找到 server/config.yaml，服务以默认配置（无 AI）运行；")
+        print("  复制 config.example.yaml 为 config.yaml 并填入 api_key 后 restart 即可。")
+    if token:
+        print("· 下一步   ：把 token 写入 client/credentials.json，并填好 server/config.yaml 的 api_key。")
     return 0
 
 
