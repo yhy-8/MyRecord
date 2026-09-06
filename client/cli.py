@@ -23,10 +23,8 @@ from .terminal import safe_input
 # 记录展示/分组统一时区：epoch 本身是无时区的绝对时间，展示不随运行机器，固定 UTC+8。
 _UTC8 = datetime.timezone(datetime.timedelta(hours=8))
 
-
-def today_utc8() -> str:
-    """当前 UTC+8 自然日 YYYY-MM-DD（固定时区，非配置项）。"""
-    return datetime.datetime.now(tz=_UTC8).date().isoformat()
+# 与 journal 共用同一定义（客户端内敛一处），避免两处 UTC+8 换算逻辑重复。
+today_utc8 = journal.today_utc8
 
 
 def _banner() -> None:

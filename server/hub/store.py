@@ -28,6 +28,14 @@ def today_utc8() -> str:
     return datetime.datetime.now(tz=_UTC8).date().isoformat()
 
 
+def _as_int(value: object, default: int = 0) -> int:
+    """把值安全转为 int；遇到 None / 非数值（畸形客户端数据）时用 default，避免 500。"""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 class Store:
     def __init__(
         self,
@@ -67,9 +75,9 @@ class Store:
             # 记录告警（仍按原逻辑回退到空状态，写入是原子替换，正常不触发，但需可观测）。
             logger.warning("state.json 读取失败，已回退到空状态: %s", self.path)
             value = {}
-        for key in ("version", "entries", "tombstones", "trash", "devices", "seen_devices"):
+        for key in ("version", "entries", "tombstones", "trash", "devices"):
             if key not in value:
-                value[key] = 0 if key == "version" else ([] if key == "seen_devices" else {})
+                value[key] = 0 if key == "version" else {}
         return value
 
     def _write(self, data: dict) -> None:
@@ -133,12 +141,11 @@ class Store:
             return None
 
     def device_names(self) -> list[str]:
-        """返回真实设备名集合（去重自条目/垃圾桶/删除标记 + 曾出现缓存），供状态展示。
+        """返回真实设备名集合（去重自条目/垃圾桶/删除标记），供状态展示。
 
         credential 标签（见 active_credential）只是连接凭证的标识，并非设备；
-        设备名是各端自报的本机名（写入条目 / 删除标记），因此从它们归纳。
-        历史日封存后条目态被清理，但仍保留“曾出现的设备名”缓存（seen_devices），
-        使状态展示不丢失历史归属。
+        设备名是各端自报的本机名，随条目/删除标记一起作为标签记录，**不单独维护**。
+        历史日封存后其条目态被清理，设备名也随之消失（服务端不额外记录设备清单）。
         """
         with self._lock:
             names = set()
@@ -151,18 +158,7 @@ class Store:
             for tomb in self.data["tombstones"].values():
                 if tomb.get("deleted_by"):
                     names.add(tomb["deleted_by"])
-            for name in self.data.get("seen_devices", []):
-                if name:
-                    names.add(name)
             return sorted(names)
-
-    def _remember_device(self, name: str) -> None:
-        """记录曾出现的设备名，供历史日封存后在状态展示中保留其归属。"""
-        if not name:
-            return
-        seen = self.data.setdefault("seen_devices", [])
-        if name not in seen:
-            seen.append(name)
 
     def _maybe_seal_previous_day(self) -> None:
         """日界切换：进程内首次遇到新的一天时，封存今天之前的条目态。
@@ -179,13 +175,13 @@ class Store:
         with self._lock:
             stale = set()
             for entry in self.data["entries"].values():
-                if entry["date"] < today:
+                if entry.get("date") and entry["date"] < today:
                     stale.add(entry["date"])
             for tomb in self.data["tombstones"].values():
-                if tomb.get("date", "") < today:
+                if tomb.get("date") and tomb["date"] < today:
                     stale.add(tomb["date"])
             for entry in self.data["trash"].values():
-                if entry["date"] < today:
+                if entry.get("date") and entry["date"] < today:
                     stale.add(entry["date"])
         if stale:
             # 先确保历史日文件已落盘（render 一次），再清理条目态；避免清理后文件缺失。
@@ -216,12 +212,13 @@ class Store:
     def append_entries(self, device_id: str, entries: list[dict]) -> tuple[list[str], list[str]]:
         """按 entry_id 去重合并多个条目（**仅今天**），返回 (accepted, rejected)。
 
-        - accepted：实际新增、或已被权威处理（已删）的 entry_id，客户端可据此清 outbox。
+        - accepted：实际新增、或已被权威处理（已删或已存在）的 entry_id，客户端可据此清 outbox。
         - rejected：``date != 今天`` 的 entry_id（过期/异常），未入库、未渲染；客户端应作废。
           服务端据此拒绝批次（双保险，配合客户端过期即作废）。
 
-        已删（tombstone）的条目绝不能因离线队列重推而复活：entry_id 已在墓碑里时视为
-        「已被权威处理（删除）」，不重新加入 entries——否则删除会被离线重推回滚。
+        已删（tombstone）或已存在（已同步过）的条目都不能再被重复入库：entry_id 已在墓碑里时
+        视为「已被权威处理（删除）」，不重新加入 entries——否则删除会被离线重推回滚；
+        entry_id 已在 entries 里时视为「已被权威处理（已存在）」，亦不重复入库。
         这类条目仍上报 accepted，让客户端把它从 outbox 清掉，避免永久重试。
         """
         added = []
@@ -238,7 +235,7 @@ class Store:
                 entry_id = entry.get("entry_id")
                 if not entry_id:
                     continue
-                date = _normalized_date(entry.get("date"), int(entry.get("ts", 0)))
+                date = _normalized_date(entry.get("date"), _as_int(entry.get("ts")))
                 if date != today:
                     rejected.append(entry_id)
             if rejected:
@@ -253,8 +250,10 @@ class Store:
                     superseded.append(entry_id)
                     continue
                 if entry_id in self.data["entries"]:
+                    # 已存在（已同步过）：不得重复入库，但视为已被权威处理，客户端可清 outbox。
+                    superseded.append(entry_id)
                     continue
-                date = _normalized_date(entry.get("date"), int(entry.get("ts", 0)))
+                date = _normalized_date(entry.get("date"), _as_int(entry.get("ts")))
                 self.data["version"] += 1
                 self.data["entries"][entry_id] = {
                     "entry_id": entry_id,
@@ -262,12 +261,11 @@ class Store:
                     # date 用于拼接文件名（<date>.md），必须规范为 YYYY-MM-DD，
                     # 否则含 ../ 等字符的 date 会让渲染写出数据目录之外。
                     "date": date,
-                    "ts": int(entry.get("ts", 0)),
+                    "ts": _as_int(entry.get("ts")),
                     "tag": entry.get("tag", ""),
                     "text": entry.get("text", ""),
                     "v": self.data["version"],
                 }
-                self._remember_device(device_id)
                 added.append(entry_id)
                 affected.add(date)
             if added:
@@ -292,7 +290,6 @@ class Store:
             del self.data["entries"][entry_id]
             self.data["version"] += 1
             date = entry["date"]
-            self._remember_device(deleted_by)
             self.data["tombstones"][entry_id] = {
                 "entry_id": entry_id,
                 "deleted_by": deleted_by,
@@ -301,7 +298,7 @@ class Store:
                 "ts": int(datetime.datetime.now().timestamp() * 1000),
                 # 保留原条目的时间：占位符按它插回记录流的原位置，
                 # 与服务端渲染/客户端原位替换保持严格一致（否则所有墓碑都堆到末尾）。
-                "entry_ts": int(entry.get("ts", 0)),
+                "entry_ts": _as_int(entry.get("ts")),
             }
             self._save()
             self._changed.notify_all()

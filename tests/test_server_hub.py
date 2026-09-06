@@ -59,9 +59,9 @@ class StoreTest(unittest.TestCase):
         self.assertEqual(accepted, ["a-1", "b-1"])
         self.assertEqual(rejected, [])
         self.assertEqual(store.data["version"], 2)
-        # 再次推送同一条不重复
+        # 再次推送同一条不重复，但已被权威处理（已存在）→ 上报 accepted 供客户端清 outbox（不再无限重试）。
         accepted2, _ = store.append_entries("a", [entries[0]])
-        self.assertEqual(accepted2, [])
+        self.assertEqual(accepted2, ["a-1"])
         self.assertEqual(store.data["version"], 2)
 
     def test_append_rejects_history_date(self):
@@ -448,14 +448,28 @@ class StoreSealPreviousDayTest(unittest.TestCase):
         # 昨日文件已在封存前落盘（render 一次），整文件保留
         self.assertTrue((records_dir / f"{yesterday}.md").exists())
 
-    def test_device_names_keeps_history_after_seal(self):
+    def test_device_names_derived_from_live_entries_only(self):
+        """方案 B：设备名只是写在条目上的标签，服务端不单独记录设备清单。
+
+        封存清理历史日条目态后，历史设备名随之消失（不再通过 seen_devices 额外缓存保留）。
+        """
         data = _tmp_data_dir() / "state.json"
         store = Store(data)
-        store.append_entries("MK8", [{"entry_id": "a-1", "date": _today(), "ts": _today_ts(8), "tag": "", "text": "x"}])
-        store._maybe_seal_previous_day()
-        store._today = None
-        # 封存清理今日条目态前，device_names 仍含历史设备名（来自 seen_devices 缓存）
+        store._today = _today()  # 无日界，便于注入“昨天”条目
+        yesterday = (
+            datetime.date.fromisoformat(_today()) - datetime.timedelta(days=1)
+        ).isoformat()
+        store.data["entries"]["y-1"] = {
+            "entry_id": "y-1", "device_id": "MK8", "date": yesterday,
+            "ts": _today_ts(8), "tag": "", "text": "昨日记录", "v": 1,
+        }
+        # 封存前：条目在态内，设备名可见
         self.assertIn("MK8", store.device_names())
+        # 触发封存：清理 date < 今天 的条目态
+        store._today = None
+        store.pull(0)
+        # 封存后：条目态被清理，设备名也不再保留（仅作条目标签，不单列）
+        self.assertNotIn("MK8", store.device_names())
 
 
 class StoreImmediateRenderTest(unittest.TestCase):

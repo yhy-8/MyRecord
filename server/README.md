@@ -59,7 +59,7 @@ python -m server.main deploy            一键安装并启动 systemd 服务（�
 
 | 文件 | 职责 |
 |---|---|
-| `hub/server.py` | HTTP 同步服务（stdlib ThreadingHTTPServer）：`/api/sync/push`、`/api/sync/pull`、`/api/sync/longpoll`、`/api/entries/delete`、`/api/status`、`/api/reports`、`/api/admin/*`；Bearer + device_id 鉴权 |
+| `hub/server.py` | HTTP 同步服务（stdlib ThreadingHTTPServer）：`/api/sync/push`、`/api/sync/pull`、`/api/sync/longpoll`、`/api/entries/delete`、`/api/records`、`/api/records/<date>`（历史日整文件拉取）、`/api/status`、`/api/reports`、`/api/admin/*`、`/api/health`；Bearer + device_id 鉴权 |
 | `hub/store.py` | 权威存储：`state.json` **仅“今天”**的条目/tombstone/垃圾桶/设备令牌/全局 `version` 游标；append-only 合并（按 entry_id 去重，仅今天）、`wait_for_change`（长轮询）、`pull(version)`（仅今天增量）、历史日整文件回传 |
 | `hub/auth.py` | 链接凭证令牌哈希（scrypt，加盐、常量时间），只存哈希，不落明文 |
 | `hub/atomic_write.py` | 原子文件写入（服务端自带小工具，与客户端各自独立） |

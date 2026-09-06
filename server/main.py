@@ -198,12 +198,14 @@ def _command_import(args: argparse.Namespace) -> int:
     方案 B 下历史日以 `Records/*.md` 整文件为权威（可承载旧格式）。用户把旧日记
     放上云端 = 目录整体拷贝，旧格式原样保留，无需解析成条目。日期合法才拷贝到
     `data_dir/Records/<date>.md`（存在则覆盖——云端权威）。
+    只做整文件拷贝、不回调 `render_records`：导入不写入 state，尤其不能重渲染
+    “今天”（会用空 state 覆盖刚导入的今日文件）。
     """
     source = Path(args.records).resolve()
     if not source.is_dir():
         print(f"目录不存在: {source}", file=sys.stderr)
         return 2
-    store, data_dir = _store(Path(config.load()["server"]["data_dir"]))
+    _, data_dir = _store(Path(config.load()["server"]["data_dir"]))
     records_dir = data_dir / "Records"
     records_dir.mkdir(parents=True, exist_ok=True)
     total = 0
@@ -218,7 +220,6 @@ def _command_import(args: argparse.Namespace) -> int:
         content = path.read_text(encoding="utf-8")
         atomic_write(records_dir / f"{date}.md", content)  # 原样拷贝（含旧格式）
         total += 1
-    store.render_records(records_dir, data_dir / "Trash")
     print(
         f"导入完成：整文件拷贝 {total} 个 Records（来自 {source}）；"
         f"跳过 {skipped} 个非法日期文件。"

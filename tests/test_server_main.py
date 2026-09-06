@@ -253,6 +253,24 @@ class ServerMainRenderImportTests(unittest.TestCase):
         # 非法日期文件被跳过
         self.assertFalse((self.data_dir / "Records" / "notes.md").exists())
 
+    def test_import_preserves_today_file(self):
+        """import 是整文件拷贝；若含“今天”文件，不得被 render_records 用空 state 覆盖。"""
+        src = self.root / "records-import-today"
+        src.mkdir()
+        today = today_utc8()
+        today_content = (
+            f"# {today}\n\n<summary>\n今日总结\n</summary>\n\n---\n"
+            "## 原始记录流\n\n**10:00:** 今天的一条记录\n"
+        )
+        (src / f"{today}.md").write_text(today_content, encoding="utf-8")
+        with patch("sys.stdout", io.StringIO()):
+            rc = server_main.main(["import", "--records", str(src)])
+        self.assertEqual(0, rc)
+        rendered = (self.data_dir / "Records" / f"{today}.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(today_content, rendered)
+
     def test_import_missing_directory_returns_error(self):
         with patch("sys.stdout", io.StringIO()):
             rc = server_main.main(
