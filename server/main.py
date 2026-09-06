@@ -347,6 +347,16 @@ def _deploy_dir() -> Path:
     return Path(__file__).resolve().parent / "deploy"
 
 
+def _venv_dir() -> Path:
+    """服务端虚拟环境目录：server/.venv（随包位置推导，支持服务端工程改名）。"""
+    return Path(__file__).resolve().parent / ".venv"
+
+
+def _venv_python() -> Path:
+    """服务端虚拟环境中的 python 解释器（Linux 下位于 .venv/bin/python）。"""
+    return _venv_dir() / "bin" / "python"
+
+
 def _package_name() -> str:
     """当前 server 包的实际文件夹名，即 `python -m <名称>.main` 所用的包名。
 
@@ -401,10 +411,15 @@ def _render_backup_unit(project_root: Path) -> str:
 
 
 def _command_deploy(args: argparse.Namespace) -> int:
-    """一键安装并启动 systemd 服务（需 root）。
+    """一键安装并启动 systemd 服务（需 root，仅 Linux）。
 
-    自动带出当前解释器与工程根，无需手改单元文件；同时安装并启用每周自动备份定时器。
-    若 TLS 证书缺失则先自动生成。
+    自动完成：创建 server/.venv 虚拟环境并安装 requirements、生成自签证书、签发链接凭证
+    （唯一共享 token，仅当尚无有效凭证时，避免覆盖作废旧凭证），并按当前包实际路径渲染
+    systemd 单元与备份脚本，然后 `systemctl daemon-reload` 并 `start` 主服务与备份定时器
+    （均不 `enable` 开机自启，防止部署出错后重启自动拉起损坏服务）。
+
+    模型 api_key 仍需人工填入 server/config.yaml（当前为空则无 AI 能力）；填好后只需
+    `systemctl restart myrecord-server` 即可生效，无需重新部署。
     """
     if not hasattr(os, "geteuid") or os.geteuid() != 0:
         print(
@@ -412,8 +427,22 @@ def _command_deploy(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+    # 1) 虚拟环境：缺失则创建，并安装依赖到 venv（用 venv 的 python 作为服务运行环境）。
+    venv_dir = _venv_dir()
+    venv_py = _venv_python()
+    if not venv_py.is_file():
+        subprocess.run([sys.executable, "-m", "venv", str(venv_dir)], check=True)
+    reqs = Path(__file__).resolve().parent / "requirements.txt"
+    subprocess.run(
+        [str(venv_py), "-m", "pip", "install", "-r", str(reqs)], check=True
+    )
+    # 2) 配置提示：config.yaml 缺失时仍可部署（默认配置、无 AI），api_key 必须人工填。
+    if not config.config_path().is_file():
+        print("[!] 未找到 server/config.yaml：服务将以默认配置运行（无 AI 能力）。")
+        print("    请复制 config.example.yaml 为 config.yaml，并填入模型 api_key。")
     cfg = config.load()
     data_dir = Path(cfg["server"]["data_dir"])
+    # 3) 自签证书（缺失才生成）。
     certfile = Path(cfg["server"]["tls"]["certfile"])
     if not certfile.is_file():
         try:
@@ -421,6 +450,17 @@ def _command_deploy(args: argparse.Namespace) -> int:
         except RuntimeError as error:
             print(f"[!] 生成自签证书失败：{error}", file=sys.stderr)
             return 2
+    # 4) 链接凭证（唯一共享 token）：仅当尚无有效凭证时签发，避免覆盖作废旧凭证。
+    store, _ = _store(data_dir)
+    token = None
+    if not store.active_credential():
+        token = auth.new_token()
+        store.register_device(_CREDENTIAL_DEVICE_LABEL, token)
+        print("已签发链接凭证（唯一共享 token，服务端只存哈希，请妥善保存）：")
+        print(f"token: {token}")
+    else:
+        print("已存在有效链接凭证，跳过签发（如需轮换请运行 token create）。")
+    # 5) 渲染并安装 systemd 单元（用 venv 的 python 作为 ExecStart 解释器）。
     project_root = Path(__file__).resolve().parent.parent
     deploy_dir = _deploy_dir()
     server_dest = _SYSTEMD_UNIT_PATH
@@ -429,21 +469,24 @@ def _command_deploy(args: argparse.Namespace) -> int:
     for dest in (server_dest, backup_dest, timer_dest):
         dest.parent.mkdir(parents=True, exist_ok=True)
     server_dest.write_text(
-        _render_systemd(sys.executable, project_root), encoding="utf-8"
+        _render_systemd(str(venv_py), project_root), encoding="utf-8"
     )
     backup_dest.write_text(_render_backup_unit(project_root), encoding="utf-8")
     timer_dest.write_text(
         (deploy_dir / "myrecord-backup.timer").read_text(encoding="utf-8"),
         encoding="utf-8",
     )
+    # 6) daemon-reload && start（主服务与备份定时器均不 enable 开机自启）。
     subprocess.run(["systemctl", "daemon-reload"], check=True)
-    # 只启动不 enable：主服务与备份定时器均不做开机自启，避免部署出错后重启自动拉起损坏服务、难以修复。
     subprocess.run(["systemctl", "start", "myrecord-server"], check=True)
-    # 备份定时器仅本次启动期内生效；不 enable 开机自启（重启后需重新 deploy 或手动 activate）。
     subprocess.run(["systemctl", "start", "myrecord-backup.timer"], check=True)
     print(f"已安装服务端单元：{server_dest}")
     print(f"已安装备份单元与定时器：{backup_dest}、{timer_dest}")
     print("已启动 myrecord-server 与 myrecord-backup.timer（本次启动；均不启用开机自启动）。")
+    print("模型 api_key 需人工填入 server/config.yaml（当前为空则无 AI 能力）。")
+    print("填好后只需 `systemctl restart myrecord-server` 即可生效，无需重新部署。")
+    if token:
+        print("请把上面的 token 写入客户端 client/credentials.json（若无则新建）。")
     return 0
 
 

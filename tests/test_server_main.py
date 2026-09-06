@@ -166,21 +166,24 @@ class ServerMainDeployTests(unittest.TestCase):
         self.assertIn("WorkingDirectory=/srv/myrecord", text)
 
     def test_deploy_installs_server_and_backup_and_starts_timer(self):
-        # 主服务与备份定时器都只 start、不 enable（不开机自启），防止部署出错后重启自动拉起损坏服务。
+        # 一键部署：自动建 venv + 装依赖，服务用 venv 的 python；主服务与备份定时器都只 start、不 enable。
         server_unit = self.root / "systemd" / "myrecord-server.service"
         backup_unit = self.root / "systemd" / "myrecord-backup.service"
         timer_unit = self.root / "systemd" / "myrecord-backup.timer"
+        fake_venv = Path("/srv/myrecord/server/.venv")
+        import sys as _sys
         with patch("server.main.os.geteuid", return_value=0, create=True), patch(
             "server.main._SYSTEMD_UNIT_PATH", server_unit
         ), patch("server.main._BACKUP_SERVICE_PATH", backup_unit), patch(
             "server.main._BACKUP_TIMER_PATH", timer_unit
-        ), patch("sys.stdout", io.StringIO()), patch("server.main.subprocess.run") as run:
+        ), patch("server.main._venv_dir", return_value=fake_venv), patch(
+            "sys.stdout", io.StringIO()
+        ), patch("server.main.subprocess.run") as run:
             rc = server_main.main(["deploy"])
         self.assertEqual(0, rc)
 
-        import sys as _sys
         self.assertIn(
-            f"ExecStart={_sys.executable} -m server.main run",
+            "ExecStart=/srv/myrecord/server/.venv/bin/python -m server.main run",
             server_unit.read_text(encoding="utf-8"),
         )
         backup_text = backup_unit.read_text(encoding="utf-8")
@@ -190,8 +193,14 @@ class ServerMainDeployTests(unittest.TestCase):
         self.assertIn("OnCalendar=weekly", timer_unit.read_text(encoding="utf-8"))
 
         calls = [c.args[0] for c in run.call_args_list]
+        venv_py = (fake_venv / "bin" / "python").as_posix()
+        reqs = (Path(server_main.__file__).resolve().parent / "requirements.txt").as_posix()
+        # 前两步：用当前解释器建 venv，再用 venv 的 pip 安装依赖。
+        self.assertEqual(calls[0], [_sys.executable, "-m", "venv", fake_venv.as_posix()])
+        self.assertEqual(calls[1], [venv_py, "-m", "pip", "install", "-r", reqs])
+        # 最后三步：只 start、不 enable。
         self.assertEqual(
-            calls,
+            calls[2:],
             [
                 ["systemctl", "daemon-reload"],
                 ["systemctl", "start", "myrecord-server"],

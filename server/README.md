@@ -94,18 +94,24 @@ cp server/config.example.yaml server/config.yaml
 
 ## 部署
 
-一键安装并启动为 systemd 服务（需 root，自动带出当前解释器与工程根，证书缺失时自动生成）：
+一键安装并启动为 systemd 服务（需 root；仅 Linux）。自动完成：创建虚拟环境
+`server/.venv`（Python 原生 venv）并安装 `server/requirements.txt`、缺失则生成自签证书、尚无有效凭证时
+自动签发链接凭证（token）、然后按当前包实际位置渲染并启动单元（**均不 enable 开机自启**）：
 
 ```bash
 sudo python -m server.main deploy
 ```
 
-`deploy` 写入服务端单元（`myrecord-server.service`），并安装与启用每周备份定时器
+`deploy` 写入服务端单元（`myrecord-server.service`），并安装与启动每周备份定时器
 （`myrecord-backup.service` + `myrecord-backup.timer`，均 `systemctl start`）。
 主服务与备份定时器都只 start、不 enable（不做开机自启，防止部署出错后重启自动拉起损坏服务、便于修复）。
 
-`deploy` 会从当前包实际位置自动推导解释器、工程根与 `backup.sh` 绝对路径（不写死 `server/`），
-因此 `server/` 目录可改名，只要以 `python -m <新包名>.main deploy` 启动即可正确生成单元。
+`deploy` 会把 `server/.venv` 的 python 作为 `ExecStart` 解释器，并从当前包实际位置自动推导工程根与
+`backup.sh` 绝对路径（不写死 `server/`），因此 `server/` 目录可改名，只要以 `python -m <新包名>.main deploy`
+启动即可正确生成单元。
+
+**模型 api_key 仍需人工填**：`deploy` 不写入 `config.yaml` 的 api_key。把 `server/config.yaml` 里的 api_key
+填好后，**只需 `systemctl restart myrecord-server` 即可生效，无需重新部署**。
 
 `server/deploy/`：
 
