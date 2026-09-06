@@ -27,18 +27,27 @@ def _fmt_hhmm(ts: int) -> str:
     return f"{dt:%H:%M}"
 
 
+def _single_line(text: str) -> str:
+    """把正文压成严格单行（换行替换为空格），保证每条记录只占一行头部。
+
+    这样一条记录在文件中恒为「隐藏标记 + 一条头行」，删除替换（tombstone）时
+    才能按单行边界准确匹配，避免跨行正文残留孤儿行。"""
+    return (text or "").replace("\r\n", " ").replace("\r", " ").replace("\n", " ").strip()
+
+
 def entry_block(entry: dict) -> str:
     """把一条 entry 渲染成文件中的一块（隐藏标记 + 记录行）。"""
     tag = (entry.get("tag") or "").strip()
     dev = (entry.get("device_id") or "").strip()
     hhmm = _fmt_hhmm(int(entry.get("ts", 0)))
     entry_id = entry["entry_id"]
+    text = _single_line(entry.get("text", ""))
     if tag:
-        header = f"**{hhmm} {tag}:** {entry.get('text', '')}"
+        header = f"**{hhmm} {tag}:** {text}"
     elif dev:
-        header = f"**{hhmm} [{dev}]:** {entry.get('text', '')}"
+        header = f"**{hhmm} [{dev}]:** {text}"
     else:
-        header = f"**{hhmm}:** {entry.get('text', '')}"
+        header = f"**{hhmm}:** {text}"
     line = f"{ENTRY_MARKER_PREFIX}{entry_id} -->\n"
     if dev:
         line += f"{DEVICE_MARKER_PREFIX}{dev} -->\n"

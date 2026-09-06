@@ -35,7 +35,6 @@ def _client_settings(records_dir: Path, analysis_dir: Path) -> dict:
             "server_url": "http://127.0.0.1:1",  # runner 会覆盖为真实地址
             "records_dir": records_dir,
             "analysis_dir": analysis_dir,
-            "longpoll_timeout_seconds": 25,
         }
     }
 
@@ -612,7 +611,6 @@ class ReportPathTraversalGuardTest(unittest.TestCase):
                 "records_dir": root / "Records",
                 "analysis_dir": base,
                 "server_url": "http://127.0.0.1:1",
-                "longpoll_timeout_seconds": 25,
             }
         }
         with patch.object(client_config, "load", return_value=cfg):
@@ -660,7 +658,6 @@ class TombstonePlaceholderSyncTest(unittest.TestCase):
                 "records_dir": records,
                 "analysis_dir": root / "AnalysisReports",
                 "server_url": "http://127.0.0.1:1",
-                "longpoll_timeout_seconds": 25,
             }
         }
         with patch.object(client_config, "load", return_value=cfg):
@@ -674,7 +671,7 @@ class TombstonePlaceholderSyncTest(unittest.TestCase):
         root = _tmp_dir("cli-tomb2-")
         records = root / "Records"
         records.mkdir(parents=True, exist_ok=True)
-        cfg = {"client": {"records_dir": records, "analysis_dir": root / "A", "server_url": "http://x", "longpoll_timeout_seconds": 25}}
+        cfg = {"client": {"records_dir": records, "analysis_dir": root / "A", "server_url": "http://x"}}
         with patch.object(client_config, "load", return_value=cfg):
             for _ in range(2):
                 journal.apply_delta([], [{"entry_id": "x", "date": "2024-06-01"}])
@@ -687,7 +684,7 @@ class TombstonePlaceholderSyncTest(unittest.TestCase):
         records = root / "Records"
         records.mkdir(parents=True, exist_ok=True)
         outside = root / "escape.md"
-        cfg = {"client": {"records_dir": records, "analysis_dir": root / "A", "server_url": "http://x", "longpoll_timeout_seconds": 25}}
+        cfg = {"client": {"records_dir": records, "analysis_dir": root / "A", "server_url": "http://x"}}
         with patch.object(client_config, "load", return_value=cfg):
             journal.apply_delta(
                 [{"entry_id": "e1", "date": "../escape", "ts": 1, "tag": "", "text": "x"}],

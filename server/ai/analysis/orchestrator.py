@@ -213,7 +213,7 @@ def _call_report_agent(
     return body
 
 
-def _report_input(period: dict, records: list[dict]) -> str:
+def _report_input(records: list[dict]) -> str:
     """按天分块：块首 `[YYYYMMDD]`，块内每行 `行号: 内容`，作为唯一事实源交给 Report Agent。
 
     行号即该记录在所属日期文件中的实际行号，与引用来源 `R-YYYYMMDD-行号` 中的行号一致。
@@ -382,11 +382,6 @@ def generate_analysis_report(
     run_id = uuid.uuid4().hex
     usage = UsageAccumulator()
     try:
-        period = {
-            "kind": kind,
-            "start": start.isoformat(),
-            "end": end.isoformat(),
-        }
         logger.info(
             "analysis_started run=%s kind=%s period=%s..%s",
             run_id,
@@ -405,7 +400,7 @@ def generate_analysis_report(
         if not records:
             return "日记中没有可识别的标准记录。", False, None
 
-        input_text = _report_input(period, records)
+        input_text = _report_input(records)
         raw_body = _call_report_agent(
             _report_task(kind),
             input_text,

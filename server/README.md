@@ -28,7 +28,7 @@ python -m server.main run            启动同步+AI 服务
 python -m server.main token create                 签发/重签唯一链接凭证（覆盖旧 token，需二次确认）
 python -m server.main token list                   查看当前唯一凭证状态（含生成时间）
 python -m server.main import --records 路径    导入既有 Records
-python -m server.main render          重渲染当天 Records
+python -m server.main render          重渲染全部 Records
 python -m server.main report --kind weekly|monthly --date YYYY-MM-DD   手动生成周/月报（同流程，直接覆盖）
 python -m server.main cert             生成自签证书（服务端直连 TLS，`--ip` 可指定 SAN）
 python -m server.main deploy            一键安装并启动 systemd 服务（需 root）
@@ -122,5 +122,6 @@ sudo python -m server.main deploy
 - **服务端记录详细日志**到 `data/Log/MyRecord.log`：客户端连接/鉴权、对日志的推送与在线删除、AI 报告
   生成成败与每步 Agent 调用、自动任务重试；不记录日记正文、模型密钥、token 明文。
 - 模型密钥只在服务端；不入数据空间、不入日志。
-- 日记文件统一使用 `<!-- myrecord-* -->` 条目/删除标记。解析器识别多种标记格式（`myrecord-*`、
-  `agentrecord-*`、无标记裸行）；无 entry_id 的记录自动生成确定性 id，标记注释不会混入正文，AI 只读文本。
+- 日记文件统一使用 `<!-- myrecord-* -->` 条目/删除标记。解析器识别 `myrecord-*` 条目/删除标记
+  并以 `**HH:MM ...:**` 头行作为记录（无标记裸行亦可）；`<!-- agentrecord-* -->` 等旧标记不会混入正文
+  （记录正文遇任意 `<!--` 即截止，AI 只读文本）。无 entry_id 的记录按位置生成确定性 id。

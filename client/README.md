@@ -39,10 +39,9 @@ cp client/config.example.yaml client/config.yaml
 # 编辑 config.yaml：把 server_url 改成你的服务端中枢地址,按需设置 verify
 ```
 
-`config.yaml`：服务器地址、本地数据目录（Records / AnalysisReports）、
-长轮询挂起秒数。相对路径以 `client/` 为基准；默认 `../Records`、`../AnalysisReports`
-指向 `client` 的**同级目录（项目根）**，把记录/报告与代码包 `client/` 分开存放。
-本地数据目录不入服务端中枢。
+`config.yaml`：服务器地址、本地数据目录（Records / AnalysisReports）。相对路径以 `client/`
+为基准；默认 `../Records`、`../AnalysisReports` 指向 `client` 的**同级目录（项目根）**，
+把记录/报告与代码包 `client/` 分开存放。本地数据目录不入服务端中枢。
 `server_url` 默认 `https://localhost:8765`（服务端强制 TLS）；`verify` 留空时不校验证书，
 设为服务端 `server.crt` 路径时严格校验收信。每台客户端启动不会打印 urllib3 的
 `InsecureRequestWarning`，避免污染交互终端。
@@ -68,7 +67,7 @@ cp client/config.example.yaml client/config.yaml
 | 文件 | 职责 |
 |---|---|
 | `__main__.py` | 程序入口：`python -m client` → `run_interactive()` |
-| `config.py` / `config.example.yaml` | 读取本地配置（服务器地址、数据目录、长轮询秒数）。`config.example.yaml` 是提交的模板；运行时读取 `config.yaml`（已 gitignore），由用户复制模板并填服务器地址 |
+| `config.py` / `config.example.yaml` | 读取本地配置（服务器地址、数据目录）。`config.example.yaml` 是提交的模板；运行时读取 `config.yaml`（已 gitignore），由用户复制模板并填服务器地址 |
 | `identity.py` | 链接凭证与设备身份：读写 `credentials.json`（单一共享 token）；`device_name()` 直接用本机名（电脑名/手机名，不允许自定义）；`make_entry_id(ts)` 以毫秒时间戳为 id（时间戳即标识，不做内容哈希） |
 | `atomic_write.py` | 原子文件写入（客户端自带小工具，与服务端各自独立） |
 | `render.py` | 日记文件格式本地渲染（标记/entry/tombstone/day_header；客户端自带，与服务端 hub/render.py 同款互不引用） |

@@ -76,6 +76,20 @@ def _authed(method):
 _LOCKOUT_THRESHOLD = 5
 
 
+def _delete_after_version(value: object) -> int:
+    """删除请求的增量游标：优先用客户端传来的 version，非法/缺失时回退到 0（全量）。
+
+    全量回退虽然偏重，但能保证 gap-free：即使客户端游标未知或落后，也只会临时
+    多推一次，不会因回退到一个中间版本而漏掉中间条目。
+    """
+    if value is None:
+        return 0
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
+
+
 def _read_json(handler) -> dict | None:
     length = int(handler.headers.get("Content-Length", 0) or 0)
     raw = handler.rfile.read(length) if length else b""
@@ -233,12 +247,17 @@ class SyncHandler(BaseHTTPRequestHandler):
                 {"ok": True, "deleted": None, "version": store.data["version"]},
             )
         store.tombstone(entry["entry_id"], _device_id(self))
+        # 删除只影响当天最新一条。用客户端传来的游标做 gap-free 增量：只返回客户端
+        # 缺失的部分（含本删除产生的墓碑），不重复下发客户端已持有的条目。
+        # 旧客户端未带 version 时回退到全量对账（见 _delete_after_version），仍保证无缺口。
+        after_version = _delete_after_version(body.get("version"))
         logger.info(
-            "sync_delete device=%s date=%s deleted=%s version=%d",
+            "sync_delete device=%s date=%s deleted=%s version=%d after=%d",
             _device_id(self),
             date,
             entry["entry_id"],
             store.data["version"],
+            after_version,
         )
         self._send_json(
             200,
@@ -246,7 +265,7 @@ class SyncHandler(BaseHTTPRequestHandler):
                 "ok": True,
                 "deleted": entry["entry_id"],
                 "version": store.data["version"],
-                **store.pull(entry["v"] - 1),
+                **store.pull(after_version),
             },
         )
 

@@ -291,6 +291,33 @@ class RunAndRetryTests(AutomationBase):
         self.assertEqual("failed", snapshot["tasks"]["daily_summary"]["status"])
         self.assertIn("last_detection_at", snapshot)
 
+    def test_period_rollover_drops_previous_failure(self):
+        """重试状态只保留一个周期：跨天/跨周后丢弃上个周期的失败，只处理当前周期。"""
+        # 07-15 观察昨天(07-14)总结缺失 → 首次失败
+        self._diary("2026-07-14")
+        with patch.object(
+            automation, "_run_generation", return_value=("失败", False)
+        ):
+            automation.run_due_automatic_tasks()
+        record = self._record(automation._load_automation_state(), "daily_summary")
+        self.assertEqual("failed", record["status"])
+        self.assertEqual(1, record["attempts"])
+
+        # 进入下一天(07-16)：昨天变为 07-15；07-14 的失败被丢弃，只处理 07-15
+        self._set_now(datetime.datetime(2026, 7, 16, 10, 0))
+        self._diary("2026-07-15")  # 新昨天缺失
+        with patch.object(
+            automation, "_run_generation", return_value=("成功", True)
+        ):
+            automation.run_due_automatic_tasks()
+        rec = self._record(automation._load_automation_state(), "daily_summary")
+        self.assertEqual("ok", rec["status"])
+        self.assertEqual("2026-07-15|2026-07-15", rec["target_key"])
+        self.assertEqual(0, rec["attempts"])  # 旧周期失败计数被丢弃
+        self.assertEqual("2026-07-15|2026-07-15", self._record(
+            automation._load_automation_state(), "daily_summary"
+        )["target_key"])
+
 
 if __name__ == "__main__":
     unittest.main()

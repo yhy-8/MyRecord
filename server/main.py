@@ -440,7 +440,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     token.add_argument("action", choices=["create", "list"])
     imp = sub.add_parser("import", help="导入 Records 目录")
     imp.add_argument("--records", required=True)
-    sub.add_parser("render", help="重新渲染当天 Records")
+    sub.add_parser("render", help="重新渲染全部 Records")
     rep = sub.add_parser("report", help="手动生成周报/月报（同一流程，直接覆盖）")
     rep.add_argument("--kind", required=True, choices=["weekly", "monthly"])
     rep.add_argument(

@@ -9,7 +9,6 @@ _DEFAULTS = {
     "server_url": "https://localhost:8765",
     "records_dir": "../Records",
     "analysis_dir": "../AnalysisReports",
-    "longpoll_timeout_seconds": 25,
     "verify": "",
 }
 

@@ -18,6 +18,9 @@ from .file_lock import file_lock
 
 
 logger = logging.getLogger(__name__)
+# 长轮询单次挂起由服务端固定 25 秒（见 hub/store.wait_for_change）；客户端请求超时
+# 固定取一个略大的值，保证服务端先响应，客户端不会先超时判为离线。
+_LONGPOLL_REQUEST_TIMEOUT = 30.0
 
 
 class SyncError(RuntimeError):
@@ -230,7 +233,7 @@ class SyncClient:
         delta = self._request(
             "GET",
             f"/api/sync/longpoll?version={_read_state()}",
-            timeout=config.load()["client"]["longpoll_timeout_seconds"] + 5.0,
+            timeout=_LONGPOLL_REQUEST_TIMEOUT,
         )
         changed = bool(delta.get("entries") or delta.get("tombstones"))
         self._apply_delta(delta)
@@ -239,8 +242,12 @@ class SyncClient:
     # ---------- 删除 ----------
 
     def delete_latest(self, date: str) -> str | None:
+        # 附带本地当前游标，服务端据此返回 gap-free 增量（只补客户端缺失的部分），
+        # 避免用“被删条目的版本-1”做粗粒度对账而多推数据或漏推中间版本。
         delta = self._request(
-            "POST", "/api/entries/delete", json_body={"date": date}
+            "POST",
+            "/api/entries/delete",
+            json_body={"date": date, "version": _read_state()},
         )
         self._apply_delta(delta)
         return delta.get("deleted")

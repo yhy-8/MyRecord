@@ -83,6 +83,21 @@ def _now_text(now: datetime.datetime) -> str:
     return now.isoformat(timespec="seconds")
 
 
+def _target_key(target: dict[str, str]) -> str:
+    """任务状态里持久化的周期标识（start|end）。"""
+    return f"{target['start']}|{target['end']}"
+
+
+def _same_period(record: dict, target: dict[str, str]) -> bool:
+    """判断某任务记录是否仍然对应当前目标周期。
+
+    跨周期（昨 / 上周 / 上月滚动）后，旧周期记录被丢弃，只保留当前周期——重试状态
+    只在一个周期内有效（前天的日记失败了，到了今天就不管前天，只处理昨天）。
+    target_key 缺失（旧状态文件 / 刚创建）视为当前，向后兼容。
+    """
+    return record.get("target_key") in (None, _target_key(target))
+
+
 # ---------- 目标周期 / 缺失判定 ----------
 
 
@@ -162,12 +177,18 @@ def _retry_due(record: dict, now: datetime.datetime) -> bool:
         return False
 
 
-def _mark_ok(record: dict) -> None:
+def _mark_ok(record: dict, tkey: str | None = None) -> None:
     record.update(status="ok", error="", attempts=0, next_retry_at="")
+    if tkey is not None:
+        record["target_key"] = tkey
 
 
 def _mark_failure(
-    record: dict, task: str, message: str, now: datetime.datetime
+    record: dict,
+    task: str,
+    message: str,
+    now: datetime.datetime,
+    tkey: str | None = None,
 ) -> None:
     attempts = int(record.get("attempts", 0) or 0) + 1
     limit = _retry_limit(task)
@@ -185,6 +206,8 @@ def _mark_failure(
                 now + datetime.timedelta(minutes=_RETRY_INTERVAL_MINUTES)
             ),
         )
+    if tkey is not None:
+        record["target_key"] = tkey
     logger.warning(
         "automation_task_failed task=%s attempts=%s limit=%s",
         task,
@@ -220,13 +243,21 @@ def _scan_missing(
             continue
         target = _default_task_target(task, now)
         record = _task_record(state, task)
+        tkey = _target_key(target)
+        # 周期已滚动：丢弃上个周期的失败/重试状态，只保留当前周期（昨/上周/上月）
+        if not _same_period(record, target):
+            record.clear()
         if not _task_missing(task, now, target=target):
-            _mark_ok(record)
+            _mark_ok(record, tkey)
             continue
-        # 新缺失（无记录或曾完成又缺失）→ 立即到期；已失败的保留自身重试安排
+        # 新缺失（无记录或曾完成又缺失）→ 立即到期；同周期已失败的保留其重试安排
         if not record or record.get("status") == "ok":
             record.update(
-                status="pending", error="", attempts=0, next_retry_at=_now_text(now)
+                status="pending",
+                error="",
+                attempts=0,
+                next_retry_at=_now_text(now),
+                target_key=tkey,
             )
 
 
@@ -239,20 +270,31 @@ def _process_due(
     for task in _AUTOMATION_TASKS:
         if automation.get(task, True) is not True:
             continue
+        target = _default_task_target(task, now)
         record = _task_record(state, task)
+        tkey = _target_key(target)
+        # 两次检测之间恰好跨周期：丢弃旧周期失败状态，只保留当前周期
+        if not _same_period(record, target):
+            record.clear()
+            record.update(
+                status="pending",
+                error="",
+                attempts=0,
+                next_retry_at=_now_text(now),
+                target_key=tkey,
+            )
         if record.get("status") in {"ok", "blocked"} or not _retry_due(record, now):
             continue
-        target = _default_task_target(task, now)
         if not _task_missing(task, now, target=target):
-            _mark_ok(record)
+            _mark_ok(record, tkey)
             continue
         logger.info("automation_task_start task=%s", task)
         message, success = _run_generation(task, target)
         if success:
-            _mark_ok(record)
+            _mark_ok(record, tkey)
             logger.info("automation_task_completed task=%s", task)
         else:
-            _mark_failure(record, task, message, now)
+            _mark_failure(record, task, message, now, tkey)
 
 
 def run_due_automatic_tasks() -> None:
@@ -318,12 +360,17 @@ def retry_failed_automatic_tasks() -> tuple[bool, str]:
             for task in _AUTOMATION_TASKS
             if automation.get(task, True) is True
             and _task_record(state, task).get("status") in _FAILED_STATUSES
+            and _same_period(_task_record(state, task), _default_task_target(task, now))
         ]
         if not failed:
             return True, "当前没有失败的自动任务可重试。"
         for task in failed:
             _task_record(state, task).update(
-                status="pending", error="", attempts=0, next_retry_at=_now_text(now)
+                status="pending",
+                error="",
+                attempts=0,
+                next_retry_at=_now_text(now),
+                target_key=_target_key(_default_task_target(task, now)),
             )
         _process_due(state, now, automation)
         _save_automation_state(state)
@@ -332,6 +379,7 @@ def retry_failed_automatic_tasks() -> tuple[bool, str]:
             for task in _AUTOMATION_TASKS
             if automation.get(task, True) is True
             and _task_record(state, task).get("status") in _FAILED_STATUSES
+            and _same_period(_task_record(state, task), _default_task_target(task, now))
         ]
         if not remaining:
             return True, "全部失败自动任务重试成功。"
@@ -355,12 +403,17 @@ def retry_failed_automatic_tasks() -> tuple[bool, str]:
 
 
 def failed_automatic_tasks() -> list[tuple[str, str, str]]:
-    """返回失败任务 ``(task, label, error)`` 列表。"""
+    """返回当前周期尚未完成的失败任务 ``(task, label, error)`` 列表。
+
+    跨周期后旧周期失败任务将被丢弃（见 _same_period），因此这里只列当前周期的失败。
+    """
     state = _load_automation_state()
+    now = datetime.datetime.now()
     return [
         (task, AUTOMATION_TASK_LABELS[task], str(_task_record(state, task).get("error", "")))
         for task in _AUTOMATION_TASKS
         if _task_record(state, task).get("status") in _FAILED_STATUSES
+        and _same_period(_task_record(state, task), _default_task_target(task, now))
     ]
 
 
