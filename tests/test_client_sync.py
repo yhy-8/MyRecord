@@ -734,5 +734,117 @@ class SubSecondOrderingTest(unittest.TestCase):
         self.assertIn("<!-- myrecord-time:1717200000123 -->", block)
 
 
+class IncrementalApplyDeltaOrderTest(unittest.TestCase):
+    """回归：增量对账（apply_delta）也要保持当天文件按 (ts, entry_id) 时间有序。
+
+    多端离线记录、服务端按推送顺序（v）入库时，条目/墓碑到达顺序与时间序可能不一致；
+    若 apply_delta 只是把新块追加到文件末尾，本地镜像就会乱序（复现：真实设备 t2 的
+    2026-09-06 内容按推送序排列而非时间序）。必须以块为单位合并重排，与全量重建
+    （rebuild_records）得到一致的时间有序镜像。
+    """
+
+    def _entry(self, entry_id, ts, text):
+        return {
+            "entry_id": entry_id,
+            "device_id": "MK8",
+            "date": "2026-09-06",
+            "ts": ts,
+            "tag": "",
+            "text": text,
+        }
+
+    def test_apply_delta_keeps_day_time_sorted_when_fanout_arrives_earlier(self):
+        """本地已有晚时间条目；扇出增量带来更早时间条目 → 应插到前面，而非追加到末尾。"""
+        root = _tmp_dir("cli-incr-order-")
+        records = root / "Records"
+        records.mkdir(parents=True, exist_ok=True)
+        cfg = {
+            "client": {
+                "records_dir": records,
+                "analysis_dir": root / "A",
+                "server_url": "http://x",
+            }
+        }
+        with patch.object(client_config, "load", return_value=cfg):
+            journal.rebuild_records(
+                [
+                    self._entry("436841", 436841, "我的刀盾"),
+                    self._entry("7507454", 7507454, "?"),
+                ],
+                [],
+            )
+            # 服务端扇出的增量（时间更早）经 apply_delta 合并
+            journal.apply_delta(
+                [
+                    self._entry("426853", 426853, "2"),
+                    self._entry("431749", 431749, "姑姑嘎嘎"),
+                ],
+                [],
+            )
+        content = (records / "2026-09-06.md").read_text(encoding="utf-8")
+        order = {eid: content.index(f"<!-- myrecord-time:{eid} -->") for eid in ("426853", "431749", "436841", "7507454")}
+        # 按 (ts, entry_id) 时间有序：早的两个在晚的两个之前
+        self.assertLess(order["426853"], order["436841"])
+        self.assertLess(order["431749"], order["436841"])
+        self.assertLess(order["436841"], order["7507454"])
+        self.assertLess(content.index("2"), content.index("我的刀盾"))
+
+    def test_apply_delta_idempotent_on_repeat(self):
+        """重复 apply_delta 同一批增量：不重复追加，仍时间有序。"""
+        root = _tmp_dir("cli-incr-idem-")
+        records = root / "Records"
+        records.mkdir(parents=True, exist_ok=True)
+        cfg = {
+            "client": {
+                "records_dir": records,
+                "analysis_dir": root / "A",
+                "server_url": "http://x",
+            }
+        }
+        with patch.object(client_config, "load", return_value=cfg):
+            entries = [
+                self._entry("426853", 426853, "2"),
+                self._entry("436841", 436841, "我的刀盾"),
+            ]
+            journal.apply_delta(entries, [])
+            journal.apply_delta(entries, [])  # 重复
+        content = (records / "2026-09-06.md").read_text(encoding="utf-8")
+        self.assertEqual(1, content.count("myrecord-time:426853 -->"))
+        self.assertEqual(1, content.count("myrecord-time:436841 -->"))
+
+    def test_apply_delta_tombstone_keeps_time_position(self):
+        """墓碑补齐也按原条目时间插回原位置，而不是堆到文件末尾。"""
+        root = _tmp_dir("cli-incr-tomb-")
+        records = root / "Records"
+        records.mkdir(parents=True, exist_ok=True)
+        cfg = {
+            "client": {
+                "records_dir": records,
+                "analysis_dir": root / "A",
+                "server_url": "http://x",
+            }
+        }
+        with patch.object(client_config, "load", return_value=cfg):
+            journal.rebuild_records(
+                [
+                    self._entry("426853", 426853, "2"),
+                    self._entry("436841", 436841, "我的刀盾"),
+                ],
+                [],
+            )
+            # 删除早时间条目（携带原条目时间 entry_ts）→ 墓碑应出现在 426853 位置
+            journal.apply_delta(
+                [],
+                [{"entry_id": "426853", "date": "2026-09-06", "entry_ts": 426853}],
+            )
+        content = (records / "2026-09-06.md").read_text(encoding="utf-8")
+        self.assertIn("myrecord-tombstone-time:426853 -->", content)
+        self.assertNotIn("myrecord-time:426853 -->", content)  # 原条目被替换
+        self.assertLess(
+            content.index("myrecord-tombstone-time:426853 -->"),
+            content.index("myrecord-time:436841 -->"),
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -89,13 +89,73 @@ def day_entry_ids(content: str) -> set[str]:
     )
 
 
+def day_tombstone_ids(content: str) -> set[str]:
+    return set(
+        re.findall(
+            r"^" + re.escape(TOMBSTONE_MARKER_PREFIX) + r"([^>]+) -->",
+            content,
+            re.MULTILINE,
+        )
+    )
+
+
+# 块起始：条目标记或墓碑标记行（id 紧跟其内；生产环境 id 即毫秒时间戳）。
+_BLOCK_START_RE = re.compile(
+    r"^(<!-- (?:myrecord-time:|myrecord-tombstone-time:)([^>]+) -->)",
+    re.MULTILINE,
+)
+
+
+def _block_sort_ts(entry_id: str) -> int:
+    """块的时间排序键：生产环境 id 即毫秒时间戳（entry_id == str(ts)）。
+
+    非数字 id（异常/测试数据）防御性取 0，仍有确定排序，不依赖 id 内容。
+    """
+    try:
+        return int(entry_id)
+    except ValueError:
+        return 0
+
+
+def _split_day_blocks(content: str) -> tuple[str, list[tuple[int, str, str]]]:
+    """把日记文件拆成头部文本 + 有序块列表。
+
+    原始记录流由条目块 / 墓碑块组成，每块以 `myrecord-time:` 或
+    `myrecord-tombstone-time:` 标记行起始。头部（文件头、`<summary>`、
+    `## 原始记录流` 分隔等）完整保留；块的**原文**（含设备行等）也原样保留，
+    只是按 (时间戳, entry_id) 重新排序，保证镜像始终时间有序。
+    返回 (头部, [(sort_ts, entry_id, 块原文)])。
+    """
+    matches = list(_BLOCK_START_RE.finditer(content))
+    if not matches:
+        return content, []
+    header = content[: matches[0].start()]
+    blocks = []
+    for i, match in enumerate(matches):
+        start = match.start()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(content)
+        entry_id = match.group(2)
+        blocks.append((_block_sort_ts(entry_id), entry_id, content[start:end]))
+    return header, blocks
+
+
 def apply_delta(entries: list[dict], tombstones: list[dict]) -> None:
-    """补齐缺失条目并按 tombstone 移除本地已删条目（本地渲染/对账）。"""
-    by_date: dict[str, list[dict]] = {}
+    """补齐缺失条目并按 tombstone 移除本地已删条目，保持当天文件时间有序。
+
+    增量对账把受影响日期**按 (ts, entry_id) 合并重排**，而不是简单追加到文件末尾：
+    多端离线记录、服务端按推送顺序（v）入库时，条目到达顺序可能与时间序不一致，
+    只追加会让本地镜像乱序（与全量重建不一致）。这里以块为单位合并重排，
+    既保留既有块原文与 `<summary>`，又始终得到时间有序的镜像。
+    """
+    entry_by_date: dict[str, list[dict]] = {}
     for entry in entries:
-        by_date.setdefault(entry["date"], []).append(entry)
+        entry_by_date.setdefault(entry["date"], []).append(entry)
+    tomb_by_date: dict[str, list[dict]] = {}
+    for tombstone in tombstones:
+        tomb_by_date.setdefault(tombstone.get("date", ""), []).append(tombstone)
+
     with file_lock(records_dir() / ".journal.lock"):
-        for date, day_entries in by_date.items():
+        for date in sorted(set(entry_by_date) | set(tomb_by_date)):
             if not _valid_iso_date(date):
                 # date 用于拼文件名；非法日期（如含 ../）会让写入逃逸出 Records，防御性跳过。
                 logger.warning("entry_date_invalid skips date=%r", date)
@@ -103,16 +163,30 @@ def apply_delta(entries: list[dict], tombstones: list[dict]) -> None:
             ensure_day_file(date)
             path = day_path(date)
             content = path.read_text(encoding="utf-8")
-            existing = day_entry_ids(content)
-            missing = [e for e in day_entries if e["entry_id"] not in existing]
-            if missing:
-                # 每条块后跟一个空行，与 append_record 的逐块 + "\n" 格式一致，
-                # 避免对账/扇出补写时多条记录连在一起、失去换行。
-                body = "".join(entry_block(e) + "\n" for e in missing)
-                with path.open("a", encoding="utf-8") as handle:
-                    handle.write(body)
-        for tombstone in tombstones:
-            _apply_tombstone(tombstone["entry_id"], tombstone.get("date", ""))
+            existing_entries = day_entry_ids(content)
+            existing_tombs = day_tombstone_ids(content)
+            header, blocks = _split_day_blocks(content)
+
+            # 补齐缺失条目（按时间排序并入，而非追加到末尾）
+            for entry in entry_by_date.get(date, []):
+                if entry["entry_id"] in existing_entries:
+                    continue
+                blocks.append(
+                    (int(entry.get("ts", 0)), entry["entry_id"], entry_block(entry) + "\n")
+                )
+            # 墓碑：把对应条目块替换/补写为占位符，按原条目时间插回原位置
+            for tombstone in tomb_by_date.get(date, []):
+                entry_id = tombstone["entry_id"]
+                if entry_id in existing_tombs:
+                    continue  # 已存在占位符，幂等
+                sort_ts = int(tombstone.get("entry_ts", tombstone.get("ts", 0)))
+                blocks = [b for b in blocks if b[1] != entry_id]
+                blocks.append((sort_ts, entry_id, tombstone_block(entry_id) + "\n"))
+
+            blocks.sort(key=lambda item: (item[0], item[1]))
+            rebuilt = header + "".join(b[2] for b in blocks)
+            if rebuilt != content:
+                atomic_write(path, rebuilt)
 
 
 _SUMMARY_RE = re.compile(r"<summary>(.*?)</summary>", re.DOTALL)
@@ -135,7 +209,8 @@ def rebuild_records(entries: list[dict], tombstones: list[dict]) -> None:
 
     用于完整对账（pull?version=0）：把本地镜像重建为与服务端渲染一致的时间有序结构，
     使多端离线写入时也按时间而非推送顺序入库。
-    局部增量（apply_delta）仍只追加/原位替换，不整页重排，避免每次扇出都重写整个文件。
+    局部增量（apply_delta）同样按受影响日期合并重排（见 apply_delta），保证扇出后
+    镜像仍时间有序；与全量重建共用同一套 (ts, entry_id) 排序约定。
     """
     by_date: dict[str, list[dict]] = {}
     for entry in entries:
@@ -160,36 +235,4 @@ def rebuild_records(entries: list[dict], tombstones: list[dict]) -> None:
             atomic_write(path, text)
 
 
-def _apply_tombstone(entry_id: str, date: str = "") -> None:
-    prefix = re.escape(ENTRY_MARKER_PREFIX)
-    dev_prefix = re.escape(DEVICE_MARKER_PREFIX)
-    pattern = re.compile(
-        rf"^{prefix}{re.escape(entry_id)} -->\n"
-        rf"(?:{dev_prefix}[^\n]*\n)?"  # 可选：记录自带的设备名标记行
-        r"[^\n]*\n",
-        re.MULTILINE,
-    )
-    # ① 本地若已有该条：替换为 tombstone 占位符（防复活，保留原位）。
-    for path in list(records_dir().glob("*.md")):
-        content = path.read_text(encoding="utf-8")
-        match = pattern.search(content)
-        if not match:
-            continue
-        rebuilt = (
-            content[: match.start()]
-            + tombstone_block(entry_id)
-            + content[match.end():]
-        )
-        atomic_write(path, rebuilt)
-        return
-    # ② 本地从未有过该条：也把占位符补写到对应日文件，保证删除历史完整同步。
-    if not date or not _valid_iso_date(date):
-        return
-    ensure_day_file(date)
-    target = day_path(date)
-    content = target.read_text(encoding="utf-8")
-    marker = re.escape(f"{TOMBSTONE_MARKER_PREFIX}{entry_id} -->")
-    if re.search(rf"^{marker}\s*$", content, re.MULTILINE):
-        return  # 已存在占位符，幂等
-    with target.open("a", encoding="utf-8") as handle:
-        handle.write(tombstone_block(entry_id) + "\n")
+
