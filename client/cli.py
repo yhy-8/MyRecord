@@ -24,6 +24,11 @@ from .terminal import safe_input
 _UTC8 = datetime.timezone(datetime.timedelta(hours=8))
 
 
+def today_utc8() -> str:
+    """当前 UTC+8 自然日 YYYY-MM-DD（固定时区，非配置项）。"""
+    return datetime.datetime.now(tz=_UTC8).date().isoformat()
+
+
 def _banner() -> None:
     console = Console()
     console.print(Panel.fit("[bold]MyRecord 客户端[/bold]", border_style="cyan"))
@@ -61,8 +66,8 @@ def clear_screen() -> None:
 
 
 def resolve_date(arg: str = "") -> str:
-    """解析日期参数（today/昨天/-1/MM-DD/YYYY-MM-DD），默认今天。"""
-    today = datetime.date.today()
+    """解析日期参数（today/昨天/-1/MM-DD/YYYY-MM-DD），默认今天（UTC+8）。"""
+    today = datetime.date.fromisoformat(today_utc8())
     value = arg.strip()
     if not value:
         return today.isoformat()
@@ -200,7 +205,7 @@ def _handle_status(client: SyncClient) -> None:
 
 def _handle_delete(client: SyncClient) -> None:
     console = Console()
-    today = datetime.date.today().isoformat()
+    today = today_utc8()
     try:
         deleted = client.delete_latest(today)
     except SyncError as error:
@@ -273,6 +278,10 @@ def _write_record(client: SyncClient, text: str) -> None:
         "tag": "",
         "text": text,
     }
+    if entry["date"] != today_utc8():
+        # 过期/异常（客户端时钟已跨天或时刻异常）：客户端从不写历史日，丢弃。
+        Console().print(f"[yellow][!][/yellow] 已过期（{entry['date']}），丢弃，不计入今天。")
+        return
     # 本地写入永不回滚，与同步成败无关
     journal.append_record(entry)
     # 尽力即时同步：无凭据或离线时 push_new 会静默失败并留在离线队列
@@ -323,6 +332,7 @@ def _report_startup_status(client: SyncClient, status: dict) -> None:
         console.print("[green][*][/green] 凭据：已配置，可同步与修改数据（后台持续同步）")
     else:
         console.print("[yellow][!][/yellow] 凭据：未配置，仅本地记录；上线前请先写入 credentials.json（后台会自动重连同步）")
+    console.print(f"[dim]今天：{today_utc8()}（UTC+8，仅今天可写）[/dim]")
 
 
 def run_interactive() -> None:

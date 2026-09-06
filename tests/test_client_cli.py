@@ -41,10 +41,11 @@ class ClientCLIUnconfiguredOfflineTests(unittest.TestCase):
         root = Path(tempfile.mkdtemp(prefix="cli-nocred-"))
         records = root / "Records"
         records.mkdir(parents=True, exist_ok=True)
+        today = cli_app.today_utc8()
         entry = {
             "entry_id": "e-test1",
             "device_id": "desk-01",
-            "date": "2024-06-01",
+            "date": today,
             "ts": 5,
             "tag": "",
             "text": "无凭据本地记录",
@@ -68,7 +69,7 @@ class ClientCLIUnconfiguredOfflineTests(unittest.TestCase):
             client.push_new(entry)  # 无凭据：内部静默失败，不抛异常
             client_journal.append_record(entry)  # 本地记录永不依赖凭据/在线
 
-            day = (records / "2024-06-01.md").read_text(encoding="utf-8")
+            day = (records / f"{today}.md").read_text(encoding="utf-8")
             self.assertIn("无凭据本地记录", day)
             self.assertIn("e-test1", day)
 
@@ -84,10 +85,11 @@ class ClientCLIUnconfiguredOfflineTests(unittest.TestCase):
         """
         root = Path(tempfile.mkdtemp(prefix="cli-fresh-"))
         records = root / "Records"  # 故意不预创建：模拟全新安装首次记录
+        today = cli_app.today_utc8()
         entry = {
             "entry_id": "e-fresh-1",
             "device_id": "desk-01",
-            "date": "2026-09-01",
+            "date": today,
             "ts": 5,
             "tag": "",
             "text": "首次本地记录",
@@ -111,7 +113,7 @@ class ClientCLIUnconfiguredOfflineTests(unittest.TestCase):
             client_journal.append_record(entry)
             client.push_new(entry)  # 无凭据：内部静默失败，不抛异常
 
-            day = (records / "2026-09-01.md").read_text(encoding="utf-8")
+            day = (records / f"{today}.md").read_text(encoding="utf-8")
             self.assertIn("首次本地记录", day)
             self.assertIn("e-fresh-1", day)
 
@@ -275,18 +277,14 @@ class ClientCLIDateTests(unittest.TestCase):
     """/v 与终端日期解析辅助（已并入 cli/app.py）。"""
 
     def test_resolve_date_defaults_to_today(self):
-        self.assertEqual(
-            datetime.date.today().isoformat(), cli_app.resolve_date("")
-        )
-        self.assertEqual(
-            datetime.date.today().isoformat(), cli_app.resolve_date("today")
-        )
-        self.assertEqual(
-            datetime.date.today().isoformat(), cli_app.resolve_date("今天")
-        )
+        today = cli_app.today_utc8()
+        self.assertEqual(today, cli_app.resolve_date(""))
+        self.assertEqual(today, cli_app.resolve_date("today"))
+        self.assertEqual(today, cli_app.resolve_date("今天"))
 
     def test_resolve_date_handles_negative_and_explicit_dates(self):
-        yesterday = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
+        today = datetime.date.fromisoformat(cli_app.today_utc8())
+        yesterday = (today - datetime.timedelta(days=1)).isoformat()
         self.assertEqual(yesterday, cli_app.resolve_date("yesterday"))
         self.assertEqual(yesterday, cli_app.resolve_date("昨天"))
         self.assertEqual(yesterday, cli_app.resolve_date("-1"))

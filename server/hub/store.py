@@ -19,6 +19,15 @@ from . import auth
 logger = logging.getLogger(__name__)
 
 
+# 展示/分组与“今天”统一时区：epoch 是无时区的绝对时间，固定按 UTC+8 换算（非配置项）。
+_UTC8 = datetime.timezone(datetime.timedelta(hours=8))
+
+
+def today_utc8() -> str:
+    """当前 UTC+8 自然日 YYYY-MM-DD（固定时区，非配置项）。"""
+    return datetime.datetime.now(tz=_UTC8).date().isoformat()
+
+
 class Store:
     def __init__(
         self,
@@ -32,6 +41,9 @@ class Store:
         self._lock = threading.RLock()
         self._changed = threading.Condition(self._lock)
         self.data = self._load()
+        # “今天”缓存：首次访问某方法时检测到日界切换则封存（见 _maybe_seal_previous_day）。
+        # 初始为 None，使进程重启落在新一天时也能正确封存历史数据。
+        self._today = None
         # 最后一次渲染到的权威版本：后台用它在“写后已即时渲染”时跳过无谓的全量重渲。
         self._rendered_version = int(self.data.get("version", 0))
 
@@ -55,9 +67,9 @@ class Store:
             # 记录告警（仍按原逻辑回退到空状态，写入是原子替换，正常不触发，但需可观测）。
             logger.warning("state.json 读取失败，已回退到空状态: %s", self.path)
             value = {}
-        for key in ("version", "entries", "tombstones", "trash", "devices"):
+        for key in ("version", "entries", "tombstones", "trash", "devices", "seen_devices"):
             if key not in value:
-                value[key] = 0 if key == "version" else {}
+                value[key] = 0 if key == "version" else ([] if key == "seen_devices" else {})
         return value
 
     def _write(self, data: dict) -> None:
@@ -121,10 +133,12 @@ class Store:
             return None
 
     def device_names(self) -> list[str]:
-        """返回真实设备名集合（去重自条目/垃圾桶/删除标记），供状态展示。
+        """返回真实设备名集合（去重自条目/垃圾桶/删除标记 + 曾出现缓存），供状态展示。
 
         credential 标签（见 active_credential）只是连接凭证的标识，并非设备；
         设备名是各端自报的本机名（写入条目 / 删除标记），因此从它们归纳。
+        历史日封存后条目态被清理，但仍保留“曾出现的设备名”缓存（seen_devices），
+        使状态展示不丢失历史归属。
         """
         with self._lock:
             names = set()
@@ -137,12 +151,74 @@ class Store:
             for tomb in self.data["tombstones"].values():
                 if tomb.get("deleted_by"):
                     names.add(tomb["deleted_by"])
+            for name in self.data.get("seen_devices", []):
+                if name:
+                    names.add(name)
             return sorted(names)
+
+    def _remember_device(self, name: str) -> None:
+        """记录曾出现的设备名，供历史日封存后在状态展示中保留其归属。"""
+        if not name:
+            return
+        seen = self.data.setdefault("seen_devices", [])
+        if name not in seen:
+            seen.append(name)
+
+    def _maybe_seal_previous_day(self) -> None:
+        """日界切换：进程内首次遇到新的一天时，封存今天之前的条目态。
+
+        封存 = ① 确保历史日 Records/Trash 已落盘（无则补渲染一次）；② 从 state.json
+        移除 ``date < 今天`` 的 entries/tombstones/trash；``version`` 保持单调（不递增）。
+        这样 state.json 只常驻今天的数据，历史日以 ``Records/*.md`` 整文件为权威（可承载旧格式）。
+
+        幂等：先渲染、后清理；已在今天或本进程已封存过则直接返回。
+        """
+        today = today_utc8()
+        if today == self._today:
+            return
+        with self._lock:
+            stale = set()
+            for entry in self.data["entries"].values():
+                if entry["date"] < today:
+                    stale.add(entry["date"])
+            for tomb in self.data["tombstones"].values():
+                if tomb.get("date", "") < today:
+                    stale.add(tomb["date"])
+            for entry in self.data["trash"].values():
+                if entry["date"] < today:
+                    stale.add(entry["date"])
+        if stale:
+            # 先确保历史日文件已落盘（render 一次），再清理条目态；避免清理后文件缺失。
+            self._render_dates(stale)
+        with self._lock:
+            entries = {
+                k: v for k, v in self.data["entries"].items() if v["date"] >= today
+            }
+            tombstones = {
+                k: v for k, v in self.data["tombstones"].items() if v.get("date", "") >= today
+            }
+            trash = {
+                k: v for k, v in self.data["trash"].items() if v["date"] >= today
+            }
+            if (
+                entries != self.data["entries"]
+                or tombstones != self.data["tombstones"]
+                or trash != self.data["trash"]
+            ):
+                self.data["entries"] = entries
+                self.data["tombstones"] = tombstones
+                self.data["trash"] = trash
+                self._save()
+        self._today = today
 
     # ---------- 条目 ----------
 
-    def append_entries(self, device_id: str, entries: list[dict]) -> list[str]:
-        """按 entry_id 去重合并多个条目，返回实际新增的 entry_id 列表。
+    def append_entries(self, device_id: str, entries: list[dict]) -> tuple[list[str], list[str]]:
+        """按 entry_id 去重合并多个条目（**仅今天**），返回 (accepted, rejected)。
+
+        - accepted：实际新增、或已被权威处理（已删）的 entry_id，客户端可据此清 outbox。
+        - rejected：``date != 今天`` 的 entry_id（过期/异常），未入库、未渲染；客户端应作废。
+          服务端据此拒绝批次（双保险，配合客户端过期即作废）。
 
         已删（tombstone）的条目绝不能因离线队列重推而复活：entry_id 已在墓碑里时视为
         「已被权威处理（删除）」，不重新加入 entries——否则删除会被离线重推回滚。
@@ -150,8 +226,24 @@ class Store:
         """
         added = []
         superseded = []
+        rejected = []
         affected = set()
+        self._maybe_seal_previous_day()
+        today = today_utc8()
         with self._lock:
+            # 第一遍：先发现过期/异常条目。若批次含 `date != 今天` 的条目，**整体拒绝**
+            # 该批次（不接受任何条目），返回 422 语义——避免“有效条目已被接受但客户端还
+            # 留在 outbox 盲重试”。过期条目会被客户端作废，有效条目下次单独重推即可入库。
+            for entry in entries:
+                entry_id = entry.get("entry_id")
+                if not entry_id:
+                    continue
+                date = _normalized_date(entry.get("date"), int(entry.get("ts", 0)))
+                if date != today:
+                    rejected.append(entry_id)
+            if rejected:
+                return [], rejected
+            # 第二遍：全部合法（date == 今天），按 entry_id 去重合并。
             for entry in entries:
                 entry_id = entry.get("entry_id")
                 if not entry_id:
@@ -162,8 +254,8 @@ class Store:
                     continue
                 if entry_id in self.data["entries"]:
                     continue
-                self.data["version"] += 1
                 date = _normalized_date(entry.get("date"), int(entry.get("ts", 0)))
+                self.data["version"] += 1
                 self.data["entries"][entry_id] = {
                     "entry_id": entry_id,
                     "device_id": device_id,
@@ -175,6 +267,7 @@ class Store:
                     "text": entry.get("text", ""),
                     "v": self.data["version"],
                 }
+                self._remember_device(device_id)
                 added.append(entry_id)
                 affected.add(date)
             if added:
@@ -182,18 +275,24 @@ class Store:
                 self._changed.notify_all()
         if added:
             self._render_dates(affected)
-        return added + superseded
+        return added + superseded, rejected
 
     def tombstone(self, entry_id: str, deleted_by: str) -> bool:
-        """把条目移入垃圾桶并写 tombstone，返回是否成功。"""
+        """把条目移入垃圾桶并写 tombstone（**仅今天可删**），返回是否成功。"""
+        self._maybe_seal_previous_day()
+        today = today_utc8()
         with self._lock:
             entry = self.data["entries"].get(entry_id)
             if entry is None or entry_id in self.data["tombstones"]:
+                return False
+            if entry["date"] != today:
+                # 历史日不可删（只读）：即便已入库，也拒绝删除。
                 return False
             self.data["trash"][entry_id] = entry
             del self.data["entries"][entry_id]
             self.data["version"] += 1
             date = entry["date"]
+            self._remember_device(deleted_by)
             self.data["tombstones"][entry_id] = {
                 "entry_id": entry_id,
                 "deleted_by": deleted_by,
@@ -210,7 +309,14 @@ class Store:
         return True
 
     def latest_entry_for_date(self, ts_date: str) -> dict | None:
-        """返回某日期（YYYY-MM-DD）内最新一条 entry，供 /d 删除。"""
+        """返回某日期（YYYY-MM-DD）内最新一条 entry，供 /d 删除。**仅今天可删**。
+
+        ``ts_date != 今天`` 时返回 None（历史日只读，客户端不可删、服务端也不返回）。
+        """
+        self._maybe_seal_previous_day()
+        today = today_utc8()
+        if ts_date != today:
+            return None
         with self._lock:
             candidates = []
             for entry in self.data["entries"].values():
@@ -223,22 +329,25 @@ class Store:
     # ---------- 对账 / 拉取 ----------
 
     def pull(self, after_version: int) -> dict:
-        """返回 version 在 (after_version, 当前] 内的条目与 tombstone。
+        """返回 version 在 (after_version, 当前] 内且 **date == 今天** 的条目与墓碑。
 
+        只返回今天的增量（历史日以 ``Records/*.md`` 整文件为准，不做条目级对账）。
         条目按时间顺序（ts, entry_id）、墓碑按原条目时间（entry_ts，缺失则回退删除
         时间 ts）排序返回，而非按入库顺序（v）——使客户端按拉取顺序追加时也能得到
         时间有序的镜像，与其本地渲染/全量重建保持一致。
         """
+        self._maybe_seal_previous_day()
+        today = today_utc8()
         with self._lock:
             entries = [
                 value
                 for value in self.data["entries"].values()
-                if value["v"] > after_version
+                if value["date"] == today and value["v"] > after_version
             ]
             tombstones = [
                 value
                 for value in self.data["tombstones"].values()
-                if value["v"] > after_version
+                if value.get("date") == today and value["v"] > after_version
             ]
             return {
                 "version": self.data["version"],
@@ -260,12 +369,13 @@ class Store:
             return self.pull(after_version)
 
     def render_records(self, records_dir: Path, trash_dir: Path) -> None:
-        """把条目与 tombstone 渲染成每天 Records 文件，并把已删正文渲染进垃圾桶。
+        """把条目与 tombstone 渲染成 Records 文件（**只渲染今天**），并把已删正文渲染进垃圾桶。
 
         渲染会保留目标文件已有的 `<summary>`（由 AI 日总结写入）。渲染来源只有
         state.json，若直接重建会抹掉刚生成的总结，因此渲染前读取旧文件里
-        的 summary 并在重写时带回。
+        的 summary 并在重写时带回。历史日以整文件为权威，绝不重排/重写。
         """
+        self._maybe_seal_previous_day()
         self._write_day_files(records_dir, trash_dir, None)
 
     def _render_dates(self, dates: set[str]) -> None:
@@ -286,8 +396,9 @@ class Store:
     ) -> None:
         """把权威状态渲染成 Records / Trash 文件。
 
-        ``targets`` 为 None 时重渲染全部有内容的日期（全量维护/后台兜底）；
-        为日期集合时只渲染这些日期（即使最终为空也照写），供「写后即时落盘」复用。
+        ``targets`` 为 None 时**只渲染今天**（全量维护/后台兜底）；历史日文件是权威
+        文件（可能含旧格式），绝不整页重排。为日期集合时只渲染这些日期（即使最终为空
+        也照写），供「写后即时落盘」与「日界封存」复用。
         """
         from . import render as render_mod
 
@@ -312,8 +423,10 @@ class Store:
         for entry in trash:
             trash_by_date.setdefault(entry["date"], []).append(entry)
 
+        today = today_utc8()
         if targets is None:
-            dates = sorted(set(entries_by_date) | set(tombs_by_date))
+            # 只渲染今天：历史日整文件为准，不重排/重写。
+            dates = [today]
         else:
             dates = sorted(set(targets))
         # 与 ai/journal.update_summary_for_date 共用同一把 .journal.lock（跨进程互斥），
@@ -335,7 +448,7 @@ class Store:
             if lock is not None:
                 lock.release()
         if targets is None:
-            trash_dates = sorted(trash_by_date)
+            trash_dates = [today] if today in trash_by_date else []
         else:
             trash_dates = sorted(set(targets) & set(trash_by_date))
         for date in trash_dates:
@@ -355,11 +468,17 @@ class Store:
         self._rendered_version = version
 
     def snapshot(self) -> dict:
+        self._maybe_seal_previous_day()
+        today = today_utc8()
         with self._lock:
             return {
                 "version": self.data["version"],
-                "entries": dict(self.data["entries"]),
-                "tombstones": dict(self.data["tombstones"]),
+                "entries": {
+                    k: v for k, v in self.data["entries"].items() if v.get("date") == today
+                },
+                "tombstones": {
+                    k: v for k, v in self.data["tombstones"].items() if v.get("date") == today
+                },
                 "devices": {
                     device_id: {"active": record.get("active"), "created_at": record.get("created_at")}
                     for device_id, record in self.data["devices"].items()
@@ -399,10 +518,10 @@ def _normalized_date(value: object, ts: int) -> str:
 def derive_date(ts: int) -> str:
     """由毫秒时间戳推导日期（UTC+8），仅作为缺少 date 字段时的兜底。"""
     if ts <= 0:
-        return datetime.date.today().isoformat()
+        return today_utc8()
     return (
         datetime.datetime.fromtimestamp(
-            ts / 1000.0, tz=datetime.timezone(datetime.timedelta(hours=8))
+            ts / 1000.0, tz=_UTC8
         )
         .date()
         .isoformat()

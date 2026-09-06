@@ -67,8 +67,16 @@ def ensure_day_file(date: str) -> None:
 
 
 def append_record(entry: dict) -> None:
-    """把一条新记录本地写入当天文件（原子追加，永不回滚）。"""
+    """把一条新记录本地写入当天文件（原子追加，永不回滚）。**只写“今天”（UTC+8）**。"""
     date = entry["date"]
+    if date != today_utc8():
+        # 过期/异常：客户端从不写历史日（只读）；直接丢弃，不落盘。
+        logger.warning(
+            "append_record_expired skips date=%s entry_id=%s",
+            date,
+            entry.get("entry_id"),
+        )
+        return
     # 与 apply_delta 共用同一把全局写锁：长轮询线程（apply_delta）与主输入线程
     # （append_record）可能并发写同一天文件，若各用不同锁文件会导致同一 entry_id
     # 被重复追加（本地 Records 出现重复块）。统一用 Records/.journal.lock 串行化。
@@ -108,6 +116,11 @@ _BLOCK_START_RE = re.compile(
 
 # 展示/分组统一时区：epoch 是无时区的绝对时间，记录时间统一按 UTC+8 展示。
 _UTC8 = datetime.timezone(datetime.timedelta(hours=8))
+
+
+def today_utc8() -> str:
+    """当前 UTC+8 自然日 YYYY-MM-DD（固定时区，非配置项）。"""
+    return datetime.datetime.now(tz=_UTC8).date().isoformat()
 
 
 def _block_sort_ts(entry_id: str, date: str, block_text: str) -> int:
@@ -154,6 +167,9 @@ def _split_day_blocks(content: str, date: str) -> tuple[str, list[tuple[int, str
 def apply_delta(entries: list[dict], tombstones: list[dict]) -> None:
     """补齐缺失条目并按 tombstone 移除本地已删条目，保持当天文件时间有序。
 
+    作用范围**只限“今天”**（UTC+8）：`date != 今天` 的条目/墓碑直接忽略——历史日以
+    整文件覆盖（云端权威），不在此增量合并/重排。
+
     增量对账把受影响日期**按 (ts, entry_id) 合并重排**，而不是简单追加到文件末尾：
     多端离线记录、服务端按推送顺序（v）入库时，条目到达顺序可能与时间序不一致，
     只追加会让本地镜像乱序（与全量重建不一致）。这里以块为单位合并重排，
@@ -166,8 +182,12 @@ def apply_delta(entries: list[dict], tombstones: list[dict]) -> None:
     for tombstone in tombstones:
         tomb_by_date.setdefault(tombstone.get("date", ""), []).append(tombstone)
 
+    today = today_utc8()
     with file_lock(records_dir() / ".journal.lock"):
         for date in sorted(set(entry_by_date) | set(tomb_by_date)):
+            if date != today:
+                # 历史日（date < 今天）以整文件覆盖，不增量合并；date > 今天 属异常，同样跳过。
+                continue
             if not _valid_iso_date(date):
                 # date 用于拼文件名；非法日期（如含 ../）会让写入逃逸出 Records，防御性跳过。
                 logger.warning("entry_date_invalid skips date=%r", date)
@@ -217,10 +237,10 @@ def _existing_summary(path: Path) -> str:
 
 
 def rebuild_records(entries: list[dict], tombstones: list[dict]) -> None:
-    """从权威全量数据重建本地记录文件：按时间排序、墓碑插回原位置，并保留 summary。
+    """从权威全量数据重建本地“今天”记录文件：按时间排序、墓碑插回原位置，并保留 summary。
 
-    用于完整对账（pull?version=0）：把本地镜像重建为与服务端渲染一致的时间有序结构，
-    使多端离线写入时也按时间而非推送顺序入库。
+    用于完整对账（pull?version=0）：把本地**今天**镜像重建为与服务端渲染一致的时间有序结构，
+    使多端离线写入时也按时间而非推送顺序入库。历史日以云端整文件为准，**不经由本函数重建**。
     局部增量（apply_delta）同样按受影响日期合并重排（见 apply_delta），保证扇出后
     镜像仍时间有序；与全量重建共用同一套 (ts, entry_id) 排序约定。
     """
@@ -230,8 +250,12 @@ def rebuild_records(entries: list[dict], tombstones: list[dict]) -> None:
     tombs_by_date: dict[str, list[dict]] = {}
     for tombstone in tombstones:
         tombs_by_date.setdefault(tombstone.get("date", ""), []).append(tombstone)
+    today = today_utc8()
     with file_lock(records_dir() / ".journal.lock"):
         for date in sorted(set(by_date) | set(tombs_by_date)):
+            if date != today:
+                # 只重建“今天”（历史日以云端整文件为准，不经由全量重建）。
+                continue
             if not _valid_iso_date(date):
                 # date 用于拼文件名；非法日期（如含 ../）会让写入逃逸出 Records，防御性跳过。
                 logger.warning("entry_date_invalid skips date=%r", date)

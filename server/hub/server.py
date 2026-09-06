@@ -1,11 +1,13 @@
 """HTTP 同步服务（stdlib ThreadingHTTPServer，无第三方框架）。
 
 路由：
-- POST /api/sync/push        推送新条目 {entries, version}
-- GET  /api/sync/pull?version=N  拉取增量
-- GET  /api/sync/longpoll?version=N 长轮询增量（扇出）
-- POST /api/entries/delete   在线删除当天最新一条 {date}
+- POST /api/sync/push        推送新条目 {entries, version}（**仅今天**；历史日被拒绝 422）
+- GET  /api/sync/pull?version=N  拉取增量（**仅今天**）
+- GET  /api/sync/longpoll?version=N 长轮询增量（扇出；**仅今天**）
+- POST /api/entries/delete   在线删除当天最新一条 {date}（**仅今天**）
 - GET  /api/status           中心状态
+- GET  /api/records          云端已有日期列表
+- GET  /api/records/<date>   该日 Records/<date>.md 整文件原文（历史日整文件同步）
 - GET  /api/reports[?kind=...] 报告列表
 - GET  /api/reports/<kind>/<name> 报告内容
 - GET  /api/health
@@ -13,6 +15,7 @@
 鉴权：Authorization: Bearer <token> + X-Device-Id 头。
 """
 
+import datetime
 import json
 import logging
 import re
@@ -22,6 +25,20 @@ from urllib.parse import parse_qs, urlparse
 
 
 logger = logging.getLogger(__name__)
+
+
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _valid_iso_date(value: object) -> bool:
+    """判断是否为合法 YYYY-MM-DD（供 `/api/records/<date>` 防路径穿越）。"""
+    if not isinstance(value, str) or not _ISO_DATE_RE.match(value):
+        return False
+    try:
+        datetime.date.fromisoformat(value)
+        return True
+    except ValueError:
+        return False
 
 
 def _client_addr(handler) -> str:
@@ -148,6 +165,10 @@ class SyncHandler(BaseHTTPRequestHandler):
             return self._longpoll(parse_qs(parsed.query))
         if parsed.path == "/api/status":
             return self._status()
+        if parsed.path == "/api/records":
+            return self._records_list()
+        if parsed.path.startswith("/api/records/"):
+            return self._records_file(parsed.path)
         if parsed.path == "/api/reports":
             return self._reports_list(parse_qs(parsed.query))
         if parsed.path.startswith("/api/reports/"):
@@ -176,16 +197,23 @@ class SyncHandler(BaseHTTPRequestHandler):
         store = self.server.store
         device = _device_id(self)
         entries = body["entries"] or []
-        accepted = store.append_entries(device, entries)
-        after_version = int(body.get("version", 0) or 0)
-        delta = store.pull(after_version)
+        accepted, rejected = store.append_entries(device, entries)
         logger.info(
-            "sync_push device=%s sent=%d accepted=%d version=%d",
+            "sync_push device=%s sent=%d accepted=%d rejected=%d version=%d",
             device,
             len(entries),
             len(accepted),
+            len(rejected),
             store.data["version"],
         )
+        if rejected:
+            # 批次内含历史日/异常条目：服务器「已处理但未入库」，客户端应作废这些 id，不要重试。
+            return self._send_json(
+                422,
+                {"ok": False, "error": "expired", "rejected": rejected},
+            )
+        after_version = int(body.get("version", 0) or 0)
+        delta = store.pull(after_version)
         self._send_json(
             200,
             {
@@ -292,6 +320,54 @@ class SyncHandler(BaseHTTPRequestHandler):
                 "ai": self.server.status_ai() or {},
             },
         )
+
+    # ---------- Records 整文件 ----------
+
+    @_authed
+    def _records_list(self):
+        """GET /api/records：返回云端已有日期列表（供客户端枚举历史日）。"""
+        store = self.server.store
+        records_dir = store.records_dir
+        if not records_dir or not records_dir.is_dir():
+            dates = []
+        else:
+            dates = sorted(path.stem for path in records_dir.glob("*.md"))
+        logger.info("records_list device=%s count=%d", _device_id(self), len(dates))
+        self._send_json(200, {"dates": dates})
+
+    @_authed
+    def _records_file(self, path):
+        """GET /api/records/<date>：返回该日 Records/<date>.md 整文件原文（历史日整文件同步）。
+
+        校验 date 为合法 YYYY-MM-DD（防路径穿越），存在则原样回传；不存在返回 404。
+        该文件是权威文件（可承载旧格式），原样回传，不解析、不重排。
+        """
+        date = path[len("/api/records/"):].strip("/")
+        if not _valid_iso_date(date):
+            return self._send_json(400, {"error": "bad date"})
+        store = self.server.store
+        records_dir = store.records_dir
+        if records_dir is None:
+            return self._send_json(404, {"error": "not found"})
+        target = (records_dir / f"{date}.md").resolve()
+        if not target.is_relative_to(records_dir.resolve()) or not target.is_file():
+            logger.info(
+                "records_file device=%s date=%s status=404", _device_id(self), date
+            )
+            return self._send_json(404, {"error": "not found"})
+        try:
+            content = target.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            return self._send_json(500, {"error": "read failed"})
+        logger.info(
+            "records_file device=%s date=%s bytes=%d", _device_id(self), date, len(content)
+        )
+        data = content.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/markdown; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
 
     # ---------- 服务端 AI 管理 ----------
 

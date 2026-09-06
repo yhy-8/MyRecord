@@ -24,6 +24,10 @@ from client import sync
 from client.sync import SyncClient
 
 
+# 方案 B：唯一可写窗口 = “今天”（UTC+8）。测试统一用它替代硬编码日期。
+_TODAY = journal.today_utc8()
+
+
 def _tmp_dir(prefix: str) -> Path:
     return Path(tempfile.mkdtemp(prefix=prefix))
 
@@ -97,7 +101,7 @@ class ClientSyncE2ETestBase(unittest.TestCase):
         for p in patches:
             p.stop()
 
-    def _entry(self, device, seq, ts, text, date="2024-06-01"):
+    def _entry(self, device, seq, ts, text, date=_TODAY):
         return {
             "entry_id": f"{device}-{seq}",
             "device_id": device,
@@ -116,7 +120,7 @@ class WritePushReconcileTest(ClientSyncE2ETestBase):
         try:
             client_a.pull()  # 与服务端做初始对账
             client_a.push_new(self._entry(self.device_a, 1, 1717200000, "第一条记录"))
-            day = journal.day_path("2024-06-01").read_text(encoding="utf-8")
+            day = journal.day_path(_TODAY).read_text(encoding="utf-8")
             self.assertIn("第一条记录", day)
             self.assertIn(f"{self.device_a}-1", day)
         finally:
@@ -134,7 +138,7 @@ class FanoutBetweenDevicesTest(ClientSyncE2ETestBase):
         try:
             client_a.push_new(self._entry(self.device_a, 1, 1717200000, "来自设备A"))
             client_b.pull()
-            content = (root_b / "Records" / "2024-06-01.md").read_text(encoding="utf-8")
+            content = (root_b / "Records" / f"{_TODAY}.md").read_text(encoding="utf-8")
             self.assertIn("来自设备A", content)
             self.assertIn(f"{self.device_a}-1", content)
         finally:
@@ -153,11 +157,11 @@ class TombstoneAntiResurrectionTest(ClientSyncE2ETestBase):
         try:
             client_a.push_new(self._entry(self.device_a, 1, 1717200060, "将被删除"))
             client_b.pull()  # B 已同步到本地（模拟离线前）
-            b_file = root_b / "Records" / "2024-06-01.md"
+            b_file = root_b / "Records" / f"{_TODAY}.md"
             self.assertIn("将被删除", b_file.read_text(encoding="utf-8"))
 
             # A 在线删除当天最新一条 → 服务端 tombstone
-            deleted = client_a.delete_latest("2024-06-01")
+            deleted = client_a.delete_latest(_TODAY)
             self.assertEqual(deleted, f"{self.device_a}-1")
 
             # B 上线拉取 → 本地移除该条，且不会把已删条目推回服务端
@@ -195,7 +199,7 @@ class OutboxRepushResurrectionTest(ClientSyncE2ETestBase):
             self.assertEqual(len(self.store.data["entries"]), 1)
 
             # A 在线删除当天最新一条 → 服务端 tombstone，条目从 entries 移除
-            deleted = client_a.delete_latest("2024-06-01")
+            deleted = client_a.delete_latest(_TODAY)
             self.assertEqual(deleted, f"{self.device_a}-1")
             self.assertEqual(self.store.data["entries"], {})
             self.assertEqual(len(self.store.data["tombstones"]), 1)
@@ -234,10 +238,10 @@ class MultiClientConsistencyTest(ClientSyncE2ETestBase):
         root_b = _tmp_dir("mc-b-")
         # 模拟离线批量推送：A 先连（晚 time 先入），B 后连（早 time 后入）→ 服务端 v 序乱、时间序不乱
         self.store.append_entries(self.device_a, [
-            {"entry_id": "late", "date": "2024-06-01", "ts": 1717200120, "tag": "", "text": "A-晚"},
+            {"entry_id": "late", "date": _TODAY, "ts": 1717200120, "tag": "", "text": "A-晚"},
         ])
         self.store.append_entries(self.device_b, [
-            {"entry_id": "early", "date": "2024-06-01", "ts": 1717200000, "tag": "", "text": "B-早"},
+            {"entry_id": "early", "date": _TODAY, "ts": 1717200000, "tag": "", "text": "B-早"},
         ])
         # 各客户端依次 reconcile 到自己的本地镜像（测试基底的 config 补丁不支持多个并发客户端共享，故逐个进行）
         ca, pa = self._new_client(self.device_a, self.token_a, root_a)
@@ -250,8 +254,8 @@ class MultiClientConsistencyTest(ClientSyncE2ETestBase):
             cb.full_sync()
         finally:
             self._stop(pb)
-        ca_content = (root_a / "Records" / "2024-06-01.md").read_text(encoding="utf-8")
-        cb_content = (root_b / "Records" / "2024-06-01.md").read_text(encoding="utf-8")
+        ca_content = (root_a / "Records" / f"{_TODAY}.md").read_text(encoding="utf-8")
+        cb_content = (root_b / "Records" / f"{_TODAY}.md").read_text(encoding="utf-8")
         # 时间较早的 B-早 应排在时间较晚的 A-晚 之前（即使服务端按 v 序 push、时序乱）
         self.assertLess(ca_content.index("B-早"), ca_content.index("A-晚"))
         self.assertLess(cb_content.index("B-早"), cb_content.index("A-晚"))
@@ -260,20 +264,20 @@ class MultiClientConsistencyTest(ClientSyncE2ETestBase):
         """同一份权威数据：客户端重建后的每日文件与服务端渲染严格一致（含墓碑插回原位）。"""
         root = _tmp_dir("mc-consist-")
         self.store.append_entries(self.device_a, [
-            {"entry_id": "x1", "date": "2024-06-01", "ts": 1717200000, "tag": "", "text": "早"},
-            {"entry_id": "x3", "date": "2024-06-01", "ts": 1717200120, "tag": "", "text": "晚"},
+            {"entry_id": "x1", "date": _TODAY, "ts": 1717200000, "tag": "", "text": "早"},
+            {"entry_id": "x3", "date": _TODAY, "ts": 1717200120, "tag": "", "text": "晚"},
         ])
         self.store.append_entries(self.device_b, [
-            {"entry_id": "x2", "date": "2024-06-01", "ts": 1717200060, "tag": "", "text": "中"},
+            {"entry_id": "x2", "date": _TODAY, "ts": 1717200060, "tag": "", "text": "中"},
         ])
         self.store.tombstone("x2", self.device_b)  # 中间的 x2 被删 → 墓碑应插回其原位置
         client, pat = self._new_client(self.device_a, self.token_a, root)
         try:
             client.full_sync()
-            client_content = (root / "Records" / "2024-06-01.md").read_text(encoding="utf-8")
+            client_content = (root / "Records" / f"{_TODAY}.md").read_text(encoding="utf-8")
             srv_records = _tmp_dir("mc-srv-") / "Records"
             self.store.render_records(srv_records, srv_records.parent / "Trash")
-            server_content = (srv_records / "2024-06-01.md").read_text(encoding="utf-8")
+            server_content = (srv_records / f"{_TODAY}.md").read_text(encoding="utf-8")
             # 客户端镜像与服务端渲染逐字节一致：同格式、同时序、墓碑同位置
             self.assertEqual(client_content, server_content)
             self.assertLess(client_content.index("早"), client_content.index("myrecord-tombstone-time:x2"))
@@ -303,13 +307,13 @@ class MultiClientConsistencyTest(ClientSyncE2ETestBase):
             finally:
                 self._stop(p)
         for dev in ("a", "b", "c"):
-            content = (roots[dev] / "Records" / "2024-06-01.md").read_text(encoding="utf-8")
+            content = (roots[dev] / "Records" / f"{_TODAY}.md").read_text(encoding="utf-8")
             self.assertIn("将被删", content)
 
         # A 在线删除当天最新一条
         ca, pa = self._new_client(self.device_a, self.token_a, roots["a"])
         try:
-            deleted = ca.delete_latest("2024-06-01")
+            deleted = ca.delete_latest(_TODAY)
         finally:
             self._stop(pa)
         self.assertEqual(deleted, f"{self.device_a}-1")
@@ -327,7 +331,7 @@ class MultiClientConsistencyTest(ClientSyncE2ETestBase):
         self.assertEqual(self.store.data["entries"], {})
         self.assertEqual(len(self.store.data["tombstones"]), 1)
         for dev in ("a", "b", "c"):
-            content = (roots[dev] / "Records" / "2024-06-01.md").read_text(encoding="utf-8")
+            content = (roots[dev] / "Records" / f"{_TODAY}.md").read_text(encoding="utf-8")
             self.assertNotIn("将被删", content)
 
 
@@ -345,7 +349,7 @@ class OfflineQueueTest(ClientSyncE2ETestBase):
         try:
             journal.append_record(entry)  # 本地写入永不回滚
             offline.push_new(entry)  # 进 outbox；推送失败 → 保留待续推
-            day = journal.day_path("2024-06-01").read_text(encoding="utf-8")
+            day = journal.day_path(_TODAY).read_text(encoding="utf-8")
             self.assertIn("离线写入", day)
             outbox_text = (root / "state" / "outbox.json").read_text(
                 encoding="utf-8"
@@ -367,7 +371,7 @@ class OfflineQueueTest(ClientSyncE2ETestBase):
                 self.device_a,
                 (root / "state" / "outbox.json").read_text(encoding="utf-8"),
             )
-            day = journal.day_path("2024-06-01").read_text(encoding="utf-8")
+            day = journal.day_path(_TODAY).read_text(encoding="utf-8")
             self.assertIn("离线写入", day)
         finally:
             self._stop(pa)
@@ -410,7 +414,7 @@ class FullSyncTest(ClientSyncE2ETestBase):
                 (root / "state" / "outbox.json").read_text(encoding="utf-8"),
             )
             # 本地日记对账到位
-            day = journal.day_path("2024-06-01").read_text(encoding="utf-8")
+            day = journal.day_path(_TODAY).read_text(encoding="utf-8")
             self.assertIn("离线待推送", day)
             # 报告同步到本地
             target = (
@@ -431,13 +435,13 @@ class FullSyncTest(ClientSyncE2ETestBase):
         root = _tmp_dir("cli-order-")
         # 服务端先有按推送顺序（v）到达但时间乱序的条目（late 先入、early 后入）
         self.store.append_entries("a", [
-            {"entry_id": "late", "date": "2024-06-01", "ts": 1717200120, "tag": "", "text": "晚"},
-            {"entry_id": "early", "date": "2024-06-01", "ts": 1717200000, "tag": "", "text": "早"},
+            {"entry_id": "late", "date": _TODAY, "ts": 1717200120, "tag": "", "text": "晚"},
+            {"entry_id": "early", "date": _TODAY, "ts": 1717200000, "tag": "", "text": "早"},
         ])
         client, pat = self._new_client(self.device_a, self.token_a, root)
         try:
             client.full_sync()
-            content = (root / "Records" / "2024-06-01.md").read_text(encoding="utf-8")
+            content = (root / "Records" / f"{_TODAY}.md").read_text(encoding="utf-8")
             # 早(ts=1717200000) 应排在 晚(ts=1717200120) 之前
             self.assertLess(content.index("早"), content.index("晚"))
         finally:
@@ -456,12 +460,12 @@ class FullSyncRecoveryTest(ClientSyncE2ETestBase):
         # 服务端已有内容（某设备此前写入）
         self.store.append_entries(
             "MK8",
-            [{"entry_id": "r1", "date": "2024-06-01", "ts": 1717200000, "tag": "", "text": "云端内容"}],
+            [{"entry_id": "r1", "date": _TODAY, "ts": 1717200000, "tag": "", "text": "云端内容"}],
         )
         client, pat = self._new_client(self.device_a, self.token_a, root)
         try:
             client.full_sync()
-            day_file = root / "Records" / "2024-06-01.md"
+            day_file = root / "Records" / f"{_TODAY}.md"
             self.assertTrue(day_file.exists())
             self.assertIn("云端内容", day_file.read_text(encoding="utf-8"))
 
@@ -662,8 +666,8 @@ class TombstonePlaceholderSyncTest(unittest.TestCase):
         }
         with patch.object(client_config, "load", return_value=cfg):
             # 只有一条 tombstone，对应条目从未在本地出现过
-            journal.apply_delta([], [{"entry_id": "never-had", "date": "2024-06-01"}])
-        content = (records / "2024-06-01.md").read_text(encoding="utf-8")
+            journal.apply_delta([], [{"entry_id": "never-had", "date": _TODAY}])
+        content = (records / f"{_TODAY}.md").read_text(encoding="utf-8")
         self.assertIn("myrecord-tombstone-time:never-had", content)
 
     def test_apply_delta_keeps_existing_placeholder_idempotent(self):
@@ -674,8 +678,8 @@ class TombstonePlaceholderSyncTest(unittest.TestCase):
         cfg = {"client": {"records_dir": records, "analysis_dir": root / "A", "server_url": "http://x"}}
         with patch.object(client_config, "load", return_value=cfg):
             for _ in range(2):
-                journal.apply_delta([], [{"entry_id": "x", "date": "2024-06-01"}])
-        content = (records / "2024-06-01.md").read_text(encoding="utf-8")
+                journal.apply_delta([], [{"entry_id": "x", "date": _TODAY}])
+        content = (records / f"{_TODAY}.md").read_text(encoding="utf-8")
         self.assertEqual(1, content.count("myrecord-tombstone-time:x"))
 
     def test_apply_delta_skips_entries_with_path_traversal_date(self):
@@ -702,10 +706,10 @@ class SubSecondOrderingTest(unittest.TestCase):
 
         # 同一秒(1717200000)但毫秒不同；entry_id 字典序与 ms 顺序相反
         entries = [
-            {"entry_id": "z-2", "date": "2024-06-01", "ts": 1717200000123, "tag": "", "text": "1"},
-            {"entry_id": "a-1", "date": "2024-06-01", "ts": 1717200000246, "tag": "", "text": "2"},
+            {"entry_id": "z-2", "date": _TODAY, "ts": 1717200000123, "tag": "", "text": "1"},
+            {"entry_id": "a-1", "date": _TODAY, "ts": 1717200000246, "tag": "", "text": "2"},
         ]
-        text = client_render.render_day_file("2024-06-01", entries)
+        text = client_render.render_day_file(_TODAY, entries)
         # 按 ms 顺序（先 1 后 2），而非按 entry_id 字典序（a-1 本应在前）
         self.assertLess(
             text.index("<!-- myrecord-time:z-2 -->"),
@@ -729,7 +733,7 @@ class SubSecondOrderingTest(unittest.TestCase):
         from client import render as client_render
 
         # id 就是毫秒时间戳（自描述时间），标签为 myrecord-time
-        entry = {"entry_id": "1717200000123", "date": "2024-06-01", "ts": 1717200000123, "tag": "", "text": "x"}
+        entry = {"entry_id": "1717200000123", "date": _TODAY, "ts": 1717200000123, "tag": "", "text": "x"}
         block = client_render.entry_block(entry)
         self.assertIn("<!-- myrecord-time:1717200000123 -->", block)
 
@@ -747,7 +751,7 @@ class IncrementalApplyDeltaOrderTest(unittest.TestCase):
         return {
             "entry_id": entry_id,
             "device_id": "MK8",
-            "date": "2026-09-06",
+            "date": _TODAY,
             "ts": ts,
             "tag": "",
             "text": text,
@@ -781,7 +785,7 @@ class IncrementalApplyDeltaOrderTest(unittest.TestCase):
                 ],
                 [],
             )
-        content = (records / "2026-09-06.md").read_text(encoding="utf-8")
+        content = (records / f"{_TODAY}.md").read_text(encoding="utf-8")
         order = {eid: content.index(f"<!-- myrecord-time:{eid} -->") for eid in ("426853", "431749", "436841", "7507454")}
         # 按 (ts, entry_id) 时间有序：早的两个在晚的两个之前
         self.assertLess(order["426853"], order["436841"])
@@ -808,7 +812,7 @@ class IncrementalApplyDeltaOrderTest(unittest.TestCase):
             ]
             journal.apply_delta(entries, [])
             journal.apply_delta(entries, [])  # 重复
-        content = (records / "2026-09-06.md").read_text(encoding="utf-8")
+        content = (records / f"{_TODAY}.md").read_text(encoding="utf-8")
         self.assertEqual(1, content.count("myrecord-time:426853 -->"))
         self.assertEqual(1, content.count("myrecord-time:436841 -->"))
 
@@ -833,7 +837,7 @@ class IncrementalApplyDeltaOrderTest(unittest.TestCase):
             bare = {
                 "entry_id": "bare-20260906-001-aaaa",
                 "device_id": "MK8",
-                "date": "2026-09-06",
+                "date": _TODAY,
                 "ts": 1788678000000,
                 "tag": "",
                 "text": "裸记录",
@@ -841,7 +845,7 @@ class IncrementalApplyDeltaOrderTest(unittest.TestCase):
             journal.rebuild_records([bare], [])
             # 之后增量补入一条时间更早的普通时间戳记录 → 应插在裸记录之前
             journal.apply_delta([self._entry("1788677400000", 1788677400000, "早")], [])
-        content = (records / "2026-09-06.md").read_text(encoding="utf-8")
+        content = (records / f"{_TODAY}.md").read_text(encoding="utf-8")
         self.assertLess(
             content.index("<!-- myrecord-time:1788677400000 -->"),
             content.index("<!-- myrecord-time:bare-20260906-001-aaaa -->"),
@@ -870,15 +874,105 @@ class IncrementalApplyDeltaOrderTest(unittest.TestCase):
             # 删除早时间条目（携带原条目时间 entry_ts）→ 墓碑应出现在 426853 位置
             journal.apply_delta(
                 [],
-                [{"entry_id": "426853", "date": "2026-09-06", "entry_ts": 426853}],
+                [{"entry_id": "426853", "date": _TODAY, "entry_ts": 426853}],
             )
-        content = (records / "2026-09-06.md").read_text(encoding="utf-8")
+        content = (records / f"{_TODAY}.md").read_text(encoding="utf-8")
         self.assertIn("myrecord-tombstone-time:426853 -->", content)
         self.assertNotIn("myrecord-time:426853 -->", content)  # 原条目被替换
         self.assertLess(
             content.index("myrecord-tombstone-time:426853 -->"),
             content.index("myrecord-time:436841 -->"),
         )
+
+
+class ExpiredOutboxTest(ClientSyncE2ETestBase):
+    """过期未同步即作废：outbox 里 date < 今天 的条目在 send_pending 时被丢弃，服务端无该条。"""
+
+    def test_expired_outbox_entry_dropped_on_send_pending(self):
+        import json
+
+        root = _tmp_dir("exp-outbox-")
+        client, pat = self._new_client(self.device_a, self.token_a, root)
+        try:
+            expired = {
+                "entry_id": "expired-1",
+                "device_id": self.device_a,
+                "date": "2000-01-01",
+                "ts": 946684800000,
+                "tag": "",
+                "text": "昨天没同步的过期条目",
+            }
+            outbox_path = root / "state" / "outbox.json"
+            outbox_path.write_text(json.dumps({"entries": [expired]}), encoding="utf-8")
+
+            client.send_pending()
+
+            # 过期条目被作废：outbox 清空（不再重试）
+            self.assertEqual(json.loads(outbox_path.read_text(encoding="utf-8"))["entries"], [])
+            # 服务端无该条（双保险）
+            self.assertEqual(self.store.data["entries"], {})
+        finally:
+            self._stop(pat)
+
+
+class HistoryWholeFileSyncTest(ClientSyncE2ETestBase):
+    """历史日整文件校验：本地历史文件与云端不一致 → full_sync 后按云端整文件覆盖；
+    本地多余历史文件被删除（云端权威）。"""
+
+    def test_full_sync_overwrites_local_history_and_removes_extra(self):
+        root = _tmp_dir("hist-")
+        srv_records = self._data / "Records"
+        srv_records.mkdir(parents=True, exist_ok=True)
+        # 让 /api/records 能读到云端整文件（历史日只读、整文件为准）
+        self.store.records_dir = srv_records
+        cloud_history = "# 2000-01-01\n\n<summary>\n云端总结\n</summary>\n\n**08:00:** 云端内容\n"
+        (srv_records / "2000-01-01.md").write_text(cloud_history, encoding="utf-8")
+
+        client, pat = self._new_client(self.device_a, self.token_a, root)
+        try:
+            base = root / "Records"
+            base.mkdir(parents=True, exist_ok=True)
+            # 本地历史文件内容与云端不一致 → 应被云端整文件覆盖
+            (base / "2000-01-01.md").write_text("# 2000-01-01\n\n本地旧内容\n", encoding="utf-8")
+            # 本地多余历史文件：云端无此日 → 应被删除
+            (base / "1999-12-31.md").write_text("# 1999-12-31\n\n本地多余\n", encoding="utf-8")
+
+            client.full_sync()
+
+            # 本地历史文件已按云端整文件覆盖（含旧格式、summary，不解析、不重排）
+            self.assertEqual(
+                (base / "2000-01-01.md").read_text(encoding="utf-8"), cloud_history
+            )
+            # 本地多余历史文件被删除（云端权威）
+            self.assertFalse((base / "1999-12-31.md").exists())
+        finally:
+            self._stop(pat)
+
+
+class OnlyWriteTodayTest(unittest.TestCase):
+    """客户端只写“今天”：append_record 对 date < 今天 的条目空操作（不落盘）；今天正常写。"""
+
+    def test_append_record_rejects_past_date_but_writes_today(self):
+        root = _tmp_dir("write-today-")
+        records = root / "Records"
+        records.mkdir(parents=True, exist_ok=True)
+        cfg = {
+            "client": {
+                "records_dir": records,
+                "analysis_dir": root / "A",
+                "server_url": "http://x",
+            }
+        }
+        with patch.object(client_config, "load", return_value=cfg):
+            # 过期条目：不落盘
+            journal.append_record({"entry_id": "old-1", "device_id": "d", "date": "2000-01-01", "ts": 1, "tag": "", "text": "过期"})
+            self.assertFalse((records / "2000-01-01.md").exists())
+            # 今天条目：正常写
+            today = journal.today_utc8()
+            journal.append_record({"entry_id": "t-1", "device_id": "d", "date": today, "ts": 2, "tag": "", "text": "今天内容"})
+            self.assertIn("今天内容", (records / f"{today}.md").read_text(encoding="utf-8"))
+            # 本地没有今天的过期残留条目
+            self.assertFalse((records / "2000-01-01.md").exists())
 
 
 if __name__ == "__main__":

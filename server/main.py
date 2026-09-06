@@ -10,7 +10,7 @@ from pathlib import Path
 
 from . import config
 from .hub import auth, server as hub_server
-from .hub.render import parse_day_file
+from .hub.atomic_write import atomic_write
 from .hub.store import Store
 
 
@@ -193,34 +193,36 @@ def _command_token(args: argparse.Namespace) -> int:
 
 
 def _command_import(args: argparse.Namespace) -> int:
+    """导入既有 Records：**整文件拷贝**，不做解析/重排。
+
+    方案 B 下历史日以 `Records/*.md` 整文件为权威（可承载旧格式）。用户把旧日记
+    放上云端 = 目录整体拷贝，旧格式原样保留，无需解析成条目。日期合法才拷贝到
+    `data_dir/Records/<date>.md`（存在则覆盖——云端权威）。
+    """
     source = Path(args.records).resolve()
     if not source.is_dir():
         print(f"目录不存在: {source}", file=sys.stderr)
         return 2
     store, data_dir = _store(Path(config.load()["server"]["data_dir"]))
+    records_dir = data_dir / "Records"
+    records_dir.mkdir(parents=True, exist_ok=True)
     total = 0
+    skipped = 0
     for path in sorted(source.glob("*.md")):
         date = path.stem
         try:
             datetime.date.fromisoformat(date)
         except ValueError:
+            skipped += 1
             continue
-        parsed = parse_day_file(date, path.read_text(encoding="utf-8"))
-        entries = []
-        for entry in parsed["entries"]:
-            entries.append(
-                {
-                    "entry_id": entry["entry_id"],
-                    "date": date,
-                    "ts": entry["ts"],
-                    "tag": entry["tag"],
-                    "text": entry["text"],
-                }
-            )
-        accepted = store.append_entries("import", entries)
-        total += len(accepted)
-    store.render_records(data_dir / "Records", data_dir / "Trash")
-    print(f"导入完成：新增 {total} 条记录（来自 {source}）。")
+        content = path.read_text(encoding="utf-8")
+        atomic_write(records_dir / f"{date}.md", content)  # 原样拷贝（含旧格式）
+        total += 1
+    store.render_records(records_dir, data_dir / "Trash")
+    print(
+        f"导入完成：整文件拷贝 {total} 个 Records（来自 {source}）；"
+        f"跳过 {skipped} 个非法日期文件。"
+    )
     return 0
 
 

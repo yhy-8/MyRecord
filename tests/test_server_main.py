@@ -12,7 +12,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from server import main as server_main
-from server.hub.store import Store
+from server.hub.store import Store, today_utc8
 
 
 def _data_dir_config(data_dir: Path) -> dict:
@@ -205,13 +205,14 @@ class ServerMainRenderImportTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_render_writes_records_from_store(self):
+        today = today_utc8()
         store = Store(self.data_dir / "state.json")
         store.append_entries(
             "import",
             [{
                 "entry_id": "a-1",
-                "date": "2024-01-01",
-                "ts": 1704067200,
+                "date": today,
+                "ts": 1788652800000,
                 "tag": "",
                 "text": "hello",
             }],
@@ -219,20 +220,21 @@ class ServerMainRenderImportTests(unittest.TestCase):
         with patch("sys.stdout", io.StringIO()):
             rc = server_main.main(["render"])
         self.assertEqual(0, rc)
-        rendered = (self.data_dir / "Records" / "2024-01-01.md").read_text(
+        rendered = (self.data_dir / "Records" / f"{today}.md").read_text(
             encoding="utf-8"
         )
         self.assertIn("hello", rendered)
         self.assertIn("a-1", rendered)
 
-    def test_import_records_appends_and_renders(self):
+    def test_import_records_copies_files_whole(self):
+        """方案 B：import 是**整文件拷贝**，不解析成条目、不重排（旧格式原样保留）。"""
         src = self.root / "records-import"
         src.mkdir()
-        (src / "2024-01-01.md").write_text(
+        legacy_content = (
             "# 2024-01-01\n\n<summary>\n暂无今日总结。\n</summary>\n\n---\n"
-            "## 原始记录流\n\n**08:00:** 旧记录\n",
-            encoding="utf-8",
+            "## 原始记录流\n\n**08:00:** 旧记录\n"
         )
+        (src / "2024-01-01.md").write_text(legacy_content, encoding="utf-8")
         # 非日期文件应被跳过
         (src / "notes.md").write_text("不是日记", encoding="utf-8")
 
@@ -241,14 +243,15 @@ class ServerMainRenderImportTests(unittest.TestCase):
         self.assertEqual(0, rc)
 
         store = Store(self.data_dir / "state.json")
-        self.assertEqual(1, len(store.data["entries"]))
-        entry = next(iter(store.data["entries"].values()))
-        self.assertEqual("import", entry["device_id"])
-        self.assertEqual("旧记录", entry["text"])
+        # 整文件拷贝：不生成条目态（历史日以整文件为权威）
+        self.assertEqual(0, len(store.data["entries"]))
+        # 源文件被原样拷贝到 Records/（含旧格式、summary）
         rendered = (self.data_dir / "Records" / "2024-01-01.md").read_text(
             encoding="utf-8"
         )
-        self.assertIn("旧记录", rendered)
+        self.assertEqual(legacy_content, rendered)
+        # 非法日期文件被跳过
+        self.assertFalse((self.data_dir / "Records" / "notes.md").exists())
 
     def test_import_missing_directory_returns_error(self):
         with patch("sys.stdout", io.StringIO()):

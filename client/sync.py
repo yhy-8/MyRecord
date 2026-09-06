@@ -117,6 +117,27 @@ class SyncClient:
             raise SyncError(f"服务端返回 {resp.status_code}。")
         return resp.json()
 
+    def _request_payload(self, method: str, path: str, *, json_body=None, timeout: float = 30.0):
+        """返回 (status_code, json_payload)；401 抛鉴权错误，其余 HTTP 状态不抛（供 422 探测）。"""
+        try:
+            resp = requests.request(
+                method,
+                self.base_url + path,
+                headers=self._headers(),
+                json=json_body,
+                timeout=timeout,
+                verify=self._verify(),
+            )
+        except requests.RequestException as error:
+            raise SyncError(f"无法连接服务端: {error}") from error
+        if resp.status_code == 401:
+            raise SyncError("鉴权失败：请检查客户端凭据。")
+        try:
+            payload = resp.json()
+        except ValueError:
+            payload = None
+        return resp.status_code, payload
+
     # ---------- 连接探测 ----------
 
     def probe(self) -> dict:
@@ -171,11 +192,22 @@ class SyncClient:
     # ---------- push / 离线队列 ----------
 
     def push_new(self, entry: dict) -> None:
-        """先把条目写入 outbox（写后即触发），再尝试立即 push。离线则留在队列。"""
+        """先把条目写入 outbox（写后即触发），再尝试立即 push。离线则留在队列。
+
+        仅“今天”（UTC+8）的条目才进队列；`date < 今天` 的过期条目不推（由 send_pending 作废）。
+        """
         with file_lock(_outbox_path()):
             outbox = _load_outbox()
-            if not any(e.get("entry_id") == entry["entry_id"] for e in outbox):
-                outbox.append(entry)
+            if entry.get("date") == journal.today_utc8():
+                if not any(e.get("entry_id") == entry["entry_id"] for e in outbox):
+                    outbox.append(entry)
+            else:
+                # 过期/异常：不进队列（send_pending 也会过滤作废）。
+                logger.warning(
+                    "push_new_expired skip entry_id=%s date=%s",
+                    entry.get("entry_id"),
+                    entry.get("date"),
+                )
             _save_outbox(outbox)
         try:
             self.send_pending()
@@ -183,17 +215,38 @@ class SyncClient:
             pass  # 离线：保留队列，等待下次拉取/推送补齐
 
     def send_pending(self) -> dict:
+        """冲刷离线队列：仅发“今天”的条目；过期（date < 今天）直接作废清除。"""
         with file_lock(_outbox_path()):
             outbox = _load_outbox()
-            if not outbox:
+            today = journal.today_utc8()
+            # 过期作废：date != 今天的条目从 outbox 永久移除（date < 今天 = 过期；> 今天 = 异常）。
+            pending = [e for e in outbox if e.get("date") == today]
+            if len(pending) != len(outbox):
+                _save_outbox(pending)
+            if not pending:
                 return {"accepted": [], "version": _read_state(), "entries": [], "tombstones": []}
-            delta = self._request(
+            status, delta = self._request_payload(
                 "POST",
                 "/api/sync/push",
-                json_body={"entries": outbox, "version": _read_state()},
+                json_body={"entries": pending, "version": _read_state()},
             )
-            accepted = set(delta.get("accepted", []) or [])
-            remaining = [e for e in outbox if e["entry_id"] not in accepted]
+            if status >= 400 and status != 422:
+                # 404/500 等非预期，交由上层当作网络问题重试（outbox 保留）。
+                raise SyncError(f"服务端返回 {status}。")
+            if status == 422:
+                # 服务端拒绝批次：rejected 里的 id 作废（不入库、不要重试）；其余保留待下次重推。
+                rejected = set((delta or {}).get("rejected", []) or [])
+                remaining = [e for e in pending if e["entry_id"] not in rejected]
+                _save_outbox(remaining)
+                return {
+                    "accepted": [],
+                    "version": _read_state(),
+                    "entries": [],
+                    "tombstones": [],
+                    "rejected": sorted(rejected),
+                }
+            accepted = set((delta or {}).get("accepted", []) or [])
+            remaining = [e for e in pending if e["entry_id"] not in accepted]
             _save_outbox(remaining)
         self._apply_delta(delta)
         return delta
@@ -201,23 +254,25 @@ class SyncClient:
     # ---------- 完整同步（启动 / 重连自动对账） ----------
 
     def full_sync(self) -> None:
-        """完整同步一次：先冲刷离线队列，再完整对账（重建本地镜像），再同步报告。
+        """完整同步一次：先冲刷离线队列（只今天、丢弃过期），再完整对账（重建今天镜像），
+        再对每个历史日做整文件校验（云端权威覆盖本地），最后同步报告。
 
         用于客户端启动链接云端、以及后台重连自动对账。完整对账从 version=0
-        重新拉取全部条目与墓碑并重建/补齐本地 Records，而非依赖增量游标——
+        重新拉取今天的条目与墓碑并重建/补齐本地 Records，而非依赖增量游标——
         避免「本地文件丢失但游标未回退」时增量 pull 拉不到内容，导致云端有
         数据却同步不下来。
         """
         self.send_pending()
         self.reconcile()
+        self.sync_history_files()
         self.sync_reports()
 
     def reconcile(self) -> None:
-        """从服务端权威状态完整对账：拉取全部条目与墓碑，重建/补齐本地镜像。
+        """从服务端权威状态完整对账：拉取“今天”的条目与墓碑，重建/补齐本地今天镜像。
 
-        用 version=0 全量拉取后当作权威全量重建本地文件（rebuild_records），而非只对
+        用 version=0 全量拉取后当作权威全量重建本地“今天”文件（rebuild_records），而非只对
         增量追加/原位替换——既保证本地文件按时间排序（多端离线写入后不乱序），又能覆盖
-        本地文件丢失、墓碑位置恢复等场景。
+        本地文件丢失、墓碑位置恢复等场景。历史日以云端整文件为准，不经由增量对账。
         """
         delta = self._request("GET", "/api/sync/pull?version=0")
         self._apply_delta(delta, full=True)
@@ -242,6 +297,10 @@ class SyncClient:
     # ---------- 删除 ----------
 
     def delete_latest(self, date: str) -> str | None:
+        # 仅“今天”可删（历史日只读，服务端也拒绝）。
+        if date != journal.today_utc8():
+            logger.warning("delete_latest_not_today skips date=%s", date)
+            return None
         # 附带本地当前游标，服务端据此返回 gap-free 增量（只补客户端缺失的部分），
         # 避免用“被删条目的版本-1”做粗粒度对账而多推数据或漏推中间版本。
         delta = self._request(
@@ -251,6 +310,68 @@ class SyncClient:
         )
         self._apply_delta(delta)
         return delta.get("deleted")
+
+    # ---------- 历史日整文件校验 ----------
+
+    def _fetch_record_file(self, date: str) -> str | None:
+        """拉取 /api/records/<date> 整文件原文；不存在（404）或异常返回 None。"""
+        try:
+            resp = requests.get(
+                self.base_url + "/api/records/" + date,
+                headers=self._headers(),
+                timeout=30.0,
+                verify=self._verify(),
+            )
+        except requests.RequestException:
+            return None
+        if resp.status_code != 200:
+            return None
+        return resp.text
+
+    def sync_history_files(self) -> None:
+        """历史日（date < 今天）整文件校验：以云端为准覆盖本地，本地多余历史文件删除。
+
+        云端权威（历史日只读、整文件为准）：对每个云端存在的 `date < 今天` 文件，拉取
+        原文并与本地逐字节比对，不一致即以云端覆盖；对本地存在但云端不存在的历史文件
+        （含“过期未同步的今天”被作废后残留的日子），删除。
+        """
+        records_dir = journal.records_dir()
+        records_dir.mkdir(parents=True, exist_ok=True)
+        today = journal.today_utc8()
+        try:
+            cloud_dates = set((self._request("GET", "/api/records") or {}).get("dates", []) or [])
+        except SyncError:
+            return  # 服务端不可达：保留本地，由后台重连时再校验
+        # 1) 覆盖：云端存在的历史日，与本地比对，不一致则整体覆盖（cloud 为准）。
+        for date in sorted(cloud_dates):
+            if date == today:
+                continue
+            content = self._fetch_record_file(date)
+            if content is None:
+                continue
+            path = records_dir / f"{date}.md"
+            if path.exists():
+                try:
+                    local = path.read_text(encoding="utf-8")
+                except (OSError, UnicodeError):
+                    local = None
+                if local == content:
+                    continue
+            # 直接整文件覆盖（云端文件已含 <summary>，不再本地保留本地 summary）。
+            atomic_write(path, content)
+            logger.info("history_file_overwrite date=%s", date)
+        # 2) 删除：本地存在但云端没有的历史文件（date < 今天且不在云端 => 作废）。
+        local_files = {p.stem for p in records_dir.glob("*.md")}
+        for date in sorted(local_files):
+            if date >= today:
+                continue
+            if date in cloud_dates:
+                continue
+            try:
+                (records_dir / f"{date}.md").unlink()
+                logger.info("history_file_removed date=%s", date)
+            except OSError:
+                pass
 
     # ---------- 状态 ----------
 
