@@ -357,6 +357,15 @@ def _venv_python() -> Path:
     return _venv_dir() / "bin" / "python"
 
 
+def _running_in_venv(venv_dir: Path) -> bool:
+    """当前解释器是否运行在目标 venv 内。
+
+    venv 的 bin/python 通常是到基础解释器的符号链接，不能靠 Path().resolve() 判断；
+    Python 在 venv 内运行时 sys.prefix 指向该 venv 目录（且与 sys.base_prefix 不相等）。
+    """
+    return Path(sys.prefix).resolve() == venv_dir.resolve()
+
+
 def _package_name() -> str:
     """当前 server 包的实际文件夹名，即 `python -m <名称>.main` 所用的包名。
 
@@ -452,9 +461,20 @@ def _command_deploy(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
-    # 1) 虚拟环境：缺失则创建，并安装依赖到 venv（服务端运行时用 venv 的 python）。
+    # 0) 自举：当前解释器不在目标 venv 内运行时，先建 venv，再用 venv 的 python 重新执行 deploy。
+    #    依赖一律装进 server/.venv（不污染默认/系统 Python），因此无需预先 pip install。
     venv_dir = _venv_dir()
     venv_py = _venv_python()
+    if not _running_in_venv(venv_dir):
+        if not venv_py.is_file():
+            print(f"正在创建虚拟环境 {venv_dir} ...")
+            subprocess.run([sys.executable, "-m", "venv", venv_dir.as_posix()], check=True)
+        print(f"依赖将装进 {venv_dir}（不污染默认 Python）；改用 {venv_py} 重新执行 deploy ...")
+        return subprocess.run(
+            [venv_py.as_posix(), "-m", f"{_package_name()}.main", "deploy"],
+            check=False,
+        ).returncode
+    # 1) 虚拟环境：已运行在 venv 内（本进程即 venv 的 python），装依赖并刷新。
     venv_created = not venv_py.is_file()
     if venv_created:
         print(f"正在创建虚拟环境 {venv_dir} ...")

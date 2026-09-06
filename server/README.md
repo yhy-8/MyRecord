@@ -23,6 +23,9 @@ python -m server.main run
 >
 > **生产环境请用 `python -m server.main deploy` 一键部署为 systemd 常驻**（自动建 venv + 装依赖 +
 > cert + token + 写入并启动单元，见下文「部署」）；上面 `run` 用于前台调试/临时验证。
+> `deploy` 会自举（无需预先 `pip install`）：若当前解释器不在 `server/.venv` 内，它先创建 `server/.venv`
+> 再用该 venv 的 python 重新执行自身，依赖装进 venv、不污染默认 Python。`run` 若要前台调试则需先
+> `pip install -r server/requirements.txt`。
 
 ## 子命令
 
@@ -100,6 +103,10 @@ cp server/config.example.yaml server/config.yaml
 一键安装并启动为 systemd 服务（需 root；仅 Linux）。自动完成：创建虚拟环境
 `server/.venv`（Python 原生 venv）并安装 `server/requirements.txt`、缺失则生成自签证书、尚无有效凭证时
 自动签发链接凭证（token）、然后按当前包实际位置渲染并启动单元（**均不 enable 开机自启**）：
+
+`deploy` 会**自举**：若当前解释器不在 `server/.venv` 内，先用标准库 `venv` 创建它，再用
+`server/.venv/bin/python` 重新执行自身；依赖（yaml/requests/cryptography）装进该 venv、不污染默认/系统
+Python，因此**无需预先 `pip install`**，只需服务器 Python ≥ 3.10 且能联网装依赖。
 
 ```bash
 sudo python -m server.main deploy

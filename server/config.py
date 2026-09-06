@@ -2,8 +2,6 @@
 
 from pathlib import Path
 
-import yaml
-
 _DEFAULTS = {
     "host": "0.0.0.0",
     "port": 8765,
@@ -29,6 +27,10 @@ def _merge(base: dict, extra: dict) -> dict:
 
 
 def load() -> dict:
+    # yaml 是第三方依赖，仅在实际读取 config.yaml 时才导入；
+    # 这样 `python -m server.main deploy` 可以在未装依赖的默认环境下启动自举（见 main._command_deploy）。
+    import yaml
+
     path = config_path()
     server = {}
     value = {}

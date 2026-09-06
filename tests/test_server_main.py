@@ -178,6 +178,8 @@ class ServerMainDeployTests(unittest.TestCase):
         ), patch("server.main._BACKUP_SERVICE_PATH", backup_unit), patch(
             "server.main._BACKUP_TIMER_PATH", timer_unit
         ), patch("server.main._venv_dir", return_value=fake_venv), patch(
+            "server.main._running_in_venv", return_value=True
+        ), patch(
             "sys.stdout", out
         ), patch("server.main.subprocess.run") as run:
             rc = server_main.main(["deploy"])
@@ -240,6 +242,8 @@ class ServerMainDeployTests(unittest.TestCase):
         ), patch("server.main._BACKUP_SERVICE_PATH", backup_unit), patch(
             "server.main._BACKUP_TIMER_PATH", timer_unit
         ), patch("server.main._venv_dir", return_value=fake_venv), patch(
+            "server.main._running_in_venv", return_value=True
+        ), patch(
             "sys.stdout", io.StringIO()
         ), patch("server.main.subprocess.run") as run:
             rc = server_main.main(["deploy"])
@@ -268,6 +272,38 @@ class ServerMainDeployTests(unittest.TestCase):
             "ExecStart=/srv/myrecord/server/.venv/bin/python -m server.main run",
             server_unit.read_text(encoding="utf-8"),
         )
+
+    def test_deploy_bootstraps_into_venv_when_not_in_venv(self):
+        """不在目标 venv 内运行时：先建 venv，再用 venv 的 python 重新执行 deploy。
+        这样无需预先 pip install 到默认/系统 Python，依赖一律装进 server/.venv。"""
+        fake_venv = Path("/srv/myrecord/server/.venv")
+        import sys as _sys
+        out = io.StringIO()
+        with patch("server.main.os.geteuid", return_value=0, create=True), patch(
+            "server.main._SYSTEMD_UNIT_PATH", self.root / "x.service"
+        ), patch("server.main._BACKUP_SERVICE_PATH", self.root / "y.service"), patch(
+            "server.main._BACKUP_TIMER_PATH", self.root / "z.timer"
+        ), patch("server.main._venv_dir", return_value=fake_venv), patch(
+            "server.main._running_in_venv", return_value=False
+        ), patch(
+            "sys.stdout", out
+        ), patch("server.main.subprocess.run") as run:
+            run.return_value.returncode = 0
+            rc = server_main.main(["deploy"])
+        self.assertEqual(0, rc)
+
+        calls = [c.args[0] for c in run.call_args_list]
+        venv_py = (fake_venv / "bin" / "python").as_posix()
+        # 先建 venv（用当前解释器），再改用 venv python 重新执行 deploy，不直接跑真部署。
+        self.assertEqual(
+            calls,
+            [
+                [_sys.executable, "-m", "venv", fake_venv.as_posix()],
+                [venv_py, "-m", "server.main", "deploy"],
+            ],
+        )
+        # 说明首次一键部署无需预先 pip install 到默认环境。
+        self.assertIn("不污染默认 Python", out.getvalue())
 
 
 class ServerMainApiStatusTests(unittest.TestCase):
