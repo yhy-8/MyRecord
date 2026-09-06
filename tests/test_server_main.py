@@ -159,14 +159,9 @@ class ServerMainDeployTests(unittest.TestCase):
         self.assertIn("root", err.getvalue())
         run.assert_not_called()
 
-    def test_render_backup_unit_uses_backup_script_and_workdir(self):
-        text = server_main._render_backup_unit(Path("/srv/myrecord"))
-        backup_script = (server_main._deploy_dir() / "backup.sh").as_posix()
-        self.assertIn(f"ExecStart=/bin/bash {backup_script}", text)
-        self.assertIn("WorkingDirectory=/srv/myrecord", text)
-
-    def test_deploy_installs_server_and_backup_and_starts_timer(self):
-        # 一键部署：自动建 venv + 装依赖，服务用 venv 的 python；主服务与备份定时器都只 start、不 enable。
+    def test_deploy_installs_server_and_starts_it_without_enable(self):
+        # 一键部署：自动建 venv + 装依赖，服务用 venv 的 python；只启动主服务、不 enable 开机自启。
+        # 备份由服务端内置调度触发，不再写入独立的备份单元/定时器。
         server_unit = self.root / "systemd" / "myrecord-server.service"
         backup_unit = self.root / "systemd" / "myrecord-backup.service"
         timer_unit = self.root / "systemd" / "myrecord-backup.timer"
@@ -175,8 +170,6 @@ class ServerMainDeployTests(unittest.TestCase):
         out = io.StringIO()
         with patch("server.main.os.geteuid", return_value=0, create=True), patch(
             "server.main._SYSTEMD_UNIT_PATH", server_unit
-        ), patch("server.main._BACKUP_SERVICE_PATH", backup_unit), patch(
-            "server.main._BACKUP_TIMER_PATH", timer_unit
         ), patch("server.main._venv_dir", return_value=fake_venv), patch(
             "server.main._running_in_venv", return_value=True
         ), patch(
@@ -193,17 +186,16 @@ class ServerMainDeployTests(unittest.TestCase):
         self.assertIn("链接凭证", summary)
         self.assertIn("API 配置", summary)
         self.assertIn("服务部署", summary)
+        self.assertIn("数据备份", summary)
         self.assertIn(str(fake_venv), summary)  # 明确服务切到虚拟环境
 
         self.assertIn(
             "ExecStart=/srv/myrecord/server/.venv/bin/python -m server.main run",
             server_unit.read_text(encoding="utf-8"),
         )
-        backup_text = backup_unit.read_text(encoding="utf-8")
-        self.assertIn("backup.sh", backup_text)
-        self.assertIn("ExecStart=/bin/bash", backup_text)
-        self.assertIn("WorkingDirectory=", backup_text)
-        self.assertIn("OnCalendar=weekly", timer_unit.read_text(encoding="utf-8"))
+        # 不再生成独立的备份单元/定时器。
+        self.assertFalse(backup_unit.exists())
+        self.assertFalse(timer_unit.exists())
 
         calls = [c.args[0] for c in run.call_args_list]
         venv_py = (fake_venv / "bin" / "python").as_posix()
@@ -211,16 +203,15 @@ class ServerMainDeployTests(unittest.TestCase):
         # 前两步：用当前解释器建 venv，再用 venv 的 pip 安装依赖。
         self.assertEqual(calls[0], [_sys.executable, "-m", "venv", fake_venv.as_posix()])
         self.assertEqual(calls[1], [venv_py, "-m", "pip", "install", "-r", reqs])
-        # 最后三步：只 start、不 enable。
+        # 最后两步：只 start、不 enable。
         self.assertEqual(
             calls[2:],
             [
                 ["systemctl", "daemon-reload"],
                 ["systemctl", "start", "myrecord-server"],
-                ["systemctl", "start", "myrecord-backup.timer"],
             ],
         )
-        # 主服务与备份定时器都只 start、不 enable 开机自启。
+        # 主服务只 start、不 enable 开机自启。
         for c in calls:
             self.assertNotIn("enable", c)
 
@@ -228,19 +219,14 @@ class ServerMainDeployTests(unittest.TestCase):
         """迭代升级/重装：同名服务单元已存在时，先 stop 旧服务，再覆盖新单元并重新 start。
         仍是 start、不 enable 开机自启；覆盖后写入新单元内容。"""
         server_unit = self.root / "systemd" / "myrecord-server.service"
-        backup_unit = self.root / "systemd" / "myrecord-backup.service"
-        timer_unit = self.root / "systemd" / "myrecord-backup.timer"
         server_unit.parent.mkdir(parents=True, exist_ok=True)
-        # 模拟已部署过：旧单元与旧定时器文件已存在（旧进程正在跑旧代码）。
+        # 模拟已部署过：旧单元文件已存在（旧进程正在跑旧代码）。
         server_unit.write_text("old-server", encoding="utf-8")
-        timer_unit.write_text("old-timer", encoding="utf-8")
         fake_venv = Path("/srv/myrecord/server/.venv")
         import sys as _sys
 
         with patch("server.main.os.geteuid", return_value=0, create=True), patch(
             "server.main._SYSTEMD_UNIT_PATH", server_unit
-        ), patch("server.main._BACKUP_SERVICE_PATH", backup_unit), patch(
-            "server.main._BACKUP_TIMER_PATH", timer_unit
         ), patch("server.main._venv_dir", return_value=fake_venv), patch(
             "server.main._running_in_venv", return_value=True
         ), patch(
@@ -258,10 +244,8 @@ class ServerMainDeployTests(unittest.TestCase):
                 [_sys.executable, "-m", "venv", fake_venv.as_posix()],
                 [venv_py, "-m", "pip", "install", "-r", reqs],
                 ["systemctl", "stop", "myrecord-server"],
-                ["systemctl", "stop", "myrecord-backup.timer"],
                 ["systemctl", "daemon-reload"],
                 ["systemctl", "start", "myrecord-server"],
-                ["systemctl", "start", "myrecord-backup.timer"],
             ],
         )
         # 仍不 enable 开机自启。
@@ -281,8 +265,6 @@ class ServerMainDeployTests(unittest.TestCase):
         out = io.StringIO()
         with patch("server.main.os.geteuid", return_value=0, create=True), patch(
             "server.main._SYSTEMD_UNIT_PATH", self.root / "x.service"
-        ), patch("server.main._BACKUP_SERVICE_PATH", self.root / "y.service"), patch(
-            "server.main._BACKUP_TIMER_PATH", self.root / "z.timer"
         ), patch("server.main._venv_dir", return_value=fake_venv), patch(
             "server.main._running_in_venv", return_value=False
         ), patch(

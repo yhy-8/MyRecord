@@ -19,7 +19,8 @@ python -m server.main run
 > `server/config.example.yaml` 是**配置模板**（空白 api_key，已提交）；运行时读取的是 `server/config.yaml`
 > （含 api_key，已 gitignore，不入版本库），请按上面两步用模板生成并**填入你的模型密钥**。
 > 启动后自带**后台调度线程**：每 15 分钟检测缺失，并独立执行到期任务（日总结 / 周报 / 月报
-> 互不依赖、无顺序要求）。该线程属服务端调度，与客户端同步无关。
+> 互不依赖、无顺序要求）；该线程同时触发**每周自动数据备份**（距上次成功备份满 7 天即作为
+> 子进程执行 `backup.sh`，见 `hub/backup.py`）。调度线程属服务端内部，与客户端同步无关。
 >
 > **生产环境请用 `python -m server.main deploy` 一键部署为 systemd 常驻**（自动建 venv + 装依赖 +
 > cert + token + 写入并启动单元，见下文「部署」）；上面 `run` 用于前台调试/临时验证。
@@ -70,6 +71,7 @@ python -m server.main deploy            一键安装并启动 systemd 服务（�
 | `hub/auth.py` | 链接凭证令牌哈希（scrypt，加盐、常量时间），只存哈希，不落明文 |
 | `hub/atomic_write.py` | 原子文件写入（服务端自带小工具，与客户端各自独立） |
 | `hub/render.py` | 日记文件格式（新格式；客户端独立镜像同款格式，由测试锁齐）：渲染 entry 标记、tombstone 占位、`<summary>` 区域；**不再解析旧格式/裸记录**（历史日整文件为准） |
+| `hub/backup.py` | 内置数据备份调度：服务运行期间距上次成功备份满 7 天（或从未备份）即作为**子进程**执行 `server/deploy/backup.sh`，把整个 `data/` 空间打成单个 gzip tar 快照；状态持久化在 `data/.backup-state.json`，停止期间错过的备份在下次启动后补跑 |
 
 ### 云端 AI（ai/）
 
@@ -112,21 +114,21 @@ Python，因此**无需预先 `pip install`**，只需服务器 Python ≥ 3.10 
 sudo python -m server.main deploy
 ```
 
-`deploy` 写入服务端单元（`myrecord-server.service`），并安装与启动每周备份定时器
-（`myrecord-backup.service` + `myrecord-backup.timer`，均 `systemctl start`）。
-主服务与备份定时器都只 start、不 enable（不做开机自启，防止部署出错后重启自动拉起损坏服务、便于修复）。
+`deploy` 写入服务端单元（仅 `myrecord-server.service`），并立即 `systemctl start` 启动主服务
+（不 `enable` 开机自启，防止部署出错后重启自动拉起损坏服务、便于修复）。**每周自动备份已由服务端
+内置调度触发**，不再安装独立的备份单元/定时器（`backup.sh` 仍是独立脚本，可手动/cron 调用）。
 
 `deploy` 保证服务端**运行在 `server/.venv` 虚拟环境**（`ExecStart` 用 venv 的 python，依赖装进 venv），
-并在结束时打印「部署完成」摘要块，把 **虚拟环境 / 自签证书 / 链接凭证 / API 配置 / 服务部署**
-五方面状态一次说明到位（缺 config.yaml 或 api_key 会给下一步提示）。
+并在结束时打印「部署完成」摘要块，把 **虚拟环境 / 自签证书 / 链接凭证 / API 配置 / 服务部署 /
+数据备份** 六方面状态一次说明到位（缺 config.yaml 或 api_key 会给下一步提示）。
 
 **升级/重装（同名服务）**：迭代后再次运行 `sudo python -m server.main deploy` 即可。若检测到同名服务单元
 已存在（旧进程正在跑旧代码），`deploy` 会**先 `systemctl stop` 关停旧服务**、**覆盖写入新单元**后
 `daemon-reload` 并**重新 `start`**，**仍不 `enable` 开机自启**。无需先手动删旧单元或手动停服务；首次部署时
 单元尚不存在，`deploy` 会跳过 `stop`，直接写入并启动。
 
-`deploy` 会把 `server/.venv` 的 python 作为 `ExecStart` 解释器，并从当前包实际位置自动推导工程根与
-`backup.sh` 绝对路径（不写死 `server/`），因此 `server/` 目录可改名，只要以 `python -m <新包名>.main deploy`
+`deploy` 会把 `server/.venv` 的 python 作为 `ExecStart` 解释器，并从当前包实际位置自动推导工程根
+（不写死 `server/`），因此 `server/` 目录可改名，只要以 `python -m <新包名>.main deploy`
 启动即可正确生成单元。
 
 **模型 api_key 仍需人工填**：`deploy` 不写入 `config.yaml` 的 api_key。把 `server/config.yaml` 里的 api_key
@@ -135,8 +137,7 @@ sudo python -m server.main deploy
 `server/deploy/`：
 
 - `myrecord-server.service` — 服务端单元（`deploy` 自动生成/写入；此文件为等价参照）。
-- `myrecord-backup.service` / `myrecord-backup.timer` — 每周自动备份单元与定时器（`deploy` 自动生成/写入；此为等价参照）。
-- `backup.sh` — 备份 `data` 空间为 tar（保留最近 N 份）。
+- `backup.sh` — 备份 `data` 空间为 tar（保留最近 N 份；服务端内置调度与手动/cron 均调用它）。
 
 数据空间(运行时生成):`server/data/` - `state.json`（**仅“今天”**的条目/设备/垃圾桶/version 游标）、
 `Records/`（权威每日日记；历史日整文件为准，可承载旧格式）、`Trash/`（被删正文）、`AnalysisReports/`（报告与自动任务状态）、
