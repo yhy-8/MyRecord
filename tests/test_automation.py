@@ -144,6 +144,37 @@ class MissingDetectionTests(AutomationBase):
         self._diary("2026-06-10")
         self.assertTrue(automation._task_missing("monthly_report", now))
 
+    def test_empty_placeholder_day_is_empty_not_missing(self):
+        # 回归：服务端 render 对“无记录日”会写出空占位文件（（当日暂无记录）），
+        # 它不应被当作“昨天有内容”，否则会凭空触发总结。
+        now = self._now()  # 昨天 = 2026-07-14
+        path = settings.DIARY_DIR / "2026-07-14.md"
+        path.write_text(
+            "# 2026-07-14\n\n<summary>\n暂无今日总结。\n</summary>\n\n---\n"
+            "## 原始记录流\n\n（当日暂无记录）\n",
+            encoding="utf-8",
+        )
+        self.assertEqual("empty", automation._task_state("daily_summary", now))
+        self.assertFalse(automation._task_missing("daily_summary", now))
+
+    def test_empty_placeholder_in_period_counts_as_empty(self):
+        # 回归：周期内只有空占位文件时，周/月报应视为“无内容”，而非“有日志”。
+        now = self._now()  # 上一周 07-06..07-12
+        path = settings.DIARY_DIR / "2026-07-08.md"
+        path.write_text(
+            "# 2026-07-08\n\n<summary>\n暂无今日总结。\n</summary>\n\n---\n"
+            "## 原始记录流\n\n（当日暂无记录）\n",
+            encoding="utf-8",
+        )
+        self.assertEqual("empty", automation._task_state("weekly_report", now))
+        self.assertEqual("empty", automation._task_state("monthly_report", now))
+
+    def test_day_with_real_record_but_empty_summary_is_missing(self):
+        # 有实际记录 + 空总结 → 才算“待生成”。
+        now = self._now()
+        self._diary("2026-07-14")
+        self.assertEqual("missing", automation._task_state("daily_summary", now))
+
     def test_scan_marks_newly_missing_as_due_and_empty_period_as_empty(self):
         state = self._state()
         now = self._now()

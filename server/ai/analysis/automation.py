@@ -16,6 +16,7 @@
 import datetime
 import json
 import logging
+import re
 from pathlib import Path
 
 from ...hub.atomic_write import atomic_write
@@ -140,6 +141,20 @@ def _default_task_target(task: str, now: datetime.datetime) -> dict[str, str]:
     return {"start": start.isoformat(), "end": end.isoformat()}
 
 
+def _has_records(content: str) -> bool:
+    """日记文件正文是否含实质记录（条目或墓碑），而非空白占位。
+
+    空白占位 = 服务端 render 对「当天无记录」写入的 ``（当日暂无记录）`` 文件（见 hub/render.py）。
+    这类文件不含任何记录标记/时间头行，不应被视为「该日有内容」——否则无记录的昨天会被
+    误判为待生成，凭空触发一次总结。
+    """
+    body = re.sub(r"<summary>.*?</summary>", "", content, flags=re.DOTALL)
+    return bool(
+        re.search(r"myrecord-(?:time|device|tombstone-time):", body)
+        or re.search(r"\*\*\d{2}:\d{2}", body)
+    )
+
+
 def _diary_summary_needs_generation(path: Path) -> bool:
     try:
         summary = journal.extract_summary(path.read_text(encoding="utf-8")).strip()
@@ -166,11 +181,19 @@ def _task_state(task: str, now: datetime.datetime, *, target=None) -> str:
         path = settings.DIARY_DIR / f"{day.isoformat()}.md"
         if not path.exists():
             return "empty"
+        try:
+            content = path.read_text(encoding="utf-8")
+        except OSError:
+            return "empty"
+        # 空占位文件（当天无记录 → 仅“（当日暂无记录）”+默认总结）不算有内容。
+        if not _has_records(content):
+            return "empty"
         return "missing" if _diary_summary_needs_generation(path) else "done"
     kind = "weekly" if task == "weekly_report" else "monthly"
     start = datetime.date.fromisoformat(target["start"])
     end = datetime.date.fromisoformat(target["end"])
-    if not _existing_logs(start, end):
+    # 只把「确有记录」的日记文件算作周期内容，避免空占位文件被误判成“有日志”。
+    if not any(_has_records(log) for _, log in _existing_logs(start, end)):
         return "empty"
     path = _analysis_report_path(kind, start, end)
     return "missing" if not path.exists() else "done"
