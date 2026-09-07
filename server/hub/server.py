@@ -6,9 +6,9 @@
 - GET  /api/sync/longpoll?version=N 长轮询增量（扇出；**仅今天**）
 - POST /api/entries/delete   在线删除当天最新一条 {date}（**仅今天**）
 - GET  /api/status           中心状态
-- GET  /api/records          云端已有日期列表
+- GET  /api/records          云端已有历史日哈希清单（date + sha256）
 - GET  /api/records/<date>   该日 Records/<date>.md 整文件原文（历史日整文件同步）
-- GET  /api/reports[?kind=...] 报告列表
+- GET  /api/reports[?kind=...] 报告哈希清单（rel + sha256）
 - GET  /api/reports/<kind>/<name> 报告内容
 - GET  /api/health
 
@@ -16,6 +16,7 @@
 """
 
 import datetime
+import hashlib
 import json
 import logging
 import re
@@ -327,15 +328,24 @@ class SyncHandler(BaseHTTPRequestHandler):
 
     @_authed
     def _records_list(self):
-        """GET /api/records：返回云端已有日期列表（供客户端枚举历史日）。"""
+        """GET /api/records：返回云端已有历史日哈希清单（date + sha256）。
+
+        清单即权威全集：客户端据此对每个历史日算本地哈希比对，仅哈希不同才下载整文件。
+        """
         store = self.server.store
         records_dir = store.records_dir
         if not records_dir or not records_dir.is_dir():
-            dates = []
+            files = []
         else:
-            dates = sorted(path.stem for path in records_dir.glob("*.md"))
-        logger.info("records_list device=%s count=%d", _device_id(self), len(dates))
-        self._send_json(200, {"dates": dates})
+            files = [
+                {
+                    "date": path.stem,
+                    "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                }
+                for path in sorted(records_dir.glob("*.md"))
+            ]
+        logger.info("records_list device=%s count=%d", _device_id(self), len(files))
+        self._send_json(200, {"files": files})
 
     @_authed
     def _records_file(self, path):
@@ -394,11 +404,23 @@ class SyncHandler(BaseHTTPRequestHandler):
 
     @_authed
     def _reports_list(self, query):
+        """GET /api/reports：返回云端报告哈希清单（rel + sha256）。
+
+        清单即权威全集：客户端只对哈希不同的报告拉取覆盖，未变即跳过。
+        """
         kind = query.get("kind") or [""]
         kind_value = kind[0] if kind else ""
         files = self.server.list_reports(kind_value)
+        entry = []
+        for rel in files:
+            content = self.server.read_report(rel)
+            if content is None:
+                continue
+            entry.append(
+                {"rel": rel, "sha256": hashlib.sha256(content.encode("utf-8")).hexdigest()}
+            )
         logger.info("reports_list device=%s kind=%s count=%d", _device_id(self), kind_value, len(files))
-        self._send_json(200, {"reports": files})
+        self._send_json(200, {"files": entry})
 
     @_authed
     def _report_file(self, path):

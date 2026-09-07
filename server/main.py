@@ -31,6 +31,9 @@ def _command_run(args: argparse.Namespace) -> int:
     from .hub import backup as hub_backup
 
     ai_logging.configure_logging()
+    # 启动即清一次存量空占位日记文件（无记录日不生成文件，见 automation._purge_empty_placeholder_days），
+    # 使自动任务以「文件存在性」判定有无内容（§3.2 / §9.2）。
+    ai_analysis._purge_empty_placeholder_days()
 
     def render_records() -> None:
         store.render_records(data_dir / "Records", data_dir / "Trash")
@@ -497,7 +500,7 @@ def _command_deploy(args: argparse.Namespace) -> int:
     project_root = Path(__file__).resolve().parent.parent
     server_dest = _SYSTEMD_UNIT_PATH
     server_dest.parent.mkdir(parents=True, exist_ok=True)
-    # 迭代升级/重装：同名服务单元已存在（旧进程还在跑旧代码）时，先正确关停再覆盖新单元。
+    # 重新部署：同名服务单元已存在（前一进程仍在运行）时，先正确关停再覆盖最新单元。
     # 首次部署时单元尚不存在，跳过 stop（`systemctl stop` 未注册单元会报错）。
     redeployed = server_dest.exists()
     if redeployed:

@@ -401,8 +401,9 @@ class Store:
         """把权威状态渲染成 Records / Trash 文件。
 
         ``targets`` 为 None 时**只渲染今天**（全量维护/后台兜底）；历史日文件是权威
-        文件（可能含旧格式），绝不整页重排。为日期集合时只渲染这些日期（即使最终为空
-        也照写），供「写后即时落盘」与「日界封存」复用。
+        文件（可能含旧格式），绝不整页重排。为日期集合时只渲染这些日期，供「写后即时
+        落盘」与「日界封存」复用。仅渲染「确有记录」（条目或墓碑）的日期：空日不生成
+        占位文件（见 §3.2）。
         """
         from . import render as render_mod
 
@@ -430,9 +431,16 @@ class Store:
         today = today_utc8()
         if targets is None:
             # 只渲染今天：历史日整文件为准，不重排/重写。
-            dates = [today]
+            raw_dates = [today]
         else:
-            dates = sorted(set(targets))
+            raw_dates = sorted(set(targets))
+        # 只渲染「确有记录」的日期（条目或墓碑）；空日不生成占位文件，避免
+        # 无意义文件污染 /api/records 的日期列表，也避免自动化误判（§3.2 / §9.2）。
+        dates = [
+            d
+            for d in raw_dates
+            if entries_by_date.get(d) or tombs_by_date.get(d)
+        ]
         # 与 ai/journal.update_summary_for_date 共用同一把 .journal.lock（跨进程互斥），
         # 保证“读旧总结 → 写回”期间不被并发的日总结写入覆盖（避免丢失更新的竞态）。
         from ..ai.file_lock import FileLock

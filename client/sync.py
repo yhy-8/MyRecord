@@ -5,6 +5,7 @@
 断线自动重连重新完整对账。
 """
 
+import hashlib
 import json
 import logging
 
@@ -262,7 +263,7 @@ class SyncClient:
 
     def full_sync(self) -> None:
         """完整同步一次：先冲刷离线队列（只今天、丢弃过期），再完整对账（重建今天镜像），
-        再对每个历史日做整文件校验（云端权威覆盖本地），最后同步报告。
+        再按哈希清单对历史日做整文件校验（云端权威覆盖本地），最后同步报告。
 
         用于客户端启动链接云端、以及后台重连自动对账。完整对账从 version=0
         重新拉取今天的条目与墓碑并重建/补齐本地 Records，而非依赖增量游标——
@@ -335,35 +336,38 @@ class SyncClient:
             return None
         return resp.text
 
-    def sync_history_files(self) -> None:
-        """历史日（date < 今天）整文件校验：以云端为准覆盖本地，本地多余历史文件删除。
+    def _file_sha256(self, path) -> str:
+        """返回本地文件的 SHA-256；不可读/不存在返回空串（视为需要下载）。"""
+        try:
+            return hashlib.sha256(path.read_bytes()).hexdigest()
+        except (OSError, UnicodeError):
+            return ""
 
-        云端权威（历史日只读、整文件为准）：对每个云端存在的 `date < 今天` 文件，拉取
-        原文并与本地逐字节比对，不一致即以云端覆盖；对本地存在但云端不存在的历史文件
-        （含“过期未同步的今天”被作废后残留的日子），删除。
+    def sync_history_files(self) -> None:
+        """历史日（date < 今天）哈希清单对账：仅对哈希不同的条目整文件覆盖。
+
+        云端清单即权威全集（date + sha256）。仅当本地文件缺失或哈希与云端不同时才
+        拉取覆盖；哈希相同即跳过，避免每次启动对全部历史日做整文件下载与逐字节比对。
+        本地存在但云端不存在的历史文件（含“过期未同步的今天”被作废后残留的日子）删除。
         """
         records_dir = journal.records_dir()
         records_dir.mkdir(parents=True, exist_ok=True)
         today = journal.today_utc8()
         try:
-            cloud_dates = set((self._request("GET", "/api/records") or {}).get("dates", []) or [])
+            data = self._request("GET", "/api/records") or {}
         except SyncError:
             return  # 服务端不可达：保留本地，由后台重连时再校验
-        # 1) 覆盖：云端存在的历史日，与本地比对，不一致则整体覆盖（cloud 为准）。
-        for date in sorted(cloud_dates):
+        cloud = {f["date"]: f["sha256"] for f in (data.get("files") or [])}
+        # 1) 覆盖：云端存在的历史日，与本地哈希比对，仅不同才拉取整文件覆盖（cloud 为准）。
+        for date in sorted(cloud):
             if date == today:
+                continue
+            path = records_dir / f"{date}.md"
+            if path.exists() and self._file_sha256(path) == cloud[date]:
                 continue
             content = self._fetch_record_file(date)
             if content is None:
                 continue
-            path = records_dir / f"{date}.md"
-            if path.exists():
-                try:
-                    local = path.read_text(encoding="utf-8")
-                except (OSError, UnicodeError):
-                    local = None
-                if local == content:
-                    continue
             # 直接整文件覆盖（云端文件已含 <summary>，不再本地保留本地 summary）。
             atomic_write(path, content)
             logger.info("history_file_overwrite date=%s", date)
@@ -372,7 +376,7 @@ class SyncClient:
         for date in sorted(local_files):
             if date >= today:
                 continue
-            if date in cloud_dates:
+            if date in cloud:
                 continue
             try:
                 (records_dir / f"{date}.md").unlink()
@@ -411,34 +415,30 @@ class SyncClient:
         return resp.text
 
     def sync_reports(self) -> None:
-        """把云端报告同步到本地 AnalysisReports（不做 /v 查看）。
+        """按云端报告哈希清单把报告同步到本地 AnalysisReports（不做 /v 查看）。
 
-        同一时间段只保留最新生成：已有本地副本时仍校验与云端最新内容，
-        不一致则覆盖（服务端重新生成后客户端同步到最新版本）。
+        清单即权威全集（rel + sha256）：仅对本地副本缺失或哈希与云端不同的报告
+        拉取覆盖，未变即跳过。同一时间段只保留最新生成。
         """
-        remote = (self._request("GET", "/api/reports") or {}).get("reports", []) or []
-        if not remote:
+        data = self._request("GET", "/api/reports") or {}
+        cloud = {f["rel"]: f["sha256"] for f in (data.get("files") or [])}
+        if not cloud:
             return
         base = config.load()["client"]["analysis_dir"]
         base.mkdir(parents=True, exist_ok=True)
         base_resolved = base.resolve()
-        for rel in remote:
+        for rel in sorted(cloud):
             target = (base / rel).resolve()
             # 兜底：即使服务端返回带 ../ 的恶意相对路径，也绝不写到 analysis_dir 之外。
             if not target.is_relative_to(base_resolved):
                 logger.warning("report_path_escapes_analysis_dir rel=%s", rel)
                 continue
             target.parent.mkdir(parents=True, exist_ok=True)
+            # 同一时间段报告只保留最新生成：本地副本哈希与云端不同（服务端重新生成、
+            # 内容更新、或本地副本损坏/不可读）才拉取覆盖，未变即跳过。
+            if target.exists() and self._file_sha256(target) == cloud[rel]:
+                continue
             content = self._report_content(rel)
             if content is None:
                 continue
-            # 同一时间段报告只保留最新生成：已存在本地副本时也校验与云端最新内容是否一致，
-            # 不一致（服务端重新生成、内容更新、或本地副本损坏/不可读）则覆盖，不跳过旧副本。
-            if target.exists():
-                try:
-                    local = target.read_text(encoding="utf-8")
-                except (OSError, UnicodeError):
-                    local = None
-                if local == content:
-                    continue
             atomic_write(target, content)

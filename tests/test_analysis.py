@@ -217,6 +217,26 @@ class AnalysisWorkflowTests(unittest.TestCase):
         for line in header_lines:
             self.assertTrue(line.endswith("  "), f"块引用行应以两个空格结尾: {line!r}")
 
+    def test_report_source_table_rows_end_with_two_spaces(self):
+        # 来源表每个 `[n] R-…` 行末尾补两个空格：Markdown 硬换行，否则被挤成一段（§8.6）。
+        day = datetime.date(2026, 7, 14)
+        self.write_diary(day.isoformat())
+        _, success, path = orchestrator.generate_analysis_report(
+            "weekly", day, {"name": "mock"}
+        )
+        self.assertTrue(success)
+        content = path.read_text(encoding="utf-8")
+        lines = content.splitlines()
+        try:
+            idx = lines.index("## 来源")
+        except ValueError:
+            self.fail("报告应含来源表")
+        source_lines = [line for line in lines[idx + 1:] if line.strip()]
+        self.assertTrue(source_lines, "来源表应有引用行")
+        for line in source_lines:
+            self.assertIn(line[:3], ("[1]", "[2]", "[3]", "[4]", "[5]"))
+            self.assertTrue(line.endswith("  "), f"来源行应以两个空格结尾: {line!r}")
+
     def test_weekly_report_is_single_report_agent_no_reviewer(self):
         day = datetime.date(2026, 7, 14)
         self.write_diary(day.isoformat())

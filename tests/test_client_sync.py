@@ -620,7 +620,10 @@ class ReportPathTraversalGuardTest(unittest.TestCase):
         with patch.object(client_config, "load", return_value=cfg):
             client = SyncClient(server_url="http://127.0.0.1:1")
             client._request = lambda *a, **k: {
-                "reports": ["../outside_evil.md", "Weekly/ok.md"]
+                "files": [
+                    {"rel": "../outside_evil.md", "sha256": "a" * 64},
+                    {"rel": "Weekly/ok.md", "sha256": "b" * 64},
+                ]
             }
             client._report_content = lambda rel: "# 内容\n"
             client.sync_reports()

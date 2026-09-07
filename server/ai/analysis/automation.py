@@ -141,18 +141,32 @@ def _default_task_target(task: str, now: datetime.datetime) -> dict[str, str]:
     return {"start": start.isoformat(), "end": end.isoformat()}
 
 
-def _has_records(content: str) -> bool:
-    """日记文件正文是否含实质记录（条目或墓碑），而非空白占位。
+def _purge_empty_placeholder_days() -> None:
+    """删除数据目录下所有「空占位」日记文件（正文无任何记录标记 / **HH:MM** 头行）。
 
-    空白占位 = 服务端 render 对「当天无记录」写入的 ``（当日暂无记录）`` 文件（见 hub/render.py）。
-    这类文件不含任何记录标记/时间头行，不应被视为「该日有内容」——否则无记录的昨天会被
-    误判为待生成，凭空触发一次总结。
+    无记录日不再生成文件（见 §3.2），但这会清除历史部署遗留的空占位文件，使
+    ``_task_state`` 以「文件存在性」即可判定有无内容。仅删除无任何记录的文件
+    （不含用户数据）：某日曾有记录又被全部删除时，正文含 tombstone 标记，不会被删除。
     """
-    body = re.sub(r"<summary>.*?</summary>", "", content, flags=re.DOTALL)
-    return bool(
-        re.search(r"myrecord-(?:time|device|tombstone-time):", body)
-        or re.search(r"\*\*\d{2}:\d{2}", body)
-    )
+    directory = settings.DIARY_DIR
+    if not directory.is_dir():
+        return
+    for path in directory.glob("*.md"):
+        try:
+            content = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            continue
+        body = re.sub(r"<summary>.*?</summary>", "", content, flags=re.DOTALL)
+        is_placeholder = not (
+            re.search(r"myrecord-(?:time|device|tombstone-time):", body)
+            or re.search(r"\*\*\d{2}:\d{2}", body)
+        )
+        if is_placeholder:
+            try:
+                path.unlink()
+                logger.info("purged_empty_placeholder date=%s", path.stem)
+            except OSError:
+                pass
 
 
 def _diary_summary_needs_generation(path: Path) -> bool:
@@ -171,9 +185,11 @@ def _task_state(task: str, now: datetime.datetime, *, target=None) -> str:
     - ``done``：**产物已存在**（昨日总结已写非占位正文 / 周月报告文件已生成）。
     - ``missing``：**有内容但无产物**，需要（重新）生成。
 
-    判定规则（与设计基线 §9.1 一致）：
-    - 每日总结：读昨日日记文件里的 ``<summary>`` 是否为默认占位符（文件存在才判）。
-    - 周/月报：该周期内有日志 且 报告文件不存在 才算缺失。
+    判定规则（与设计基线 §9.1 / §9.2 一致）：
+    - 每日总结：昨日日记文件不存在（无记录日不生成文件，见 §3.2）→ ``empty``；
+      文件存在则看 ``<summary>`` 是否为默认占位（``missing``）或已有正文（``done``）。
+    - 周/月报：该周期内无任何日记文件（无实质记录）→ ``empty``；有日志但报告文件
+      不存在 → ``missing``；报告文件已生成 → ``done``。
     """
     target = target or _default_task_target(task, now)
     if task == "daily_summary":
@@ -181,19 +197,11 @@ def _task_state(task: str, now: datetime.datetime, *, target=None) -> str:
         path = settings.DIARY_DIR / f"{day.isoformat()}.md"
         if not path.exists():
             return "empty"
-        try:
-            content = path.read_text(encoding="utf-8")
-        except OSError:
-            return "empty"
-        # 空占位文件（当天无记录 → 仅“（当日暂无记录）”+默认总结）不算有内容。
-        if not _has_records(content):
-            return "empty"
         return "missing" if _diary_summary_needs_generation(path) else "done"
     kind = "weekly" if task == "weekly_report" else "monthly"
     start = datetime.date.fromisoformat(target["start"])
     end = datetime.date.fromisoformat(target["end"])
-    # 只把「确有记录」的日记文件算作周期内容，避免空占位文件被误判成“有日志”。
-    if not any(_has_records(log) for _, log in _existing_logs(start, end)):
+    if not _existing_logs(start, end):
         return "empty"
     path = _analysis_report_path(kind, start, end)
     return "missing" if not path.exists() else "done"

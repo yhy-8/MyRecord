@@ -349,6 +349,18 @@ class StoreRenderTest(unittest.TestCase):
         self.assertIn("待删除正文", trash)
         self.assertNotIn("保留正文", trash)
 
+    def test_render_records_empty_day_creates_no_placeholder_file(self):
+        """空日（无条目、无墓碑）不生成 Records/<date>.md 占位文件。"""
+        data = _tmp_data_dir() / "state.json"
+        store = Store(data)
+        records_dir = data.parent / "Records"
+        trash_dir = data.parent / "Trash"
+
+        store.render_records(records_dir, trash_dir)
+
+        self.assertFalse((records_dir / f"{_today()}.md").exists())
+        self.assertFalse((trash_dir / f"{_today()}.md").exists())
+
     def test_render_records_does_not_touch_history_files(self):
         """render_records 只渲染今天：历史/旧格式整文件不被重排/重写。"""
         data = _tmp_data_dir() / "state.json"
@@ -757,9 +769,10 @@ class RecordsEndpointTest(unittest.TestCase):
 
         listed = requests.get(f"{self.base}/api/records", headers=self.headers)
         self.assertEqual(listed.status_code, 200)
-        dates = listed.json()["dates"]
-        self.assertIn(_today(), dates)
-        self.assertIn("2000-01-01", dates)
+        files = listed.json()["files"]
+        self.assertEqual({f["date"] for f in files}, {_today(), "2000-01-01"})
+        for f in files:
+            self.assertEqual(len(f["sha256"]), 64)
 
         resp = requests.get(f"{self.base}/api/records/2000-01-01", headers=self.headers)
         self.assertEqual(resp.status_code, 200)

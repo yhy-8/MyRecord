@@ -310,10 +310,14 @@ def _parse_report_response(
 
 
 def _source_table(references: list[dict]) -> str:
-    """由中控根据校验后的引用生成文末来源表。"""
+    """由中控根据校验后的引用生成文末来源表。
+
+    每个 `[n] R-…` 来源行末尾补两个空格（Markdown 硬换行，与头部元数据行一致），
+    否则一行不会被渲染成独立换行（§8.6）。
+    """
     lines = ["## 来源"]
     for item in references:
-        lines.append(f"[{item['id']}] {item['source']}")
+        lines.append(f"[{item['id']}] {item['source']}  ")
     return "\n".join(lines) if references else ""
 
 

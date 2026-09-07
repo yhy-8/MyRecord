@@ -48,7 +48,8 @@ python -m server.main deploy            一键安装并启动 systemd 服务（�
   立即返回（扇出）；客户端**后台持续同步**：连接成功即完整对账，之后保持长连接接收扇出，断线自动
   重连补齐，不密集轮询、无需手动同步。
   客户端**只能写“今天”（UTC+8）**：push 仅接受 `date == 今天`，历史日条目被服务端拒绝；历史日记以
-  `Records/*.md` 整文件为准，客户端启动时经 `GET /api/records/<date>` 校验并覆盖本地（只读）。
+  `Records/*.md` 整文件为准，客户端启动时经 `GET /api/records` 哈希清单**只对哈希不同的条目**整文件拉取
+  `GET /api/records/<date>` 覆盖本地（只读）。
 - **云端 AI**：自动任务写入 `<summary>` 与周/月报告（`AnalysisReports/`），客户端通过
   `/api/reports` 拉取本地副本。
 - **数据空间**：`server/data/` 是权威事实源，客户端本地只是对账副本。
@@ -115,15 +116,15 @@ sudo python -m server.main deploy
 ```
 
 `deploy` 写入服务端单元（仅 `myrecord-server.service`），并立即 `systemctl start` 启动主服务
-（不 `enable` 开机自启，防止部署出错后重启自动拉起损坏服务、便于修复）。**每周自动备份已由服务端
+（不 `enable` 开机自启，部署出错后重启不会自动拉起损坏服务，便于人工介入排查）。**每周自动备份已由服务端
 内置调度触发**，不再安装独立的备份单元/定时器（`backup.sh` 仍是独立脚本，可手动/cron 调用）。
 
 `deploy` 保证服务端**运行在 `server/.venv` 虚拟环境**（`ExecStart` 用 venv 的 python，依赖装进 venv），
 并在结束时打印「部署完成」摘要块，把 **虚拟环境 / 自签证书 / 链接凭证 / API 配置 / 服务部署 /
 数据备份** 六方面状态一次说明到位（缺 config.yaml 或 api_key 会给下一步提示）。
 
-**升级/重装（同名服务）**：迭代后再次运行 `sudo python -m server.main deploy` 即可。若检测到同名服务单元
-已存在（旧进程正在跑旧代码），`deploy` 会**先 `systemctl stop` 关停旧服务**、**覆盖写入新单元**后
+**重新部署（同名服务）**：再次运行 `sudo python -m server.main deploy` 即可。若检测到同名服务单元
+已存在（前一进程仍在运行），`deploy` 会**先 `systemctl stop` 关停原服务**、**覆盖写入最新单元**后
 `daemon-reload` 并**重新 `start`**，**仍不 `enable` 开机自启**。无需先手动删旧单元或手动停服务；首次部署时
 单元尚不存在，`deploy` 会跳过 `stop`，直接写入并启动。
 
