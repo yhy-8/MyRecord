@@ -172,6 +172,13 @@ class Store:
         today = today_utc8()
         if today == self._today:
             return
+        if self.records_dir is None:
+            # 配置错误兜底：无 Records 落盘目录时，封存（渲染历史日文件 + 清理条目态）
+            # 不具备前提。若照常清理，会把 date < 今天 的条目清出 state.json 却又无处承载
+            # （数据丢失）。此时标记已处理并返回，把历史数据保留在 state.json，宁可多占。
+            logger.warning("seal_skipped_no_records_dir")
+            self._today = today
+            return
         with self._lock:
             stale = set()
             for entry in self.data["entries"].values():

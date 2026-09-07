@@ -136,7 +136,9 @@ class StoreTest(unittest.TestCase):
             }),
             encoding="utf-8",
         )
-        store = Store(data)
+        # 传入 records_dir/trash_dir，让封存先渲染历史日文件再清理（否则无落盘目录时
+        # 封存会跳过清理，以“仅今天常驻 state”语义不再把历史日条目态清掉——那是数据丢失）。
+        store = Store(data, data.parent / "Records", data.parent / "Trash")
         # 历史日条目不可删（返回 False）
         self.assertFalse(store.tombstone("old-1", "a"))
         # 首次访问触发封存：历史日条目态被移除（不再常驻 state，以整文件为准）
@@ -448,13 +450,42 @@ class StoreSealPreviousDayTest(unittest.TestCase):
         # 昨日文件已在封存前落盘（render 一次），整文件保留
         self.assertTrue((records_dir / f"{yesterday}.md").exists())
 
+    def test_seal_without_records_dir_keeps_entries_never_purges(self):
+        """无 Records 落盘目录（配置错误兜底）：封存不清理历史条目态，避免数据丢失。
+
+        回归：Store 以 records_dir=None 构造时，若 _maybe_seal_previous_day 照常清理，
+        会把 date < 今天 的条目清出 state.json，又因 _render_dates 无目录直接返回、
+        从不落盘 —— 数据无处承载。这里应跳过封存并保留数据。
+        """
+        data = _tmp_data_dir() / "state.json"
+        store = Store(data)  # records_dir 缺省 None
+        store._today = _today()  # 无日界，便于注入“昨天”条目
+        yesterday = (
+            datetime.date.fromisoformat(_today()) - datetime.timedelta(days=1)
+        ).isoformat()
+        store.data["entries"]["y-1"] = {
+            "entry_id": "y-1", "device_id": "a", "date": yesterday,
+            "ts": _today_ts(8), "tag": "", "text": "昨日记录", "v": 1,
+        }
+        store.data["version"] = 1
+        # 模拟进程重启落在“今天”：self._today 为 None，首次访问触发封存检查
+        store._today = None
+
+        store.pull(0)  # 内部会调用 _maybe_seal_previous_day
+
+        # 无落盘目录 → 跳过封存：昨日条目仍在 state.json（不丢数据）
+        self.assertIn("y-1", store.data["entries"])
+        self.assertEqual(store.data["version"], 1)
+
     def test_device_names_derived_from_live_entries_only(self):
         """方案 B：设备名只是写在条目上的标签，服务端不单独记录设备清单。
 
         封存清理历史日条目态后，历史设备名随之消失（不再通过 seen_devices 额外缓存保留）。
         """
         data = _tmp_data_dir() / "state.json"
-        store = Store(data)
+        # 传入 records_dir/trash_dir：封存先渲染历史日文件再清理条目态（真正验证“历史日
+        # 设备名随条目态清理而消失”的语义；无落盘目录时封存会跳过清理、不丢数据）。
+        store = Store(data, data.parent / "Records", data.parent / "Trash")
         store._today = _today()  # 无日界，便于注入“昨天”条目
         yesterday = (
             datetime.date.fromisoformat(_today()) - datetime.timedelta(days=1)

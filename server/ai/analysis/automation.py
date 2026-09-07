@@ -37,6 +37,21 @@ logger = logging.getLogger(__name__)
 _DETECTION_INTERVAL_MINUTES = 15
 _RETRY_INTERVAL_MINUTES = 30
 
+# 时间基准固定 UTC+8（非配置项），与 store.today_utc8() 同源：自动任务的目标周期
+# （昨/上周/上月）必须以 UTC+8 自然日为准，否则在非 UTC+8 时区的服务器上与日界
+# 封存所依据的“今天”错位，会对错误的日期范围生成总结/报告。
+_UTC8 = datetime.timezone(datetime.timedelta(hours=8))
+
+
+def _now() -> datetime.datetime:
+    """当前 UTC+8 墙钟时间（naive，不携带时区信息）。
+
+    返回 naive 是为了与既有状态文件（无时区后缀）及测试保持兼容；系统整体固定
+    UTC+8，无需额外携带时区标记。
+    """
+    return datetime.datetime.now(tz=_UTC8).replace(tzinfo=None)
+
+
 _AUTOMATION_TASKS = ("daily_summary", "weekly_report", "monthly_report")
 _RETRY_LIMIT_KEYS = {
     "daily_summary": "daily_summary_retry_limit",
@@ -310,7 +325,7 @@ def run_due_automatic_tasks() -> None:
         return
     try:
         state = _load_automation_state()
-        now = datetime.datetime.now()
+        now = _now()
         state["last_check_started_at"] = _now_text(now)
         _save_automation_state(state)
     except Exception as error:
@@ -334,7 +349,7 @@ def run_due_automatic_tasks() -> None:
         )
     finally:
         state = _load_automation_state()
-        state["last_check_completed_at"] = _now_text(datetime.datetime.now())
+        state["last_check_completed_at"] = _now_text(_now())
         try:
             _save_automation_state(state)
         finally:
@@ -354,7 +369,7 @@ def retry_failed_automatic_tasks() -> tuple[bool, str]:
         return False, "另一个自动任务正在运行，请稍后重试。"
     try:
         state = _load_automation_state()
-        now = datetime.datetime.now()
+        now = _now()
         failed = [
             task
             for task in _AUTOMATION_TASKS
@@ -392,7 +407,7 @@ def retry_failed_automatic_tasks() -> tuple[bool, str]:
         return False, f"重试失败: {error}"
     finally:
         state = _load_automation_state()
-        state["last_retry_completed_at"] = _now_text(datetime.datetime.now())
+        state["last_retry_completed_at"] = _now_text(_now())
         try:
             _save_automation_state(state)
         finally:
@@ -408,7 +423,7 @@ def failed_automatic_tasks() -> list[tuple[str, str, str]]:
     跨周期后旧周期失败任务将被丢弃（见 _same_period），因此这里只列当前周期的失败。
     """
     state = _load_automation_state()
-    now = datetime.datetime.now()
+    now = _now()
     return [
         (task, AUTOMATION_TASK_LABELS[task], str(_task_record(state, task).get("error", "")))
         for task in _AUTOMATION_TASKS
@@ -420,7 +435,7 @@ def failed_automatic_tasks() -> list[tuple[str, str, str]]:
 def automation_status_snapshot() -> dict:
     """汇总任务状态与调度时间（供状态查看）。"""
     state = _load_automation_state()
-    now = datetime.datetime.now()
+    now = _now()
     tasks = {}
     for task in _AUTOMATION_TASKS:
         record = dict(_task_record(state, task))
