@@ -340,7 +340,12 @@ class SyncHandler(BaseHTTPRequestHandler):
             files = [
                 {
                     "date": path.stem,
-                    "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                    # 对规范化后的文本取哈希（read_text 统一 \r\n -> \n），与
+                    # _records_file 下发的字节表示（content.encode("utf-8")）一致，
+                    # 避免 Linux 服务端 + Windows 客户端因换行差异Hash永不收敛。
+                    "sha256": hashlib.sha256(
+                        path.read_text(encoding="utf-8").encode("utf-8")
+                    ).hexdigest(),
                 }
                 for path in sorted(records_dir.glob("*.md"))
             ]

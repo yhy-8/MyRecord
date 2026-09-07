@@ -5,7 +5,11 @@ set -euo pipefail
 
 # server/ 已成为独立工程；脚本位于 server/deploy/，工程根即脚本上一级。
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CONFIG_DATA_DIR="$(grep -E '^\s*data_dir:' "$REPO_DIR/config.yaml" | awk '{print $2}' | tr -d '"')"
+CONFIG_DATA_DIR="$(grep -E '^\s*data_dir:' "$REPO_DIR/config.yaml" 2>/dev/null | awk '{print $2}' | tr -d '"' || true)"
+if [[ -z "$CONFIG_DATA_DIR" ]]; then
+  # 缺省值与 server.config._DEFAULTS 的 ./data 对齐；避免缺失时把整个 server/ 打进快照。
+  CONFIG_DATA_DIR="data"
+fi
 if [[ "$CONFIG_DATA_DIR" == ./* || "$CONFIG_DATA_DIR" != /* ]]; then
   DATA_DIR="$REPO_DIR/${CONFIG_DATA_DIR#./}"
 else

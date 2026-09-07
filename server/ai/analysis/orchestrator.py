@@ -40,6 +40,10 @@ from .context import (
 logger = logging.getLogger(__name__)
 _MAX_AGENT_INPUT_CHARACTERS = 120000
 
+# 报告生成锁被占用（如用户正手动 `python -m server.main report`）时返回的消息。
+# 自动任务据此把该情形判为「待生成、稍后重试」，而非一次真实的生成失败。
+REPORT_BUSY_MESSAGE = "另一个分析报告正在生成，请稍后重试。"
+
 
 @dataclass
 class UsageAccumulator:
@@ -381,7 +385,7 @@ def generate_analysis_report(
     report_path = _analysis_report_path(kind, start, end)
     report_lock = FileLock.acquire(settings.ANALYSIS_DIR / ".report.lock")
     if report_lock is None:
-        return "另一个分析报告正在生成，请稍后重试。", False, None
+        return REPORT_BUSY_MESSAGE, False, None
     generation_started = time.perf_counter()
     run_id = uuid.uuid4().hex
     usage = UsageAccumulator()

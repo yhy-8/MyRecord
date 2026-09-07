@@ -337,9 +337,16 @@ class SyncClient:
         return resp.text
 
     def _file_sha256(self, path) -> str:
-        """返回本地文件的 SHA-256；不可读/不存在返回空串（视为需要下载）。"""
+        """返回本地文件的 SHA-256；不可读/不存在返回空串（视为需要下载）。
+
+        对规范化后的文本取哈希（read_text 统一 \r\n -> \n），与服务端哈希及
+        下发字节（content.encode("utf-8")）一致，避免 Windows 客户端因写盘时
+        换行被转为 \r\n 而Hash永不收敛、启动即全量重下载历史文件。
+        """
         try:
-            return hashlib.sha256(path.read_bytes()).hexdigest()
+            return hashlib.sha256(
+                path.read_text(encoding="utf-8").encode("utf-8")
+            ).hexdigest()
         except (OSError, UnicodeError):
             return ""
 
@@ -371,10 +378,11 @@ class SyncClient:
             # 直接整文件覆盖（云端文件已含 <summary>，不再本地保留本地 summary）。
             atomic_write(path, content)
             logger.info("history_file_overwrite date=%s", date)
-        # 2) 删除：本地存在但云端没有的历史文件（date < 今天且不在云端 => 作废）。
+        # 2) 删除：本地存在但云端没有的文件（不保护“今天”，今天由对账/推送维护）。
+        #    date < 今天且不在云端 => 作废；date > 今天（未来日期）也不在云端 => 异常残留，一并清理。
         local_files = {p.stem for p in records_dir.glob("*.md")}
         for date in sorted(local_files):
-            if date >= today:
+            if date == today:
                 continue
             if date in cloud:
                 continue

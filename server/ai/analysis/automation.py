@@ -28,6 +28,7 @@ from .context import (
     _existing_logs,
 )
 from .orchestrator import (
+    REPORT_BUSY_MESSAGE,
     generate_analysis_report,
     summarize_diary,
 )
@@ -470,6 +471,17 @@ def _process_due(
         if success:
             _mark_ok(record, tkey)
             logger.info("automation_task_completed task=%s", task)
+        elif message == REPORT_BUSY_MESSAGE:
+            # 报告锁被占用（如用户正手动生成）：非真实失败，保留待生成（pending），
+            # 不累计 attempts，稍后由 _scan_missing / _process_due 再次尝试。
+            record.update(
+                status="pending",
+                error=message,
+                attempts=0,
+                started_at="",
+                next_retry_at=_now_text(now),
+            )
+            logger.info("automation_task_deferred_busy task=%s", task)
         else:
             _mark_failure(record, task, message, now, tkey)
 
@@ -555,7 +567,7 @@ def retry_failed_automatic_tasks() -> tuple[bool, str]:
             task
             for task in _AUTOMATION_TASKS
             if automation.get(task, True) is True
-            and _task_record(state, task).get("status") in _FAILED_STATUSES
+            and _task_record(state, task).get("status") not in {"ok", "empty"}
             and _same_period(_task_record(state, task), _default_task_target(task, now))
         ]
         if not remaining:
