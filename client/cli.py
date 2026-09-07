@@ -162,7 +162,17 @@ def _handle_command(client: SyncClient, text: str) -> None:
 
 
 def _print_automation_status(automation: dict) -> None:
-    """展示自动任务逐任务状态（ok/failed/pending/blocked）。"""
+    """展示自动任务逐任务状态及失败详情。
+
+    任务状态（服务端严格以文件为准判定）：
+      ok            已生成        empty         无内容（该周期无记录）
+      pending       待生成        running       正在生成
+      failed        失败（待重试）blocked       失败（已停止自动重试，需手动重试）
+      unconfigured  未配置（无AI）
+
+    失败 / 未配置时会附上原因；失败（待重试）还会附下次重试时间。注意服务端可能
+    已生成但本地历史文件尚未刷新（历史日整文件只在启动/重连完整同步时拉取）。
+    """
     tasks = automation.get("tasks") or {}
     if not tasks:
         return
@@ -173,16 +183,32 @@ def _print_automation_status(automation: dict) -> None:
         "monthly_report": "月报",
     }
     status_text = {
-        "ok": "完成",
-        "failed": "失败（待重试）",
-        "blocked": "已达重试上限",
+        "ok": "已完成",
+        "empty": "无内容（该周期无记录）",
         "pending": "待生成",
+        "running": "正在生成",
+        "failed": "失败（待重试）",
+        "blocked": "失败（已停止自动重试，需手动重试）",
+        "unconfigured": "未配置（无AI）",
     }
     console.print("自动任务:")
     for task, record in tasks.items():
-        st = record.get("status", "") if isinstance(record, dict) else ""
+        if not isinstance(record, dict):
+            continue
+        st = record.get("status", "")
         label = labels.get(task, task)
-        console.print(f"  {label}: {status_text.get(st, st)}")
+        line = f"  {label}: {status_text.get(st, st)}"
+        detail = []
+        error = str(record.get("error") or "")
+        if st in {"failed", "blocked", "unconfigured"} and error:
+            detail.append(error)
+        if st == "failed":
+            retry_at = str(record.get("next_retry_at") or "")
+            if retry_at:
+                detail.append(f"下次重试: {retry_at}")
+        if detail:
+            line += f" — {'；'.join(detail)}"
+        console.print(line)
 
 
 def _handle_status(client: SyncClient) -> None:
@@ -192,9 +218,8 @@ def _handle_status(client: SyncClient) -> None:
     except SyncError as error:
         console.print(f"[red][!][/red] {error}")
         return
-    console.print(f"条目数: {status.get('entry_count')}   已删数: {status.get('tombstone_count')}")
-    devices = status.get("devices") or {}
-    console.print("设备: " + (", ".join(devices.keys()) if devices else "（无）"))
+    # 条目/已删数是服务端“今天”（UTC+8）的权威计数：历史日以 Records 整文件为准，不再计数（见设计基线 §4/§9）。
+    console.print(f"今日条目: {status.get('entry_count')}   今日已删: {status.get('tombstone_count')}")
     ai = status.get("ai") or {}
     if ai.get("current_model"):
         console.print(f"AI 模型: {ai['current_model']}")

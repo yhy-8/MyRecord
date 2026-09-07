@@ -415,14 +415,17 @@ def generate_analysis_report(
             return "报告正文为空。", False, None
 
         source_table = _source_table(references)
+        # 每行 > 元数据末尾补两个空格（Markdown 硬换行），否则渲染时挤成一段不换行。
+        header_lines = [
+            f"> 生成时间：{datetime.datetime.now():%Y-%m-%d %H:%M}  ",
+            f"> 使用模型：{_model_label(model_config)}  ",
+            f"> 生成耗时：{_duration_label(time.perf_counter() - generation_started)}  ",
+            f"> Token 用量：{_token_label(usage.totals())}  ",
+            f"> 原始日记范围：{start:%Y-%m-%d} 至 {end:%Y-%m-%d}  ",
+            f"> 分析运行：{run_id}  ",
+        ]
         final_content = (
-            f"# {report_name}\n\n"
-            f"> 生成时间：{datetime.datetime.now():%Y-%m-%d %H:%M}\n"
-            f"> 使用模型：{_model_label(model_config)}\n"
-            f"> 生成耗时：{_duration_label(time.perf_counter() - generation_started)}\n"
-            f"> Token 用量：{_token_label(usage.totals())}\n"
-            f"> 原始日记范围：{start:%Y-%m-%d} 至 {end:%Y-%m-%d}\n"
-            f"> 分析运行：{run_id}\n\n"
+            f"# {report_name}\n\n" + "\n".join(header_lines) + "\n\n"
             + summary
             + "\n"
             + (("\n\n" + source_table + "\n") if source_table else "")

@@ -144,16 +144,24 @@ class MissingDetectionTests(AutomationBase):
         self._diary("2026-06-10")
         self.assertTrue(automation._task_missing("monthly_report", now))
 
-    def test_scan_marks_newly_missing_as_due_and_present_as_ok(self):
+    def test_scan_marks_newly_missing_as_due_and_empty_period_as_empty(self):
         state = self._state()
         now = self._now()
-        self._diary("2026-07-14")  # 昨天总结缺失
+        self._diary("2026-07-14")  # 昨天总结缺失 → 有内容待生成
         automation._scan_missing(state, now, settings.CONFIG["automation"])
         daily = self._record(state, "daily_summary")
         self.assertEqual("pending", daily["status"])
         self.assertTrue(automation._retry_due(daily, now))
+        # 周/月周期内无任何记录 → 无内容（empty），而非误标「已生成」
+        self.assertEqual("empty", self._record(state, "weekly_report")["status"])
+        self.assertEqual("empty", self._record(state, "monthly_report")["status"])
+        # 有日志且报告已生成 → 已生成（ok）
+        self._diary("2026-07-08")
+        report = settings.ANALYSIS_DIR / "Weekly" / "2026-07-06_to_2026-07-12.md"
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text("# 周报", encoding="utf-8")
+        automation._scan_missing(state, now, settings.CONFIG["automation"])
         self.assertEqual("ok", self._record(state, "weekly_report")["status"])
-        self.assertEqual("ok", self._record(state, "monthly_report")["status"])
 
     def test_scan_resets_a_present_task_back_to_ok(self):
         state = self._state()
@@ -317,6 +325,57 @@ class RunAndRetryTests(AutomationBase):
         self.assertEqual("2026-07-15|2026-07-15", self._record(
             automation._load_automation_state(), "daily_summary"
         )["target_key"])
+
+    def test_unconfigured_when_model_not_ready(self):
+        # 模型未配置（缺 api_key）→ 记「未配置（无AI）」，不进入失败/重试
+        self._diary("2026-07-14")
+        with patch.object(
+            automation, "_model_ready", return_value=(False, "活动模型 api_key 为空")
+        ):
+            automation.run_due_automatic_tasks()
+        record = self._record(automation._load_automation_state(), "daily_summary")
+        self.assertEqual("unconfigured", record["status"])
+        self.assertIn("api_key", record["error"])
+        self.assertEqual("", record["next_retry_at"])
+        self.assertEqual("", record["started_at"])
+
+    def test_stale_running_recovers_and_regenerates(self):
+        # 上次「正在生成」中断（超时未收尾）→ 重新调度
+        self._diary("2026-07-14")
+        old_start = self._now() - datetime.timedelta(
+            seconds=automation._RUNNING_STALE_SECONDS + 1
+        )
+        automation._save_automation_state(
+            {
+                "tasks": {
+                    "daily_summary": {
+                        "status": "running",
+                        "started_at": automation._now_text(old_start),
+                        "target_key": "2026-07-14|2026-07-14",
+                    }
+                }
+            }
+        )
+        with patch.object(
+            automation, "_run_generation", return_value=("总结", True)
+        ) as generate:
+            automation.run_due_automatic_tasks()
+        generate.assert_called_once()
+        rec = self._record(automation._load_automation_state(), "daily_summary")
+        self.assertEqual("ok", rec["status"])
+
+    def test_failed_status_carries_reason_and_retry_at(self):
+        # 失败（待重试）应带失败原因与下次重试时间
+        self._diary("2026-07-14")
+        with patch.object(
+            automation, "_run_generation", return_value=("模型超时", False)
+        ):
+            automation.run_due_automatic_tasks()
+        record = self._record(automation._load_automation_state(), "daily_summary")
+        self.assertEqual("failed", record["status"])
+        self.assertEqual("模型超时", record["error"])
+        self.assertTrue(record["next_retry_at"])
+        self.assertEqual(1, record["attempts"])
 
 
 if __name__ == "__main__":

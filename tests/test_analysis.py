@@ -203,6 +203,20 @@ class AnalysisWorkflowTests(unittest.TestCase):
         self.assertIn("R-20260714-10", content)
         self.assertEqual(original, diary.read_bytes())
 
+    def test_report_header_metadata_lines_end_with_two_spaces(self):
+        # 每行 > 元数据末尾补两个空格：Markdown 硬换行，否则渲染时挤成一段不换行。
+        day = datetime.date(2026, 7, 14)
+        self.write_diary(day.isoformat())
+        _, success, path = orchestrator.generate_analysis_report(
+            "weekly", day, {"name": "mock"}
+        )
+        self.assertTrue(success)
+        content = path.read_text(encoding="utf-8")
+        header_lines = [line for line in content.splitlines() if line.startswith("> ")]
+        self.assertTrue(header_lines, "报告头部应含元数据块引用行")
+        for line in header_lines:
+            self.assertTrue(line.endswith("  "), f"块引用行应以两个空格结尾: {line!r}")
+
     def test_weekly_report_is_single_report_agent_no_reviewer(self):
         day = datetime.date(2026, 7, 14)
         self.write_diary(day.isoformat())

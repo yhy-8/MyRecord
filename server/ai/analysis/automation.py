@@ -36,6 +36,8 @@ logger = logging.getLogger(__name__)
 
 _DETECTION_INTERVAL_MINUTES = 15
 _RETRY_INTERVAL_MINUTES = 30
+# 「正在生成」状态超过该秒数仍未收尾 → 视为上次运行中断（崩溃/重启），允许重新调度。
+_RUNNING_STALE_SECONDS = 600
 
 # 时间基准固定 UTC+8（非配置项），与 store.today_utc8() 同源：自动任务的目标周期
 # （昨/上周/上月）必须以 UTC+8 自然日为准，否则在非 UTC+8 时区的服务器上与日界
@@ -146,18 +148,37 @@ def _diary_summary_needs_generation(path: Path) -> bool:
     return summary in {"", "(无)", "(无总结)", "暂无今日总结。"}
 
 
-def _task_missing(task: str, now: datetime.datetime, *, target=None) -> bool:
-    """按「产物文件是否存在 + 目标周期」判定任务是否缺失。"""
+def _task_state(task: str, now: datetime.datetime, *, target=None) -> str:
+    """按「产物文件是否存在 + 目标周期」判定任务当前状态（严格以文件为准）。
+
+    返回三种状态：
+    - ``empty``：该周期**没有任何日记内容**（昨日无日记文件 / 周月周期内无日志），无事可做。
+    - ``done``：**产物已存在**（昨日总结已写非占位正文 / 周月报告文件已生成）。
+    - ``missing``：**有内容但无产物**，需要（重新）生成。
+
+    判定规则（与设计基线 §9.1 一致）：
+    - 每日总结：读昨日日记文件里的 ``<summary>`` 是否为默认占位符（文件存在才判）。
+    - 周/月报：该周期内有日志 且 报告文件不存在 才算缺失。
+    """
     target = target or _default_task_target(task, now)
     if task == "daily_summary":
         day = datetime.date.fromisoformat(target["start"])
         path = settings.DIARY_DIR / f"{day.isoformat()}.md"
-        return path.exists() and _diary_summary_needs_generation(path)
+        if not path.exists():
+            return "empty"
+        return "missing" if _diary_summary_needs_generation(path) else "done"
     kind = "weekly" if task == "weekly_report" else "monthly"
     start = datetime.date.fromisoformat(target["start"])
     end = datetime.date.fromisoformat(target["end"])
+    if not _existing_logs(start, end):
+        return "empty"
     path = _analysis_report_path(kind, start, end)
-    return bool(_existing_logs(start, end)) and not path.exists()
+    return "missing" if not path.exists() else "done"
+
+
+def _task_missing(task: str, now: datetime.datetime, *, target=None) -> bool:
+    """是否缺失（= 有内容但无产物）。"""
+    return _task_state(task, now, target=target) == "missing"
 
 
 # ---------- 生成与重试 ----------
@@ -165,6 +186,40 @@ def _task_missing(task: str, now: datetime.datetime, *, target=None) -> bool:
 
 def _retry_limit(task: str) -> int:
     return settings.retry_policy()[_RETRY_LIMIT_KEYS[task]]
+
+
+def _model_ready() -> tuple[bool, str]:
+    """返回 (是否能生成, 不可用原因)。
+
+    配置错误 / 活动模型缺 api_key 时不可生成。这类问题靠重试无法自愈（改配置需重启），
+    故不计入「失败（待重试）」，而记作独立的「未配置（无AI）」状态。
+    """
+    try:
+        model = settings.ModelConfig.get_model()
+    except Exception as error:
+        return False, f"模型配置无效: {error}"
+    api_url = str(model.get("api_url") or "").strip()
+    api_key = str(model.get("api_key") or "").strip()
+    if not api_url:
+        return False, "活动模型 api_url 为空"
+    if not api_key:
+        return False, "活动模型 api_key 为空"
+    return True, ""
+
+
+def _is_stale_running(record: dict, now: datetime.datetime) -> bool:
+    """「正在生成」是否已超时未收尾（上次运行中断/崩溃），允许重新调度。"""
+    if record.get("status") != "running":
+        return False
+    started = record.get("started_at", "")
+    if not started:
+        return True
+    try:
+        return now >= datetime.datetime.fromisoformat(started) + datetime.timedelta(
+            seconds=_RUNNING_STALE_SECONDS
+        )
+    except ValueError:
+        return True
 
 
 def _run_generation(task: str, target: dict[str, str]) -> tuple[str, bool]:
@@ -193,7 +248,31 @@ def _retry_due(record: dict, now: datetime.datetime) -> bool:
 
 
 def _mark_ok(record: dict, tkey: str | None = None) -> None:
-    record.update(status="ok", error="", attempts=0, next_retry_at="")
+    record.update(
+        status="ok", error="", attempts=0, started_at="", next_retry_at=""
+    )
+    if tkey is not None:
+        record["target_key"] = tkey
+
+
+def _mark_empty(record: dict, tkey: str | None = None) -> None:
+    """该周期无任何记录：无事可做，记为「无内容」，区别于「已生成」。"""
+    record.update(
+        status="empty", error="", attempts=0, started_at="", next_retry_at=""
+    )
+    if tkey is not None:
+        record["target_key"] = tkey
+
+
+def _mark_unconfigured(record: dict, message: str, tkey: str | None = None) -> None:
+    """模型未配置/不可用：记录原因，不进入可重试的失败状态。"""
+    record.update(
+        status="unconfigured",
+        error=message,
+        attempts=0,
+        started_at="",
+        next_retry_at="",
+    )
     if tkey is not None:
         record["target_key"] = tkey
 
@@ -210,13 +289,18 @@ def _mark_failure(
     # limit 是「首次之后再重试的次数」，共执行 limit+1 次；超过上限即停止
     if attempts > limit:
         record.update(
-            status="blocked", error=message, attempts=attempts, next_retry_at=""
+            status="blocked",
+            error=message,
+            attempts=attempts,
+            started_at="",
+            next_retry_at="",
         )
     else:
         record.update(
             status="failed",
             error=message,
             attempts=attempts,
+            started_at="",
             next_retry_at=_now_text(
                 now + datetime.timedelta(minutes=_RETRY_INTERVAL_MINUTES)
             ),
@@ -251,7 +335,12 @@ def _scan_missing(
     now: datetime.datetime,
     automation: dict,
 ) -> None:
-    """每 15 分钟：为新缺失任务初始化「到期」，产物已存在则标记完成。"""
+    """每 15 分钟：严格按文件判定任务状态（empty/done/missing），刷新对应状态。
+
+    以文件为准：产物文件已生成 → 已生成（ok）；周期无记录 → 无内容（empty）；
+    有内容但无产物 → 新缺失则置为「待生成（到期）」。已进入失败/重试安排的（failed/blocked）
+    保留其重试计划，交由 _process_due 按 next_retry_at 处理。
+    """
     for task in _AUTOMATION_TASKS:
         if automation.get(task, True) is not True:
             state.get("tasks", {}).pop(task, None)
@@ -262,15 +351,21 @@ def _scan_missing(
         # 周期已滚动：丢弃上个周期的失败/重试状态，只保留当前周期（昨/上周/上月）
         if not _same_period(record, target):
             record.clear()
-        if not _task_missing(task, now, target=target):
+        st = _task_state(task, now, target=target)
+        if st == "done":
             _mark_ok(record, tkey)
             continue
-        # 新缺失（无记录或曾完成又缺失）→ 立即到期；同周期已失败的保留其重试安排
-        if not record or record.get("status") == "ok":
+        if st == "empty":
+            _mark_empty(record, tkey)
+            continue
+        # missing：有内容但无产物。仅当尚未进入失败/重试安排时置为立即到期；
+        # 同周期已失败的保留其重试安排（_process_due 会按 next_retry_at 处理）。
+        if not record or record.get("status") in {"ok", "empty"}:
             record.update(
                 status="pending",
                 error="",
                 attempts=0,
+                started_at="",
                 next_retry_at=_now_text(now),
                 target_key=tkey,
             )
@@ -295,14 +390,50 @@ def _process_due(
                 status="pending",
                 error="",
                 attempts=0,
+                started_at="",
                 next_retry_at=_now_text(now),
                 target_key=tkey,
             )
-        if record.get("status") in {"ok", "blocked"} or not _retry_due(record, now):
-            continue
-        if not _task_missing(task, now, target=target):
+        # 崩溃/中断恢复：上次「正在生成」长期未收尾 → 视为可重试
+        if _is_stale_running(record, now):
+            record.update(
+                status="pending",
+                error="",
+                attempts=0,
+                started_at="",
+                next_retry_at=_now_text(now),
+                target_key=tkey,
+            )
+        # 先按文件现状刷新产物状态（可能在此期间已生成/空置）
+        st = _task_state(task, now, target=target)
+        if st == "done":
             _mark_ok(record, tkey)
             continue
+        if st == "empty":
+            _mark_empty(record, tkey)
+            continue
+        # 到这里：有内容待生成。
+        # 已完成（ok）/已达上限（blocked）无需再生成；正在生成且未超时则等待。
+        if record.get("status") in {"ok", "blocked"}:
+            continue
+        if record.get("status") == "running" and not _is_stale_running(record, now):
+            continue
+        # 未配置（无AI）：记录原因；配置修好后（_model_ready 通过）自然进入生成。
+        ready, reason = _model_ready()
+        if not ready:
+            _mark_unconfigured(record, reason, tkey)
+            continue
+        # 配置就绪：unconfigured 立即到期；pending 立即到期；失败按 next_retry_at。
+        if record.get("status") != "unconfigured" and not _retry_due(record, now):
+            continue
+        # 标记「正在生成」并持久化，使 /status 在生成期间可见（生成可能耗时较长）。
+        record.update(
+            status="running",
+            error="",
+            started_at=_now_text(now),
+            next_retry_at="",
+        )
+        _save_automation_state(state)
         logger.info("automation_task_start task=%s", task)
         message, success = _run_generation(task, target)
         if success:
