@@ -426,12 +426,11 @@ class SyncClient:
         """按云端报告哈希清单把报告同步到本地 AnalysisReports（不做 /v 查看）。
 
         清单即权威全集（rel + sha256）：仅对本地副本缺失或哈希与云端不同的报告
-        拉取覆盖，未变即跳过。同一时间段只保留最新生成。
+        拉取覆盖，未变即跳过。同一时间段只保留最新生成。云端已不再存在的本地
+        副本一并清理（与 records 哈希对账一致：云端为准），避免残留旧报告。
         """
         data = self._request("GET", "/api/reports") or {}
         cloud = {f["rel"]: f["sha256"] for f in (data.get("files") or [])}
-        if not cloud:
-            return
         base = config.load()["client"]["analysis_dir"]
         base.mkdir(parents=True, exist_ok=True)
         base_resolved = base.resolve()
@@ -450,3 +449,16 @@ class SyncClient:
             if content is None:
                 continue
             atomic_write(target, content)
+        # 清理：云端已不存在的本地报告副本（云端为准）。rel 由 rglob 得到，天然在
+        # analysis_dir 内，不会删到目录之外；仅处理 .md（报告文件）。
+        local = {
+            p.relative_to(base_resolved).as_posix()
+            for p in base.rglob("*.md")
+            if p.is_file()
+        }
+        for rel in sorted(local - set(cloud)):
+            try:
+                (base / rel).unlink()
+                logger.info("report_removed rel=%s", rel)
+            except OSError:
+                pass

@@ -433,5 +433,29 @@ class ServerMainReportTests(unittest.TestCase):
         self.assertEqual(1, rc)
 
 
+class AnalysisExportsSmokeTest(unittest.TestCase):
+    """回归：main._command_run 经 server.ai.analysis 命名空间访问的符号必须存在。
+
+    曾发生 P0：main.py 访问 ai_analysis._purge_empty_placeholder_days()，但该函数
+    未从 automation 子模块导出，导致 `python -m server.main run` 启动即 AttributeError，
+    deploy 的 systemd 单元同样无法启动。这里断言 main.py 使用的符号（含 `_purge_empty_placeholder_days`）
+    都已导出，防止导出缺口再犯。
+    """
+
+    def test_analysis_exports_symbols_used_by_main(self):
+        import server.ai.analysis as analysis
+
+        for name in (
+            "_purge_empty_placeholder_days",
+            "run_due_automatic_tasks",
+            "retry_failed_automatic_tasks",
+            "generate_analysis_report",
+        ):
+            self.assertTrue(
+                callable(getattr(analysis, name, None)),
+                f"server.ai.analysis 缺少 main._command_run 使用的符号: {name}",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
