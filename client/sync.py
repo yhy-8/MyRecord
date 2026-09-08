@@ -451,9 +451,12 @@ class SyncClient:
             atomic_write(target, content)
         # 清理：云端已不存在的本地报告副本（云端为准）。rel 由 rglob 得到，天然在
         # analysis_dir 内，不会删到目录之外；仅处理 .md（报告文件）。
+        # 必须用 base_resolved 做 rglob：relative_to 是逐段文本比较，而非解析后的路径比较；
+        # 未解析的 base 在 Windows 上可能是 8.3 短名（如 RUNNER~1），与 resolve() 后的
+        # 长名（runneradmin）即使指向同一目录，文本也不同，会让 relative_to 抛 ValueError。
         local = {
             p.relative_to(base_resolved).as_posix()
-            for p in base.rglob("*.md")
+            for p in base_resolved.rglob("*.md")
             if p.is_file()
         }
         for rel in sorted(local - set(cloud)):
