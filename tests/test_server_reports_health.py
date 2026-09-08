@@ -43,8 +43,10 @@ class ReportsEndpointTest(unittest.TestCase):
             prefix = (base / (kind or "")).resolve()
             if not prefix.is_relative_to(base.resolve()) or not prefix.is_dir():
                 return []
+            # rel 是跨平台标识：as_posix() 保证在 Windows 上也是正斜杠，
+            # 与服务端/客户端约定一致（见 client/sync.py 的 sync_reports）。
             return sorted(
-                str(p.relative_to(base.resolve()))
+                p.relative_to(base.resolve()).as_posix()
                 for p in prefix.rglob("*.md")
             )
 

@@ -48,7 +48,9 @@ def _command_run(args: argparse.Namespace) -> int:
         # 剔除 ../ 等越界组合，避免列出目录之外的路径。
         if not prefix.is_relative_to(base_resolved) or not prefix.is_dir():
             return []
-        return sorted(str(path.relative_to(base_resolved)) for path in prefix.rglob("*.md"))
+        # rel 作为 /api/reports/<rel> 的稳定标识，跨平台必须用正斜杠：
+        # str(relative_to) 在 Windows 上会产生反斜杠，故用 as_posix() 归一化。
+        return sorted(path.relative_to(base_resolved).as_posix() for path in prefix.rglob("*.md"))
 
     def read_report(rel: str) -> str | None:
         base = data_dir / "AnalysisReports"
