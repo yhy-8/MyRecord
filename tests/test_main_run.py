@@ -44,14 +44,17 @@ class RunCommandTLSGateTest(unittest.TestCase):
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
         self.data_dir = self.root / "data"
         self._orig_load = server_main.config.load
         server_main.config.load = lambda: _data_dir_config(self.data_dir)
+        # 用 addCleanup 而非 tearDown：即使 setUp 中途失败（如证书生成抛错），
+        # 也能恢复 monkeypatch，避免污染后续 test_* 模块（尤其 test_server_config 的 config.load）。
+        self.addCleanup(self._restore_config_load)
 
-    def tearDown(self):
+    def _restore_config_load(self):
         server_main.config.load = self._orig_load
-        self.tmp.cleanup()
 
     def test_run_rejects_start_without_tls_certs(self):
         err = io.StringIO()
@@ -67,24 +70,37 @@ class RunCommandCallbacksTest(unittest.TestCase):
     """证书存在时启动：serve 接到的回调在真实数据目录下行为正确。"""
 
     def setUp(self):
+        # `run` 的证书存在分支需要真实自签证书（_generate_cert 依赖 cryptography）；
+        # 该依赖缺失时不该让整组用例硬出错，按仓库既有惯例（test_terminal_input / test_real_ai）
+        # 优雅跳过，并避免 setUp 中途抛错导致 monkeypatch 泄漏。
+        try:
+            from cryptography import x509  # noqa: F401
+        except ImportError:
+            raise unittest.SkipTest("缺少 cryptography：`pip install cryptography`")
         self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
         self.data_dir = self.root / "data"
         self._orig_load = server_main.config.load
         server_main.config.load = lambda: _data_dir_config(self.data_dir)
+        self.addCleanup(self._restore_config_load)
         server_main._generate_cert(self.data_dir)  # 真实自签证书
-        self._orig_serve = server_main.hub_server.serve
         self.captured = {}
-        self._orig_run_due = None
+        self._orig_serve = server_main.hub_server.serve
+        self.addCleanup(self._restore_serve)
         import server.ai.analysis as analysis
         self._orig_run_due = analysis.run_due_automatic_tasks
+        self.addCleanup(self._restore_run_due)
 
-    def tearDown(self):
+    def _restore_config_load(self):
         server_main.config.load = self._orig_load
+
+    def _restore_serve(self):
         server_main.hub_server.serve = self._orig_serve
+
+    def _restore_run_due(self):
         import server.ai.analysis as analysis
         analysis.run_due_automatic_tasks = self._orig_run_due
-        self.tmp.cleanup()
 
     def _fake_serve(self, store, host, port, **kwargs):
         self.captured = {"store": store, "host": host, "port": port, **kwargs}
