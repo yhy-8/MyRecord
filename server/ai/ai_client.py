@@ -52,8 +52,12 @@ def _transient_http_error(error: requests.HTTPError) -> bool:
     )
 
 
+# 展示/分组统一时区：epoch 是无时区的绝对时间，时间统一按 UTC+8 展示（非配置项）。
+_UTC8 = datetime.timezone(datetime.timedelta(hours=8))
+
+
 def _build_system_prompt() -> str:
-    today = datetime.datetime.now().strftime("%Y-%m-%d")
+    today = datetime.datetime.now(tz=_UTC8).strftime("%Y-%m-%d")
     return f"""你是 MyRecord 的分析引擎。今天是 {today}。你只执行程序提交的总结或分析任务，不承担日常聊天。输出必须忠于记录、结构清晰且可独立阅读。
 
 ## 核心工作流

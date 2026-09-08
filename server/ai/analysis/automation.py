@@ -573,7 +573,9 @@ def retry_failed_automatic_tasks() -> tuple[bool, str]:
         if not remaining:
             return True, "全部失败自动任务重试成功。"
         labels = "、".join(AUTOMATION_TASK_LABELS[task] for task in remaining)
-        return False, f"以下自动任务仍失败：{labels}"
+        # remaining 含 failed/blocked/unconfigured 与暂被推迟为 pending 的任务，
+        # 故用「仍未能完成」而非「仍失败」，避免把锁忙推迟错误标为失败。
+        return False, f"以下自动任务仍未能完成：{labels}"
     except Exception as error:
         logger.error(
             "automation_retry_failed error_type=%s", error.__class__.__name__

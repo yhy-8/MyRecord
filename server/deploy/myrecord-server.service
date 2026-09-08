@@ -8,7 +8,9 @@
 # 若同名服务已部署（升级/重装），deploy 会先 systemctl stop 关停旧服务，覆盖本单元后
 # 再 daemon-reload && start，仍不 enable 开机自启。
 #
-# 以下是 deploy 自动生成的等价内容（供手动/审阅参照）。
+# 以下是 deploy 自动生成的等价内容（供手动/审阅参照）。实际部署以 deploy 渲染的单元为准：
+# 其 ExecStart 解释器为 server/.venv/bin/python（依赖装进该 venv，不写死 /usr/bin/python3）。
+# 下方 ExecStart 的“<...>”为**占位符**，勿直接照抄；请以 `python -m server.main deploy` 生成结果为准。
 [Unit]
 Description=MyRecord server hub (sync + AI reports + fanout)
 After=network-online.target
@@ -16,7 +18,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 -m server.main run
+ExecStart=<部署时自动填充：server/.venv/bin/python> -m server.main run
 WorkingDirectory=/srv/myrecord
 Restart=on-failure
 RestartSec=3

@@ -451,19 +451,26 @@ def _command_deploy(args: argparse.Namespace) -> int:
     venv_dir = _venv_dir()
     venv_py = _venv_python()
     if not _running_in_venv(venv_dir):
-        if not venv_py.is_file():
+        # 自举：仅在缺失时新建 venv，并用 os.environ 把“是否本轮新建”传给被重新执行的 deploy,
+        # 使最终摘要能正确显示“已新建/沿用已有”（venv_py 在重新执行时必然已存在，无法反向推断）。
+        venv_created_here = not venv_py.is_file()
+        if venv_created_here:
             print(f"正在创建虚拟环境 {venv_dir} ...")
             subprocess.run([sys.executable, "-m", "venv", venv_dir.as_posix()], check=True)
+            os.environ["_MYRECORD_DEPLOY_VENV_CREATED"] = "1"
         print(f"依赖将装进 {venv_dir}（不污染默认 Python）；改用 {venv_py} 重新执行 deploy ...")
         return subprocess.run(
             [venv_py.as_posix(), "-m", f"{_package_name()}.main", "deploy"],
             check=False,
         ).returncode
     # 1) 虚拟环境：已运行在 venv 内（本进程即 venv 的 python），装依赖并刷新。
-    venv_created = not venv_py.is_file()
-    if venv_created:
+    # venv_created 由自举阶段经 os.environ 带过来；若目标 venv 的 python 缺失（自举未果/异常/测试模拟），
+    # 仍须用当前解释器兜底创建，并计入“已新建”。
+    venv_created = os.environ.get("_MYRECORD_DEPLOY_VENV_CREATED", "") == "1"
+    if not venv_py.is_file():
         print(f"正在创建虚拟环境 {venv_dir} ...")
         subprocess.run([sys.executable, "-m", "venv", venv_dir.as_posix()], check=True)
+        venv_created = True
     reqs = Path(__file__).resolve().parent / "requirements.txt"
     print("正在把服务端依赖安装到虚拟环境（venv 的 pip）...")
     subprocess.run(

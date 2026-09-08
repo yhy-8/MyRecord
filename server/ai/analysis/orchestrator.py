@@ -44,6 +44,21 @@ _MAX_AGENT_INPUT_CHARACTERS = 120000
 # 自动任务据此把该情形判为「待生成、稍后重试」，而非一次真实的生成失败。
 REPORT_BUSY_MESSAGE = "另一个分析报告正在生成，请稍后重试。"
 
+# 展示/分组统一时区：epoch 是无时区的绝对时间，时间统一按 UTC+8 展示（非配置项）。
+_UTC8 = datetime.timezone(datetime.timedelta(hours=8))
+
+# 隐藏技术标记注释行（myrecord-* / agentrecord-*）在文件中仅用于对账/去重，不参与渲染；
+# 每日总结提示词只应看到正文（见设计基线 §3.3「AI 只读正文文本」），故注入前剥离这类整行注释。
+_MARKER_COMMENT_RE = re.compile(
+    r"^[ \t]*<!--\s*(?:myrecord|agentrecord)[^>]*?-->[ \t]*$\n?",
+    re.MULTILINE,
+)
+
+
+def _strip_record_markers(content: str) -> str:
+    """剥离整行的技术标记注释，只保留可见正文（`**HH:MM [设备名]:** 正文`）。"""
+    return _MARKER_COMMENT_RE.sub("", content)
+
 
 @dataclass
 class UsageAccumulator:
@@ -112,7 +127,7 @@ def summarize_diary(date: str, model_config: settings.ModelDict) -> tuple[str, b
         return f"找不到 {date} 的记录。", False
     original_content = file_path.read_text(encoding="utf-8")
     original_hash = hashlib.sha256(original_content.encode("utf-8")).hexdigest()
-    content = _log_without_summary(original_content)
+    content = _log_without_summary(_strip_record_markers(original_content))
     prompt = f"""[程序日记总结任务]
 请总结 {date} 的日记。只输出要写入 <summary> 的 Markdown 正文，不要输出标题、标签、代码围栏或完成提示。
 
@@ -425,7 +440,7 @@ def generate_analysis_report(
         source_table = _source_table(references)
         # 每行 > 元数据末尾补两个空格（Markdown 硬换行），否则渲染时挤成一段不换行。
         header_lines = [
-            f"> 生成时间：{datetime.datetime.now():%Y-%m-%d %H:%M}  ",
+            f"> 生成时间：{datetime.datetime.now(tz=_UTC8):%Y-%m-%d %H:%M}  ",
             f"> 使用模型：{_model_label(model_config)}  ",
             f"> 生成耗时：{_duration_label(time.perf_counter() - generation_started)}  ",
             f"> Token 用量：{_token_label(usage.totals())}  ",

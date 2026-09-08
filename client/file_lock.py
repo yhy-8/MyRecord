@@ -1,12 +1,16 @@
-"""跨进程互斥（基于 fcntl/flock）。Windows 打包环境由后台同步进程与交互进程
-共用同一队列文件时使用同一锁，避免并发写坏文件。"""
+"""跨进程互斥（基于 fcntl/flock），仅 POSIX 生效。
+
+客户端打包版（Windows/exe）为**单进程模型**：交互主线程与后台同步线程同在一进程内，
+没有跨进程竞争，故 Windows 上退化为无锁（`fcntl` 不可用 → `file_lock` 为空操作）。
+若未来启动多进程/多实例，需再引入 msvcrt 锁（参照服务端 `server/ai/file_lock.py`）。
+"""
 
 import contextlib
 from pathlib import Path
 
 try:
     import fcntl
-except ImportError:  # Windows：退化为无锁（打包版为单进程模型）
+except ImportError:  # Windows/Linux 之外的平台：无 fcntl → 无锁（单进程模型）
     fcntl = None  # type: ignore
 
 
