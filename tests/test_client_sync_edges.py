@@ -108,6 +108,19 @@ class RequestErrorTests(SyncClientEdgeBase):
         self.assertIsNone(payload)
 
 
+class HeadersValidationTests(SyncClientEdgeBase):
+    def test_non_ascii_token_raises_sync_error_not_crash(self):
+        # 复制样板时若 token 仍是中文占位/误粘中文，requests 构造头会抛 UnicodeEncodeError。
+        # 这里应提前转成可处理的 SyncError，而不是崩栈。
+        with patch.object(client_identity, "load", return_value={"token": "中文占位"}):
+            with self.assertRaises(SyncError) as ctx:
+                self.client._headers()
+        self.assertIn("非 ASCII", str(ctx.exception))
+
+    def test_ascii_token_ok(self):
+        self.assertEqual("Bearer tok", self.client._headers()["Authorization"])
+
+
 class ProbeTests(SyncClientEdgeBase):
     @patch("client.sync.requests.Session.get", return_value=_Resp(503))
     def test_probe_non_200_reports_error(self, _get):

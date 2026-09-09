@@ -103,8 +103,16 @@ class SyncClient:
         cred = identity.load()
         if not cred:
             raise SyncError("未配置凭据，仅本地记录；上线前请先写入 credentials.json。")
+        token = str(cred["token"])
+        # HTTP 头必须是 latin-1 可编码的：中文占位/误粘的串会在 requests 构造头时抛
+        # UnicodeEncodeError（不属于 RequestException，会穿透成崩溃），这里提前给出可读错误。
+        if not token.isascii():
+            raise SyncError(
+                "凭据 token 含非 ASCII 字符，请检查 credentials.json："
+                "token 应为服务端签发的随机字符串（见 credentials.example.json）。"
+            )
         return {
-            "Authorization": f"Bearer {cred['token']}",
+            "Authorization": f"Bearer {token}",
             "X-Device-Id": identity.device_name(),
         }
 

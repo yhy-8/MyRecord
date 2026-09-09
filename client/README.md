@@ -117,7 +117,7 @@ cp client/config.example.yaml client/config.yaml
 
 ## 本地文件
 
-- `credentials.example.json` 凭据**样板**：复制为 `credentials.json` 并填入服务端签发的 token
+- `credentials.example.json` 凭据**样板**：复制为 `credentials.json` 并把 `token` 换成服务端签发的随机字符串（留空=仅本地记录、不同步；文件里的 `_说明` 是给人看的注释，程序忽略）
 - `credentials.json` 链接凭证（服务端签发的唯一共享 token）
 - `server.crt` TOFU 固定的服务端证书（首次确认后落盘，`verify` 指向它）
 - `state.json` 本地同步游标（单条：当前已同步到的云端版本号）
