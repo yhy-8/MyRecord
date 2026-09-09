@@ -180,7 +180,7 @@ class TombstoneAntiResurrectionTest(ClientSyncE2ETestBase):
 
 
 class OutboxRepushResurrectionTest(ClientSyncE2ETestBase):
-    """回归：删除后，客户端 outbox 重推已删条目不得让它在服务端复活。
+    """删除后，客户端 outbox 重推已删条目不得让它在服务端复活。
 
     场景：推送响应丢失导致条目仍留在 outbox；随后该条被删除（服务端已写入 tombstone）。
     客户端上线重推 outbox，服务端的 append_entries 若只去重 entries，会把墓碑里的条目
@@ -429,8 +429,8 @@ class FullSyncTest(ClientSyncE2ETestBase):
     def test_full_sync_rebuilds_local_file_in_time_order(self):
         """多端离线记录后全量对账：本地镜像按时间排序重建，而非按推送顺序（v）。
 
-        回归：多端离线写入后各端批量上传，服务端按推送顺序（v）入库，条目时间反而
-        乱序；全量对账（reconcile）须把本地文件重建为与服务端渲染一致的时间有序结构。
+        多端离线写入后各端批量上传，服务端按推送顺序（v）入库，条目时间可能乱序；
+        全量对账（reconcile）把本地文件重建为与服务端渲染一致的时间有序结构。
         """
         root = _tmp_dir("cli-order-")
         # 服务端先有按推送顺序（v）到达但时间乱序的条目（late 先入、early 后入）
@@ -449,10 +449,9 @@ class FullSyncTest(ClientSyncE2ETestBase):
 
 
 class FullSyncRecoveryTest(ClientSyncE2ETestBase):
-    """回归：本地文件丢失但 state 游标未回退时，/sync 要能从云端版本0重建镜像。
+    """本地文件丢失但 state 游标未回退时，/sync 从云端版本 0 重建镜像。
 
-    修复前 full_sync 走增量 pull（version=当前游标），游标已到当前值时拉不到内容，
-    云端有数据却同步不下来；现在 full_sync 走 reconcile（version=0）完整对账。
+    full_sync 走 reconcile（version=0）完整对账，即使游标已到当前值也能拉回内容。
     """
 
     def test_full_sync_recovers_missing_local_day_file(self):
@@ -635,24 +634,6 @@ class ReportPathTraversalGuardTest(unittest.TestCase):
         self.assertIn("内容", ok.read_text(encoding="utf-8"))
 
 
-class VerifyWarningSuppressionTest(unittest.TestCase):
-    """verify 留空（跳过校验）时抑制 urllib3 的 InsecureRequestWarning，避免污染交互终端。"""
-
-    def test_empty_verify_disables_insecure_warning_and_returns_false(self):
-        with patch.object(client_config, "load", return_value={"client": {"verify": ""}}):
-            with patch("urllib3.disable_warnings") as disable:
-                client = SyncClient(server_url="https://localhost:8765")
-                self.assertFalse(client._verify())
-        disable.assert_called_once()
-
-    def test_verify_path_returns_it_without_disabling_warning(self):
-        with patch.object(client_config, "load", return_value={"client": {"verify": "/path/ca.crt"}}):
-            with patch("urllib3.disable_warnings") as disable:
-                client = SyncClient(server_url="https://localhost:8765")
-                self.assertEqual("/path/ca.crt", client._verify())
-        disable.assert_not_called()
-
-
 class TombstonePlaceholderSyncTest(unittest.TestCase):
     """tombstone 占位符必须完整同步：即使客户端从未持有被删条目，也要写入占位符。"""
 
@@ -742,7 +723,7 @@ class SubSecondOrderingTest(unittest.TestCase):
 
 
 class IncrementalApplyDeltaOrderTest(unittest.TestCase):
-    """回归：增量对账（apply_delta）也要保持当天文件按 (ts, entry_id) 时间有序。
+    """增量对账（apply_delta）保持当天文件按 (ts, entry_id) 时间有序。
 
     多端离线记录、服务端按推送顺序（v）入库时，条目/墓碑到达顺序与时间序可能不一致；
     若 apply_delta 只是把新块追加到文件末尾，本地镜像就会乱序（复现：真实设备 t2 的
@@ -820,7 +801,7 @@ class IncrementalApplyDeltaOrderTest(unittest.TestCase):
         self.assertEqual(1, content.count("myrecord-time:436841 -->"))
 
     def test_apply_delta_orders_bare_imported_entries_by_derived_time(self):
-        """回归：导入的裸记录（非时间戳 id，ts 由 HH:MM 推导、分钟对齐）也按时间次序排列。
+        """导入的裸记录（非时间戳 id，ts 由 HH:MM 推导、分钟对齐）也按时间次序排列。
 
         裸记录之间 ts 常重复，(ts, entry_id) 排序里 entry_id 才是真实次序键；客户端对
         已有裸记录块重排时须还原其真实 ts（而非一刀切排到最前），否则与服务端渲染不一致。

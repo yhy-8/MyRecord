@@ -29,7 +29,7 @@ class ClientCLIHelpTests(unittest.TestCase):
         text = cli_app._help_text()
         for command in ("/v", "/c", "/h", "/d", "/status", "/retry", "/model"):
             self.assertIn(command, text)
-        # 不再区分模式（旧 /mode 已移除），且已去掉手动 /sync
+        # 命令集中不含“模式”与手动 /sync
         self.assertNotIn(" 模式", text)
         self.assertNotIn("/sync", text)
 
@@ -78,10 +78,10 @@ class ClientCLIUnconfiguredOfflineTests(unittest.TestCase):
         self.assertEqual(1, len(outbox["entries"]))
 
     def test_plain_input_records_locally_without_records_dir(self):
-        """回归：全新客户端（Records/ 尚不存在）也能立即本地记录并进离线队列。
+        """全新客户端（Records/ 尚不存在）也能立即本地记录并进离线队列。
 
-        修复前 file_lock 在锁文件父目录缺失时抛 FileNotFoundError，
-        客户端首次记录即崩溃；这里不预创建 Records/，验证本地记录永不依赖目录存在。
+        不预创建 Records/：验证本地记录不依赖目录存在（file_lock 在锁文件父目录缺失时
+        同样可用）。
         """
         root = Path(tempfile.mkdtemp(prefix="cli-fresh-"))
         records = root / "Records"  # 故意不预创建：模拟全新安装首次记录

@@ -11,8 +11,7 @@ else:
 
 
 def main() -> int:
-    run_interactive()
-    return 0
+    return run_interactive()
 
 
 if __name__ == "__main__":

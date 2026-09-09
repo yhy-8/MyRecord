@@ -73,35 +73,35 @@ class SyncClientEdgeBase(unittest.TestCase):
 
 
 class RequestErrorTests(SyncClientEdgeBase):
-    @patch("client.sync.requests.request", side_effect=sync.requests.ConnectionError("refused"))
+    @patch("client.sync.requests.Session.request", side_effect=sync.requests.ConnectionError("refused"))
     def test_request_connection_error_raises_sync_error(self, _req):
         with self.assertRaises(SyncError) as ctx:
             self.client._request("GET", "/api/status")
         self.assertIn("无法连接服务端", str(ctx.exception))
 
-    @patch("client.sync.requests.request", return_value=_Resp(401))
+    @patch("client.sync.requests.Session.request", return_value=_Resp(401))
     def test_request_401_raises_auth_failure(self, _req):
         with self.assertRaises(SyncError) as ctx:
             self.client._request("GET", "/api/status")
         self.assertIn("鉴权失败", str(ctx.exception))
 
-    @patch("client.sync.requests.request", return_value=_Resp(500))
+    @patch("client.sync.requests.Session.request", return_value=_Resp(500))
     def test_request_500_raises_server_error(self, _req):
         with self.assertRaises(SyncError) as ctx:
             self.client._request("GET", "/api/status")
         self.assertIn("500", str(ctx.exception))
 
-    @patch("client.sync.requests.request", side_effect=sync.requests.ConnectTimeout("t"))
+    @patch("client.sync.requests.Session.request", side_effect=sync.requests.ConnectTimeout("t"))
     def test_request_payload_network_error_raises(self, _req):
         with self.assertRaises(SyncError):
             self.client._request_payload("POST", "/api/sync/push", json_body={})
 
-    @patch("client.sync.requests.request", return_value=_Resp(401))
+    @patch("client.sync.requests.Session.request", return_value=_Resp(401))
     def test_request_payload_401_raises_auth_failure(self, _req):
         with self.assertRaises(SyncError):
             self.client._request_payload("POST", "/api/sync/push", json_body={})
 
-    @patch("client.sync.requests.request", return_value=_Resp(200, None))
+    @patch("client.sync.requests.Session.request", return_value=_Resp(200, None))
     def test_request_payload_non_json_returns_none(self, _req):
         status, payload = self.client._request_payload("GET", "/api/status")
         self.assertEqual(200, status)
@@ -109,13 +109,13 @@ class RequestErrorTests(SyncClientEdgeBase):
 
 
 class ProbeTests(SyncClientEdgeBase):
-    @patch("client.sync.requests.get", return_value=_Resp(503))
+    @patch("client.sync.requests.Session.get", return_value=_Resp(503))
     def test_probe_non_200_reports_error(self, _get):
         result = self.client.probe()
         self.assertFalse(result["connected"])
         self.assertIn("503", result["error"])
 
-    @patch("client.sync.requests.get", side_effect=sync.requests.ConnectionError("down"))
+    @patch("client.sync.requests.Session.get", side_effect=sync.requests.ConnectionError("down"))
     def test_probe_connection_error_sets_compact_message(self, _get):
         result = self.client.probe()
         self.assertFalse(result["connected"])
@@ -126,7 +126,7 @@ class SendPendingTests(SyncClientEdgeBase):
     def _outbox(self, entries):
         sync._save_outbox(entries)
 
-    @patch("client.sync.requests.request")
+    @patch("client.sync.requests.Session.request")
     def test_send_pending_422_drops_rejected_keeps_others(self, req):
         # 服务端拒绝批次：rejected 里的 id 作废移除，其余保留
         self._outbox([
@@ -143,7 +143,7 @@ class SendPendingTests(SyncClientEdgeBase):
         # 未调用 _apply_delta（422 不走正常对账）
         self.assertEqual(0, sync._read_state())
 
-    @patch("client.sync.requests.request")
+    @patch("client.sync.requests.Session.request")
     def test_send_pending_404_raises_server_error_and_keeps_outbox(self, req):
         self._outbox([{"entry_id": "a", "date": _TODAY, "text": "x"}])
         req.return_value = _Resp(404)
@@ -152,7 +152,7 @@ class SendPendingTests(SyncClientEdgeBase):
         # outbox 保留，等待下次重试
         self.assertEqual(1, len(sync._load_outbox()))
 
-    @patch("client.sync.requests.request")
+    @patch("client.sync.requests.Session.request")
     def test_send_pending_200_removes_accepted(self, req):
         self._outbox([{"entry_id": "a", "date": _TODAY, "text": "x"}])
         req.return_value = _Resp(200, {
@@ -167,7 +167,7 @@ class DeleteLatestTests(SyncClientEdgeBase):
     def test_delete_latest_skips_non_today(self):
         self.assertIsNone(self.client.delete_latest(_YESTERDAY))
 
-    @patch("client.sync.requests.request", return_value=_Resp(200, {"deleted": "x"}))
+    @patch("client.sync.requests.Session.request", return_value=_Resp(200, {"deleted": "x"}))
     def test_delete_latest_forwards_version(self, req):
         self.client.delete_latest(_TODAY)
         body = req.call_args.kwargs.get("json")
@@ -176,7 +176,7 @@ class DeleteLatestTests(SyncClientEdgeBase):
 
 
 class HistorySyncErrorTests(SyncClientEdgeBase):
-    @patch("client.sync.requests.request", side_effect=sync.requests.ConnectionError("down"))
+    @patch("client.sync.requests.Session.request", side_effect=sync.requests.ConnectionError("down"))
     def test_sync_history_files_survives_network_error(self, req):
         # 服务端不可达：保留本地历史文件，不抛异常、不误删
         path = self._write_local(_YESTERDAY, "# old\n内容")
@@ -184,7 +184,7 @@ class HistorySyncErrorTests(SyncClientEdgeBase):
         # 服务端不可达：保留本地历史文件，不误删、不抛异常
         self.assertTrue(path.exists())
 
-    @patch("client.sync.requests.request")
+    @patch("client.sync.requests.Session.request")
     def test_sync_history_files_removes_local_extra_when_online(self, req):
         # 云端清单不含历史日 → 本地多余历史文件被删除（云端为准）
         path = self._write_local(_YESTERDAY, "# old 本地多余\n内容")
@@ -194,7 +194,7 @@ class HistorySyncErrorTests(SyncClientEdgeBase):
 
 
 class ReportSyncCleanupTests(SyncClientEdgeBase):
-    @patch("client.sync.requests.request")
+    @patch("client.sync.requests.Session.request")
     def test_sync_reports_removes_stale_local_report(self, req):
         base = self.config["client"]["analysis_dir"]
         stale = base / "Monthly" / "2026-07.md"

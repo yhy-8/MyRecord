@@ -116,11 +116,17 @@ class ClientFrozenPathTests(unittest.TestCase):
 
 
 class ClientMainTests(unittest.TestCase):
-    def test_main_runs_interactive_and_returns_zero(self):
-        with patch.object(client_main, "run_interactive") as run:
+    def test_main_returns_run_interactive_exit_code(self):
+        """用户拒绝信任时 run_interactive 返回非 0，main 原样透传（便于启动器保留窗口）。"""
+        with patch.object(client_main, "run_interactive", return_value=2) as run:
             rc = client_main.main()
 
-        self.assertEqual(0, rc)
+        self.assertEqual(2, rc)
+        run.assert_called_once_with()
+
+    def test_main_returns_zero_on_normal_exit(self):
+        with patch.object(client_main, "run_interactive", return_value=0) as run:
+            self.assertEqual(0, client_main.main())
         run.assert_called_once_with()
 
 

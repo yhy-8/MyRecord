@@ -1,6 +1,6 @@
 """client/terminal.py 的跨平台输入（safe_input）在 POSIX 伪终端下的行为测试。
 
-重点是验证 Linux 上中文退格删半字的修复：逐字符读取、按整字符退格。Windows 分支
+重点是验证 Linux 上中文退格按整字符删除：逐字符读取、按整字符退格。Windows 分支
 （_safe_input_windows 走控制台事件）无法在无真实控制台的头测环境验证，且 CI 只跑
 Windows，故此套用 `skipUnless` 仅在 POSIX 上运行。
 """

@@ -17,4 +17,7 @@ client:
   server_url: "https://localhost:8765"         # 服务端中枢地址（必改：改成你的服务端）
   records_dir: "../Records"                     # 本地日记（渲染）
   analysis_dir: "../AnalysisReports"            # 本地报告完整副本（云端同步）
-  verify: ""                                   # TLS 校验收信：留空=不校验（自签直连默认，仍加密但不验服务器身份，抑制 InsecureRequestWarning）；要严格验真只需把服务端 server.crt 拷到客户端，改为 verify: "./server.crt"
+  verify: ""                                   # TLS 校验收信：留空=首次连接时交互确认服务端证书（TOFU，推荐）。
+                                               # 确认后客户端自动把证书落盘到 client/server.crt 并把这里改为 "./server.crt"；
+                                               # 之后每次连接固定该证书、防中间人（只认证书，不校验 IP/主机名）。
+                                               # 若想跳过 TOFU 直接固定，可手动把服务端 server.crt 拷来并写路径。

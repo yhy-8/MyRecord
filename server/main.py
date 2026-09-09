@@ -334,6 +334,47 @@ def _generate_cert(
     return certfile, keyfile
 
 
+def _detect_public_ip() -> str:
+    """尽力探测本机公网 IP，用作证书 SAN 的默认值（失败即返回空串，不阻断部署）。
+
+    公网 IP 常因 NAT/动态分配无法从本机接口直接得到，只能借外部回显服务观察出口地址；
+    故仅作提示，最终以用户在 deploy 交互中的输入为准。
+    """
+    import urllib.request
+
+    for url in ("https://api.ipify.org", "https://ifconfig.me/ip"):
+        try:
+            with urllib.request.urlopen(url, timeout=3) as resp:
+                ip = resp.read(64).decode("utf-8", "ignore").strip()
+            if ip:
+                return ip
+        except Exception:
+            continue
+    return ""
+
+
+def _prompt_cert_ips() -> list[str]:
+    """交互获取客户端连接服务端所用的公网 IP，写入证书 SAN。
+
+    客户端以 IP 直连且 `verify` 指向 server.crt 时，证书 SAN 必须包含该 IP，否则严格
+    校验会因主机名不匹配失败（如连 47.102.194.65 而证书只声明 DNS:主机名）。可输入多个
+    （逗号/空格分隔，如公网 IP + 127.0.0.1）；留空则不加 IP SAN。
+    """
+    detected = _detect_public_ip()
+    hint = (
+        f"（回车采用探测到的 {detected}）"
+        if detected
+        else "（留空跳过，客户端将无法用 IP 严格校验收信）"
+    )
+    try:
+        raw = input(f"请输入客户端连接服务端用的公网 IP{hint}: ").strip()
+    except EOFError:
+        raw = ""
+    if not raw:
+        return [detected] if detected else []
+    return [part for part in raw.replace(",", " ").split() if part]
+
+
 def _command_cert(args: argparse.Namespace) -> int:
     """生成自签证书（CA 能力）用于服务端直连 TLS。产物固定为 <data_dir>/tls/server.*。"""
     data_dir = Path(config.load()["server"]["data_dir"])
@@ -485,12 +526,15 @@ def _command_deploy(args: argparse.Namespace) -> int:
         print("    请复制 config.example.yaml 为 config.yaml，并填入模型 api_key。")
     cfg = config.load()
     data_dir = Path(cfg["server"]["data_dir"])
-    # 3) 自签证书（缺失才生成）。
+    # 3) 自签证书（缺失才生成）。证书 SAN 必须含客户端连接所用的公网 IP，否则客户端
+    #    verify 指向 server.crt 严格校验时会因主机名不匹配失败（见 _prompt_cert_ips）。
     certfile = Path(cfg["server"]["tls"]["certfile"])
     cert_created = False
+    cert_ips: list[str] = []
     if not certfile.is_file():
+        cert_ips = _prompt_cert_ips()
         try:
-            _generate_cert(data_dir)
+            _generate_cert(data_dir, ips=cert_ips)
             cert_created = True
         except RuntimeError as error:
             print(f"[!] 生成自签证书失败：{error}", file=sys.stderr)
@@ -527,6 +571,11 @@ def _command_deploy(args: argparse.Namespace) -> int:
     print(f"· 虚拟环境 ：{'已新建' if venv_created else '沿用已有'} {venv_dir}")
     print(f"  （服务端用 {venv_py} 运行，已切到虚拟环境）")
     print(f"· 自签证书 ：{'已生成' if cert_created else '已存在'} {certfile}")
+    if cert_created and cert_ips:
+        print(f"  证书 SAN ：已写入公网 IP {', '.join(cert_ips)}（客户端 verify 指向 server.crt 即可严格校验）")
+    elif not cert_created:
+        print("  证书 SAN ：如需客户端严格校验收信，请确认其含连接用的公网 IP；")
+        print("            否则运行 `python -m server.main cert --ip 公网IP` 重签后 restart。")
     if token:
         print("· 链接凭证 ：已新签发（token 见上方输出；服务端只存哈希，请勿丢失）")
     else:

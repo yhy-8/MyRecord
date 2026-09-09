@@ -216,7 +216,7 @@ class ServerMainDeployTests(unittest.TestCase):
             self.assertNotIn("enable", c)
 
     def test_deploy_redeploy_stops_existing_then_overwrites_and_starts(self):
-        """迭代升级/重装：同名服务单元已存在时，先 stop 旧服务，再覆盖新单元并重新 start。
+        """重新部署（同名服务）：同名服务单元已存在时，先 stop 旧服务，再覆盖新单元并重新 start。
         仍是 start、不 enable 开机自启；覆盖后写入新单元内容。"""
         server_unit = self.root / "systemd" / "myrecord-server.service"
         server_unit.parent.mkdir(parents=True, exist_ok=True)
@@ -286,6 +286,55 @@ class ServerMainDeployTests(unittest.TestCase):
         )
         # 说明首次一键部署无需预先 pip install 到默认环境。
         self.assertIn("不污染默认 Python", out.getvalue())
+
+    def test_deploy_prompts_public_ip_and_writes_it_into_cert_san(self):
+        """缺失证书时，deploy 交互获取公网 IP 并作为 SAN 生成证书（客户端严格校验必需）。"""
+        (self.data_dir / "tls" / "server.crt").unlink()
+        (self.data_dir / "tls" / "server.key").unlink()
+        fake_venv = Path("/srv/myrecord/server/.venv")
+        with patch("server.main.os.geteuid", return_value=0, create=True), patch(
+            "server.main._SYSTEMD_UNIT_PATH", self.root / "systemd" / "myrecord-server.service"
+        ), patch("server.main._venv_dir", return_value=fake_venv), patch(
+            "server.main._running_in_venv", return_value=True
+        ), patch("server.main._generate_cert") as gen, patch(
+            "server.main._detect_public_ip", return_value="47.102.194.65"
+        ), patch("builtins.input", return_value=""), patch(
+            "sys.stdout", io.StringIO()
+        ), patch("server.main.subprocess.run"):
+            rc = server_main.main(["deploy"])
+        self.assertEqual(0, rc)
+        gen.assert_called_once()
+        self.assertEqual(["47.102.194.65"], gen.call_args.kwargs.get("ips"))
+
+
+class CertIpPromptTests(unittest.TestCase):
+    """deploy 生成证书时的公网 IP 交互：探测作默认值、可多值、EOF 安全。"""
+
+    def test_enter_uses_detected_ip(self):
+        with patch("server.main._detect_public_ip", return_value="1.2.3.4"), patch(
+            "builtins.input", return_value=""
+        ):
+            self.assertEqual(["1.2.3.4"], server_main._prompt_cert_ips())
+
+    def test_parses_multiple_and_trims(self):
+        with patch("server.main._detect_public_ip", return_value=""), patch(
+            "builtins.input", return_value=" 1.2.3.4, 5.6.7.8  127.0.0.1 "
+        ):
+            self.assertEqual(
+                ["1.2.3.4", "5.6.7.8", "127.0.0.1"], server_main._prompt_cert_ips()
+            )
+
+    def test_empty_input_without_detection_skips_ip(self):
+        with patch("server.main._detect_public_ip", return_value=""), patch(
+            "builtins.input", return_value=""
+        ):
+            self.assertEqual([], server_main._prompt_cert_ips())
+
+    def test_eof_is_safe(self):
+        with patch("server.main._detect_public_ip", return_value=""), patch(
+            "builtins.input", side_effect=EOFError
+        ):
+            self.assertEqual([], server_main._prompt_cert_ips())
 
 
 class ServerMainApiStatusTests(unittest.TestCase):
@@ -434,12 +483,11 @@ class ServerMainReportTests(unittest.TestCase):
 
 
 class AnalysisExportsSmokeTest(unittest.TestCase):
-    """回归：main._command_run 经 server.ai.analysis 命名空间访问的符号必须存在。
+    """main._command_run 经 server.ai.analysis 命名空间访问的符号必须存在。
 
-    曾发生 P0：main.py 访问 ai_analysis._purge_empty_placeholder_days()，但该函数
-    未从 automation 子模块导出，导致 `python -m server.main run` 启动即 AttributeError，
-    deploy 的 systemd 单元同样无法启动。这里断言 main.py 使用的符号（含 `_purge_empty_placeholder_days`）
-    都已导出，防止导出缺口再犯。
+    main.py 通过 ai_analysis._purge_empty_placeholder_days() 等符号调用分析逻辑；
+    这里断言这些符号都已从 automation 子模块导出，保证 `python -m server.main run`
+    与 systemd 单元能正常启动。
     """
 
     def test_analysis_exports_symbols_used_by_main(self):

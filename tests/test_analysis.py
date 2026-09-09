@@ -11,7 +11,7 @@ from server.ai.analysis import context, orchestrator
 
 
 class LegacyReadTests(unittest.TestCase):
-    """旧数据向后兼容：AI 读取正文时不得把旧 agentrecord-* 标记混入文本。"""
+    """AI 读取旧格式日记正文时不得把 agentrecord-* 标记混入文本。"""
 
     def test_period_records_ignore_old_markers(self):
         old = (

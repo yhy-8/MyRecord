@@ -465,7 +465,7 @@ class StoreSealPreviousDayTest(unittest.TestCase):
     def test_seal_without_records_dir_keeps_entries_never_purges(self):
         """无 Records 落盘目录（配置错误兜底）：封存不清理历史条目态，避免数据丢失。
 
-        回归：Store 以 records_dir=None 构造时，若 _maybe_seal_previous_day 照常清理，
+        Store 以 records_dir=None 构造时，若 _maybe_seal_previous_day 照常清理，
         会把 date < 今天 的条目清出 state.json，又因 _render_dates 无目录直接返回、
         从不落盘 —— 数据无处承载。这里应跳过封存并保留数据。
         """

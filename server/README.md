@@ -115,6 +115,12 @@ Python，因此**无需预先 `pip install`**，只需服务器 Python ≥ 3.10 
 sudo python -m server.main deploy
 ```
 
+> **证书 SAN 交互**：生成自签证书时 `deploy` 会询问客户端连接服务端用的公网 IP（先尝试自动探测
+> 作默认值，回车采用；可输入多个，逗号/空格分隔；留空跳过），并写入证书 SAN——客户端 `verify`
+> 指向 `server.crt` 时才能用 IP 严格校验收信。证书已存在则跳过；补写 IP 用
+> `python -m server.main cert --ip 公网IP`（**会覆盖旧证书**，需 `systemctl restart myrecord-server`
+> 并重新分发 `server.crt` 到各客户端）。
+
 `deploy` 写入服务端单元（仅 `myrecord-server.service`），并立即 `systemctl start` 启动主服务
 （不 `enable` 开机自启，部署出错后重启不会自动拉起损坏服务，便于人工介入排查）。**每周自动备份已由服务端
 内置调度触发**，不再安装独立的备份单元/定时器（`backup.sh` 仍是独立脚本，可手动/cron 调用）。
@@ -151,7 +157,8 @@ sudo python -m server.main deploy
 - 链接凭证是**单一共享 token**（服务端只存 scrypt 哈希），凭证不绑定设备；设备由各端自报本机名区分。
   **连接与修改日志都必须携带该凭证**（无凭证客户端只能本地记录，无法同步/删除/查看云端数据）。
 - **加密传输是强制的**：`run` 未配置 TLS 会拒绝启动（禁止明文）。`python -m server.main cert` 用
-  **服务端自签证书（自签公钥）**，客户端 `verify` 校验收信（自签直连，无需反向代理）。
+  **服务端自签证书（自签公钥）**，客户端 `verify` 校验收信（自签直连，无需反向代理）。用 IP 直连时
+  证书 SAN 必须含该 IP（`deploy` 生成时交互询问并写入），否则严格校验会因主机名不匹配失败。
 - **服务端记录详细日志**到 `data/Log/MyRecord.log`：客户端连接/鉴权、对日志的推送与在线删除、AI 报告
   生成成败与每步 Agent 调用、自动任务重试；不记录日记正文、模型密钥、token 明文。
 - 模型密钥只在服务端；不入数据空间、不入日志。

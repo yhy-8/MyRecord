@@ -357,9 +357,14 @@ def _report_startup_status(client: SyncClient, status: dict) -> None:
     console.print(f"[dim]今天：{today_utc8()}（UTC+8，仅今天可写）[/dim]")
 
 
-def run_interactive() -> None:
+def run_interactive() -> int:
     # 不要求凭据：无凭据时仅本地记录，上线拿到凭据后再同步（本地优先）
     client = SyncClient()
+
+    # 先建立/确认服务端证书信任（TOFU）：用户拒绝则退出，不进入记录界面。
+    if not client.ensure_trust():
+        Console().print("[red][!][/red] 未建立服务器信任，已退出。")
+        return 2
 
     # 启动先真实探测，再按两维度分别播报：能否连到服务端、是否持有凭据。
     status = client.probe()
@@ -400,3 +405,5 @@ def run_interactive() -> None:
             _handle_command(client, text)
             continue
         _write_record(client, text)
+
+    return 0

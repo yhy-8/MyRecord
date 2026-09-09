@@ -48,9 +48,23 @@ cp client/config.example.yaml client/config.yaml
 `config.yaml`：服务器地址、本地数据目录（Records / AnalysisReports）。相对路径以 `client/`
 为基准；默认 `../Records`、`../AnalysisReports` 指向 `client` 的**同级目录（项目根）**，
 把记录/报告与代码包 `client/` 分开存放。本地数据目录不入服务端中枢。
-`server_url` 默认 `https://localhost:8765`（服务端强制 TLS）；`verify` 留空时不校验证书，
-设为服务端 `server.crt` 路径时严格校验收信。每台客户端启动不会打印 urllib3 的
-`InsecureRequestWarning`，避免污染交互终端。
+`server_url` 默认 `https://localhost:8765`（服务端强制 TLS）。
+
+### 首次连接与证书信任（TOFU）
+
+`verify` 留空时，客户端启动会**首次使用即信任（TOFU）**：
+
+1. 抓取服务端当前出示的证书，打印主题/颁发者/有效期/SAN/SHA-256 指纹，请用户核对；
+2. 用户确认后，把证书落盘到 `client/server.crt`，并自动把 `config.yaml` 的 `verify` 设为 `"./server.crt"`；
+3. 之后每次连接都用该证书做**证书固定（pinning）**：只认这张证书（链）、不校验 IP/主机名——
+   因此按 IP 直连自签服务端也能严格校验、防止中间人；证书一致时静默通过。
+
+若服务端证书之后变化（重签/被替换），客户端会同时展示本地已固定与服务端当前两张证书，
+由用户决定是否覆盖；首次拒绝信任或拒绝覆盖都会**直接退出进程**（离线记录意义不大）。
+网络暂时不可达时：已固定过证书则沿用、后台自动重连；从未固定过则无法建立信任并退出。
+
+> 也可手动固定：把服务端 `data/tls/server.crt` 拷到 `client/server.crt`，并写 `verify: "./server.crt"`。
+> 每台客户端启动不会打印 urllib3 的 `InsecureRequestWarning`。
 
 > 打包成 exe 运行时（见 `.github/workflows/build.yml`），把 `config.example.yaml` 模板拷到
 > exe 同级目录作为 `config.yaml`（包内只保留 `config.example.yaml` 模板）；凭据 credentials.json
@@ -97,13 +111,15 @@ cp client/config.example.yaml client/config.yaml
 | `journal.py` | 本地日记渲染与写入：**只写“今天”（UTC+8）** `Records/YYYY-MM-DD.md` 原子追加；对账**只对今天**做 `(ts, entry_id)` 时间有序合并；昨天及以前**整文件重放**（云端为准、覆盖本地）；过期未同步、`date < 今天` 的条目直接作废；tombstone 移除 |
 | `file_lock.py` | 跨进程互斥（`.journal.lock` 等），保证原子写 |
 | `sync.py` | 与中枢的同步客户端：`push_new`（写后即 push，**仅今天**）、`send_pending`（冲刷离线队列，过期即丢弃）、`pull`（拉取今天对账）、`longpoll`（长连接扇出）、`full_sync`（启动/手动完整同步 + 历史日整文件校验）、`sync_reports`（同步报告）、`delete_latest`（仅今天）、`status/admin_retry/admin_set_model` |
-| `cli.py` | 交互主循环：7 个命令路由、`/v` 查看本地日记、清屏与日期解析、启动时 `full_sync` + 历史日整文件校验、维持长连接后台线程 |
+| `trust.py` | 首次连接信任（TOFU）：抓取服务端证书并交互确认后固定到 `server.crt`、自动设 `verify`；证书变化时展示新旧供用户决定覆盖；`PinnedHTTPAdapter` 只认固定证书、不校验 IP/主机名 |
+| `cli.py` | 交互主循环：7 个命令路由、`/v` 查看本地日记、清屏与日期解析、启动时 TOFU 确认 + `full_sync` + 历史日整文件校验、维持长连接后台线程 |
 | `terminal.py` | 跨平台终端输入：逐字符读取、Unicode 感知整字符退格（Windows 控制台事件 / POSIX raw），并处理后台线程通知展示 |
 
 ## 本地文件
 
 - `credentials.example.json` 凭据**样板**：复制为 `credentials.json` 并填入服务端签发的 token
 - `credentials.json` 链接凭证（服务端签发的唯一共享 token）
+- `server.crt` TOFU 固定的服务端证书（首次确认后落盘，`verify` 指向它）
 - `state.json` 本地同步游标（单条：当前已同步到的云端版本号）
 - `outbox.json` 离线待推送队列
 - `../Records/` 本地日记、`../AnalysisReports/` 云端报告副本
@@ -114,8 +130,9 @@ cp client/config.example.yaml client/config.yaml
 - 原始日记是唯一事实源；写后永不因同步失败回滚。
 - 删改是垃圾桶语义（tombstone），不做硬删除。
 - 凭证是单一共享 token（不入中枢、不入数据空间）；设备由各端自报本机名区分，每条记录带设备名。
-- **加密传输是强制的**：服务端必须在 TLS 下运行；客户端 `server_url` 为 `https` 且 `verify` 指向服务端
-  自签证书校验收信（自签直连，无需反向代理）。
+- **加密传输是强制的**：服务端必须在 TLS 下运行；客户端 `server_url` 为 `https`，首次连接 TOFU 确认后把
+  服务端证书固定到 `client/server.crt`（`verify` 指向它），之后每次连接用该证书固定校验（只认证书、
+  不校验 IP/主机名），防止中间人。
 - **连接与修改需凭证**：所有同步/修改（推送、在线删除、拉取、状态、报告、AI 管理）都要携带服务端签发
   的凭证 token；无凭证或凭证错误时只能本地记录，无法把修改传上服务端或拉取/删除云端数据。
 - **无凭证/离线时照常本地记录**，上线后按 entry_id（=写入毫秒时间戳）自动合并去重。

@@ -14,7 +14,7 @@ import urllib3
 
 from .atomic_write import atomic_write
 
-from . import config, identity, journal
+from . import config, identity, journal, trust
 from .file_lock import file_lock
 
 
@@ -70,26 +70,34 @@ def _load_outbox() -> list[dict]:
 class SyncClient:
     def __init__(self, server_url: str | None = None):
         self.base_url = (server_url or config.load()["client"]["server_url"]).rstrip("/")
+        self._session: requests.Session | None = None
+        self._session_key = None
 
     # ---------- 底层请求 ----------
 
-    def _verify(self):
-        """TLS 服务器证书校验：返回路径或 False。
+    def _client(self) -> requests.Session:
+        """返回按当前固定证书构造的 Session（固定证书变化时重建）。
 
-        - 空/未配置 → False（跳过校验，适用于自签证书的直连信任）；此时同时
-          抑制 urllib3 的 InsecureRequestWarning，否则每次 HTTPS 请求都会把
-          该警告打进 stderr，污染交互终端并在长连接循环里反复刷屏。
-        - 某路径 → 交给 requests 校验该 CA/自签证书
-
-        注意：verify 为空即关闭证书校验（默认），存在中间人风险。这里不额外打印
-        UserWarning（避免污染交互终端），仅静默抑制 urllib3 警告；
-        是否严格校验由用户在 config.yaml 里自行权衡。
+        已固定证书时挂 PinnedHTTPAdapter：只认这张证书（链）、不校验 IP/主机名，
+        因此自签证书 SAN 不含连接 IP 时也能正常严格校验（TOFU 首次确认后即固定）。
+        尚未固定证书时不校验（仅发生在 TOFU 确认前的探测；正常启动会先 ensure_trust）。
         """
-        verify = config.load()["client"].get("verify")
-        if not verify:
+        cafile = trust.pinned_cert()
+        key = str(cafile) if cafile else ""
+        if self._session is not None and self._session_key == key:
+            return self._session
+        session = requests.Session()
+        if cafile:
+            session.mount("https://", trust.PinnedHTTPAdapter(str(cafile)))
+        else:
             urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-            return False
-        return verify
+            session.verify = False
+        self._session, self._session_key = session, key
+        return session
+
+    def ensure_trust(self) -> bool:
+        """建立/确认服务端证书信任（TOFU）；返回 False 表示用户拒绝，调用方应退出。"""
+        return trust.ensure_trusted(self.base_url)
 
     def _headers(self):
         cred = identity.load()
@@ -102,13 +110,12 @@ class SyncClient:
 
     def _request(self, method: str, path: str, *, json_body=None, timeout: float = 30.0):
         try:
-            resp = requests.request(
+            resp = self._client().request(
                 method,
                 self.base_url + path,
                 headers=self._headers(),
                 json=json_body,
                 timeout=timeout,
-                verify=self._verify(),
             )
         except requests.RequestException as error:
             raise SyncError(f"无法连接服务端: {error}") from error
@@ -121,13 +128,12 @@ class SyncClient:
     def _request_payload(self, method: str, path: str, *, json_body=None, timeout: float = 30.0):
         """返回 (status_code, json_payload)；401 抛鉴权错误，其余 HTTP 状态不抛（供 422 探测）。"""
         try:
-            resp = requests.request(
+            resp = self._client().request(
                 method,
                 self.base_url + path,
                 headers=self._headers(),
                 json=json_body,
                 timeout=timeout,
-                verify=self._verify(),
             )
         except requests.RequestException as error:
             raise SyncError(f"无法连接服务端: {error}") from error
@@ -153,10 +159,9 @@ class SyncClient:
         connected = False
         error = ""
         try:
-            resp = requests.get(
+            resp = self._client().get(
                 self.base_url + "/api/health",
                 timeout=5.0,
-                verify=self._verify(),
             )
             connected = resp.status_code == 200
             if not connected:
@@ -324,11 +329,10 @@ class SyncClient:
     def _fetch_record_file(self, date: str) -> str | None:
         """拉取 /api/records/<date> 整文件原文；不存在（404）或异常返回 None。"""
         try:
-            resp = requests.get(
+            resp = self._client().get(
                 self.base_url + "/api/records/" + date,
                 headers=self._headers(),
                 timeout=30.0,
-                verify=self._verify(),
             )
         except requests.RequestException:
             return None
@@ -410,11 +414,10 @@ class SyncClient:
     def _report_content(self, rel: str) -> str | None:
         """拉取单个报告正文（服务端返回 Markdown 文本）。"""
         try:
-            resp = requests.get(
+            resp = self._client().get(
                 self.base_url + "/api/reports/" + rel,
                 headers=self._headers(),
                 timeout=30.0,
-                verify=self._verify(),
             )
         except requests.RequestException:
             return None
