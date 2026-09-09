@@ -192,6 +192,22 @@ class HistorySyncErrorTests(SyncClientEdgeBase):
         self.client.sync_history_files()
         self.assertFalse(path.exists())
 
+    @patch("client.sync.requests.Session.request")
+    def test_sync_history_files_keeps_local_when_cloud_sha_empty(self, req):
+        # 云端列出该日期但 sha256 为空（服务端文件不可读）→ 不得删本地副本
+        content = "# old\n内容"
+        path = self._write_local(_YESTERDAY, content)
+
+        def respond(method, url, **kwargs):
+            if url.endswith("/api/records"):
+                return _Resp(200, {"files": [{"date": _YESTERDAY, "sha256": ""}]})
+            return _Resp(500, {"error": "read failed"})
+
+        req.side_effect = respond
+        self.client.sync_history_files()
+        self.assertTrue(path.exists(), "清单列出但哈希未知时不得删除本地副本")
+        self.assertEqual(content, path.read_text(encoding="utf-8"))
+
 
 class ReportSyncCleanupTests(SyncClientEdgeBase):
     @patch("client.sync.requests.Session.request")

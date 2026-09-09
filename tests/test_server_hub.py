@@ -789,16 +789,17 @@ class RecordsEndpointTest(unittest.TestCase):
         resp = requests.get(f"{self.base}/api/records/2000-01-01", headers=self.headers)
         self.assertEqual(resp.status_code, 404)
 
-    def test_records_list_skips_non_utf8_file(self):
-        """单个不可解码的 .md 不应让整个清单接口 500：跳过并继续列出其余文件。"""
+    def test_records_list_keeps_unreadable_file_date(self):
+        """不可解码的 .md 仍应列出该日期（sha256 为空），否则客户端会误删本地副本。"""
         records_dir = self._dir / "Records"
         (records_dir / "2000-01-01.md").write_text("# ok\n", encoding="utf-8")
         (records_dir / "2000-01-02.md").write_bytes(b"\xff\xfe\x00bad")
         listed = requests.get(f"{self.base}/api/records", headers=self.headers)
         self.assertEqual(listed.status_code, 200)
-        dates = {f["date"] for f in listed.json()["files"]}
-        self.assertIn("2000-01-01", dates)
-        self.assertNotIn("2000-01-02", dates)
+        files = {f["date"]: f["sha256"] for f in listed.json()["files"]}
+        self.assertIn("2000-01-01", files)
+        self.assertIn("2000-01-02", files)
+        self.assertEqual("", files["2000-01-02"])
 
 
 if __name__ == "__main__":

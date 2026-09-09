@@ -342,14 +342,16 @@ class SyncHandler(BaseHTTPRequestHandler):
                 # 对规范化后的文本取哈希（read_text 统一 \r\n -> \n），与
                 # _records_file 下发的字节表示（content.encode("utf-8")）一致，
                 # 避免 Linux 服务端 + Windows 客户端因换行差异Hash永不收敛。
-                # 单个文件不可读/非 UTF-8 时跳过并记日志，不让整个清单接口失败。
+                # 单个文件不可读/非 UTF-8 时仍列出该日期、sha256 置空（未知），不让整个清单
+                # 接口失败，也保证清单仍是「权威全集」（§4）：否则客户端会把“清单缺失”
+                # 误当成“云端已删除”，删掉本地历史副本。
                 try:
                     digest = hashlib.sha256(
                         path.read_text(encoding="utf-8").encode("utf-8")
                     ).hexdigest()
                 except (OSError, UnicodeError):
-                    logger.warning("records_list_skip_unreadable date=%s", path.stem)
-                    continue
+                    logger.warning("records_list_unreadable date=%s", path.stem)
+                    digest = ""
                 files.append({"date": path.stem, "sha256": digest})
         logger.info("records_list device=%s count=%d", _device_id(self), len(files))
         self._send_json(200, {"files": files})

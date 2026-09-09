@@ -17,7 +17,7 @@ import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import ParseResult, urlparse
 
 from requests.adapters import HTTPAdapter
 from urllib3.util.ssl_ import create_urllib3_context
@@ -60,13 +60,28 @@ def cert_path() -> Path:
     return Path(__file__).resolve().parent / "server.crt"
 
 
-def _fetch_der(server_url: str, timeout: float) -> bytes:
-    parsed = urlparse(server_url)
+def _parse_server_url(server_url: str) -> ParseResult:
+    """解析并校验服务端地址：必须为 https 且含主机名（客户端强制加密，拒绝明文）。
+
+    ``urlparse`` 对畸形地址（如未闭合的 IPv6 ``https://[::1``）会抛 ``ValueError``，
+    这里统一转成可被调用方处理的 ``TrustError``，避免穿透成未捕获异常。
+    """
+    try:
+        parsed = urlparse(server_url)
+    except ValueError as error:
+        raise TrustError(f"无效的服务端地址：{server_url}") from error
     if parsed.scheme != "https":
-        raise TrustError(f"服务端地址必须为 https（当前 {server_url}）")
-    host = parsed.hostname
-    if not host:
+        raise TrustError(
+            f"服务端地址必须为 https（客户端强制加密，拒绝明文传输；当前 {server_url}）"
+        )
+    if not parsed.hostname:
         raise TrustError(f"无效的服务端地址：{server_url}")
+    return parsed
+
+
+def _fetch_der(server_url: str, timeout: float) -> bytes:
+    parsed = _parse_server_url(server_url)
+    host = parsed.hostname
     try:
         port = parsed.port or 443
     except ValueError as error:
@@ -202,7 +217,14 @@ def ensure_trusted(server_url: str, *, input_func=input) -> bool:
     - 本地有固定证书且与当前一致：直接通过。
     - 本地有固定证书但不一致：展示新旧两证书，用户确认后覆盖；拒绝则退出。
     网络不可达时：已有固定证书则沿用（后台自动重连）；没有则无法建立信任，返回 False。
+
+    地址非 https（或非法）一律返回 False：客户端强制加密，绝不因已有固定证书而降级明文。
     """
+    try:
+        _parse_server_url(server_url)
+    except TrustError as error:
+        print(f"[!] {error}")
+        return False
     pinned = pinned_cert()
     pinned_pem = ""
     if pinned is not None:

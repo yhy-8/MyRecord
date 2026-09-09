@@ -132,6 +132,22 @@ class TrustFlowTests(unittest.TestCase):
             trust.ensure_trusted("https://x:99999", input_func=self._answers("y"))
         )
 
+    def test_malformed_ipv6_url_returns_false(self):
+        # urlparse 对畸形 IPv6 抛 ValueError，也应被转成 TrustError 而非穿透。
+        self.assertFalse(
+            trust.ensure_trusted("https://[::1", input_func=self._answers("y"))
+        )
+
+    def test_http_url_rejected_even_with_pinned_cert(self):
+        # 客户端强制加密：已有固定证书也不允许明文 http 降级。
+        self.cert.write_text(self.pem_a, encoding="utf-8")
+        self._write_config('client:\n  verify: "./server.crt"\n')
+        with patch.object(trust, "fetch_peer_pem") as fetch:
+            self.assertFalse(
+                trust.ensure_trusted("http://x:8765", input_func=self._answers("y"))
+            )
+        fetch.assert_not_called()
+
     def test_describe_contains_subject_and_fingerprint(self):
         text = trust.describe(self.pem_a)
         self.assertIn("CN=server-a", text)
