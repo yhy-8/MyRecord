@@ -249,6 +249,20 @@ class ManualRetryGuardTests(AutomationEdgeBase):
         self.assertFalse(ok)
         self.assertIn("重试失败", message)
 
+    def test_retry_reports_only_targeted_tasks(self):
+        """未被本次重试的 pending 任务不应被误报为「仍未能完成」。"""
+        automation._save_automation_state({"tasks": {
+            "daily_summary": {"status": "pending"},
+            "weekly_report": {
+                "status": "failed", "error": "e", "attempts": 1, "next_retry_at": "",
+            },
+        }})
+        with patch.object(automation, "_process_due"):  # 不实际生成
+            ok, message = automation.retry_failed_automatic_tasks()
+        self.assertFalse(ok)
+        self.assertIn("自动周报", message)
+        self.assertNotIn("日总结", message)
+
 
 class StatusSnapshotRetryDueTests(AutomationEdgeBase):
     def test_failed_snapshot_marks_retry_due_when_past_next(self):

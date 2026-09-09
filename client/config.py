@@ -59,6 +59,7 @@ def load() -> dict:
 
 
 _VERIFY_LINE = re.compile(r"(?m)^(\s*verify:\s*)(.*?)(\s*#.*)?$")
+_CLIENT_SECTION = re.compile(r"(?m)^client:[ \t]*(?:#.*)?$")
 
 
 def set_verify(value: str) -> None:
@@ -75,7 +76,13 @@ def set_verify(value: str) -> None:
             lambda match: f"{match.group(1)}{quoted}{match.group(3) or ''}", text, count=1
         )
         if count == 0:
-            new_text = text.rstrip("\n") + f"\n  verify: {quoted}\n"
+            # 无 verify 行时插到 client: 段首，避免追加到文件末尾落到别的顶层段下。
+            section = _CLIENT_SECTION.search(text)
+            if section:
+                at = section.end()
+                new_text = text[:at] + f"\n  verify: {quoted}" + text[at:]
+            else:
+                new_text = text.rstrip("\n") + f"\nclient:\n  verify: {quoted}\n"
         atomic_write(path, new_text)
         return
     server_url = load()["client"]["server_url"]

@@ -67,7 +67,10 @@ def _fetch_der(server_url: str, timeout: float) -> bytes:
     host = parsed.hostname
     if not host:
         raise TrustError(f"无效的服务端地址：{server_url}")
-    port = parsed.port or 443
+    try:
+        port = parsed.port or 443
+    except ValueError as error:
+        raise TrustError(f"无效的服务端端口：{server_url}") from error
     context = ssl.create_default_context()
     context.check_hostname = False
     context.verify_mode = ssl.CERT_NONE

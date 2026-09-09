@@ -565,16 +565,15 @@ def retry_failed_automatic_tasks() -> tuple[bool, str]:
         _save_automation_state(state)
         remaining = [
             task
-            for task in _AUTOMATION_TASKS
-            if automation.get(task, True) is True
-            and _task_record(state, task).get("status") not in {"ok", "empty"}
-            and _same_period(_task_record(state, task), _default_task_target(task, now))
+            for task in failed
+            if _task_record(state, task).get("status") not in {"ok", "empty"}
         ]
         if not remaining:
             return True, "全部失败自动任务重试成功。"
         labels = "、".join(AUTOMATION_TASK_LABELS[task] for task in remaining)
-        # remaining 含 failed/blocked/unconfigured 与暂被推迟为 pending 的任务，
-        # 故用「仍未能完成」而非「仍失败」，避免把锁忙推迟错误标为失败。
+        # 只看本次重试的目标任务（failed）：它们可能仍失败/未配置，或因报告锁忙被推迟为
+        # pending；用「仍未能完成」而非「仍失败」，避免把锁忙推迟错误标为失败。
+        # 未被本次重试的 pending/running 任务不计入，避免误报。
         return False, f"以下自动任务仍未能完成：{labels}"
     except Exception as error:
         logger.error(

@@ -122,6 +122,16 @@ class TrustFlowTests(unittest.TestCase):
         with self.assertRaises(trust.TrustError):
             trust._fetch_der("http://x:1", 1.0)
 
+    def test_bad_port_raises_trust_error(self):
+        with self.assertRaises(trust.TrustError):
+            trust._fetch_der("https://x:99999", 1.0)
+
+    def test_malformed_url_returns_false_without_pinned_cert(self):
+        # 非法端口应转成 TrustError 并被 ensure_trusted 处理，而非未捕获 ValueError。
+        self.assertFalse(
+            trust.ensure_trusted("https://x:99999", input_func=self._answers("y"))
+        )
+
     def test_describe_contains_subject_and_fingerprint(self):
         text = trust.describe(self.pem_a)
         self.assertIn("CN=server-a", text)
@@ -133,6 +143,14 @@ class TrustFlowTests(unittest.TestCase):
         text = self.config_path.read_text(encoding="utf-8")
         self.assertIn('verify: "./server.crt"', text)
         self.assertIn("# keep me", text)
+
+    def test_set_verify_inserts_under_client_when_missing(self):
+        # 无 verify 行且存在其他顶层段时，应插到 client: 段首，而非追加到文件末尾。
+        self._write_config('client:\n  server_url: "https://x"\nother:\n  foo: bar\n')
+        client_config.set_verify("./server.crt")
+        text = self.config_path.read_text(encoding="utf-8")
+        self.assertIn('client:\n  verify: "./server.crt"\n', text)
+        self.assertNotIn("foo: bar\n  verify:", text)
 
     def test_sync_client_mounts_pinned_adapter_when_verify_set(self):
         self.cert.write_text(self.pem_a, encoding="utf-8")

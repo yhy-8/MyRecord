@@ -336,6 +336,51 @@ class CertIpPromptTests(unittest.TestCase):
         ):
             self.assertEqual([], server_main._prompt_cert_ips())
 
+    def test_invalid_ip_is_skipped_with_warning(self):
+        out = io.StringIO()
+        with patch("server.main._detect_public_ip", return_value=""), patch(
+            "builtins.input", return_value="1.2.3.4 not-an-ip 5.6.7.8"
+        ), patch("sys.stdout", out):
+            self.assertEqual(["1.2.3.4", "5.6.7.8"], server_main._prompt_cert_ips())
+        self.assertIn("忽略无效的 IP", out.getvalue())
+
+    def test_invalid_detected_ip_is_ignored(self):
+        with patch("server.main._detect_public_ip", return_value="<html>oops"), patch(
+            "builtins.input", return_value=""
+        ):
+            self.assertEqual([], server_main._prompt_cert_ips())
+
+
+class ServerMainCertInvalidIpTests(unittest.TestCase):
+    """cert 生成对非法 SAN IP 的容错：转为可捕获的 RuntimeError，而非未捕获 ValueError。"""
+
+    def setUp(self):
+        try:
+            from cryptography import x509  # noqa: F401
+        except ImportError:
+            raise unittest.SkipTest("缺少 cryptography：`pip install cryptography`")
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.data_dir = Path(self.tmp.name) / "data"
+        self._orig_load = server_main.config.load
+        server_main.config.load = lambda: _data_dir_config(self.data_dir)
+        self.addCleanup(self._restore_config_load)
+
+    def _restore_config_load(self):
+        server_main.config.load = self._orig_load
+
+    def test_generate_cert_invalid_ip_raises_runtime_error(self):
+        with self.assertRaises(RuntimeError) as ctx:
+            server_main._generate_cert(self.data_dir, ips=["not-an-ip"])
+        self.assertIn("无效的 IP SAN", str(ctx.exception))
+
+    def test_cert_command_invalid_ip_returns_two(self):
+        err = io.StringIO()
+        with patch("sys.stderr", err):
+            rc = server_main.main(["cert", "--ip", "not-an-ip"])
+        self.assertEqual(2, rc)
+        self.assertIn("无效的 IP SAN", err.getvalue())
+
 
 class ServerMainApiStatusTests(unittest.TestCase):
     """deploy 摘要里的 API 配置状态：按 config.raw 判断活动模型 api_key 是否就绪。"""

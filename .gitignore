@@ -13,6 +13,9 @@ server/data/
 client/state.json
 client/outbox.json
 
+# TOFU 固定的服务端证书（运行时生成；公开信息但属本地状态，不入版本库）。
+client/server.crt
+
 # 设备身份凭证（服务端签发的 device_id/token），等同密钥，不入版本库。
 client/credentials.json
 

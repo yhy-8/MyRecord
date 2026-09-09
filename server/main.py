@@ -304,7 +304,10 @@ def _generate_cert(
     for dns_name in dns or []:
         names.append(x509.DNSName(dns_name))
     for ip in ips or []:
-        names.append(x509.IPAddress(ipaddress.ip_address(ip)))
+        try:
+            names.append(x509.IPAddress(ipaddress.ip_address(ip)))
+        except ValueError as error:
+            raise RuntimeError(f"无效的 IP SAN：{ip}（{error}）") from error
 
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     subject = issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn)])
@@ -356,23 +359,42 @@ def _detect_public_ip() -> str:
 def _prompt_cert_ips() -> list[str]:
     """交互获取客户端连接服务端所用的公网 IP，写入证书 SAN。
 
-    客户端以 IP 直连且 `verify` 指向 server.crt 时，证书 SAN 必须包含该 IP，否则严格
-    校验会因主机名不匹配失败（如连 47.102.194.65 而证书只声明 DNS:主机名）。可输入多个
-    （逗号/空格分隔，如公网 IP + 127.0.0.1）；留空则不加 IP SAN。
+    客户端用证书固定连接、不校验 IP/主机名（见 client/trust.py），故 SAN 对其非必需；
+    写入主要为兼容浏览器/curl 等按主机名校验的客户端（如按 47.102.194.65 访问而证书
+    只声明 DNS:主机名时会失败）。可输入多个（逗号/空格分隔，如公网 IP + 127.0.0.1）；
+    留空则不加 IP SAN。非法值只提示并跳过，不中断部署。
     """
+    import ipaddress
+
     detected = _detect_public_ip()
+    if detected:
+        try:
+            ipaddress.ip_address(detected)
+        except ValueError:
+            detected = ""
     hint = (
         f"（回车采用探测到的 {detected}）"
         if detected
-        else "（留空跳过，客户端将无法用 IP 严格校验收信）"
+        else "（留空跳过；SAN 仅影响浏览器/curl 等客户端）"
     )
     try:
         raw = input(f"请输入客户端连接服务端用的公网 IP{hint}: ").strip()
     except EOFError:
         raw = ""
-    if not raw:
-        return [detected] if detected else []
-    return [part for part in raw.replace(",", " ").split() if part]
+    candidates = (
+        [part for part in raw.replace(",", " ").split() if part]
+        if raw
+        else ([detected] if detected else [])
+    )
+    valid: list[str] = []
+    for candidate in candidates:
+        try:
+            ipaddress.ip_address(candidate)
+        except ValueError:
+            print(f"[!] 忽略无效的 IP：{candidate}")
+            continue
+        valid.append(candidate)
+    return valid
 
 
 def _command_cert(args: argparse.Namespace) -> int:
@@ -526,8 +548,8 @@ def _command_deploy(args: argparse.Namespace) -> int:
         print("    请复制 config.example.yaml 为 config.yaml，并填入模型 api_key。")
     cfg = config.load()
     data_dir = Path(cfg["server"]["data_dir"])
-    # 3) 自签证书（缺失才生成）。证书 SAN 必须含客户端连接所用的公网 IP，否则客户端
-    #    verify 指向 server.crt 严格校验时会因主机名不匹配失败（见 _prompt_cert_ips）。
+    # 3) 自签证书（缺失才生成）。客户端用证书固定、不校验主机名，SAN 非必需；写入主要为
+    #    兼容浏览器/curl 等按主机名校验的客户端（见 _prompt_cert_ips）。
     certfile = Path(cfg["server"]["tls"]["certfile"])
     cert_created = False
     cert_ips: list[str] = []
@@ -572,10 +594,10 @@ def _command_deploy(args: argparse.Namespace) -> int:
     print(f"  （服务端用 {venv_py} 运行，已切到虚拟环境）")
     print(f"· 自签证书 ：{'已生成' if cert_created else '已存在'} {certfile}")
     if cert_created and cert_ips:
-        print(f"  证书 SAN ：已写入公网 IP {', '.join(cert_ips)}（客户端 verify 指向 server.crt 即可严格校验）")
+        print(f"  证书 SAN ：已写入公网 IP {', '.join(cert_ips)}（兼容浏览器/curl 等按主机名校验的客户端）")
     elif not cert_created:
-        print("  证书 SAN ：如需客户端严格校验收信，请确认其含连接用的公网 IP；")
-        print("            否则运行 `python -m server.main cert --ip 公网IP` 重签后 restart。")
+        print("  证书 SAN ：客户端证书固定不校验主机名，SAN 非必需；")
+        print("            如需浏览器/curl 按 IP 访问，可运行 `python -m server.main cert --ip 公网IP` 重签后 restart。")
     if token:
         print("· 链接凭证 ：已新签发（token 见上方输出；服务端只存哈希，请勿丢失）")
     else:

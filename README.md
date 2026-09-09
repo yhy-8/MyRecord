@@ -34,8 +34,9 @@ python -m server.main run
 ```
 
 > 常驻可用一键部署 `sudo python -m server.main deploy`：自动创建 `server/.venv` 并装依赖、生成证书
-> （会交互询问客户端连接用的公网 IP 并写入证书 SAN，客户端 `verify` 才能用 IP 严格校验收信）、
-> 签发 token，再按实际路径安装**单个** systemd 单元并启动（不 enable 开机自启）。**每周自动备份已内置**
+> （会交互询问客户端连接用的公网 IP 并写入证书 SAN，以兼容浏览器/curl 等按主机名校验的客户端；
+> 客户端本身用证书固定、不校验主机名）、签发 token，再按实际路径安装**单个** systemd 单元并启动
+> （不 enable 开机自启）。**每周自动备份已内置**
 > （距上次成功备份满 7 天即作为子进程执行 `server/deploy/backup.sh`）。模型 api_key 仍由人工填入
 > `server/config.yaml`，填好后只重 `systemctl restart myrecord-server` 即可生效，无需重新部署。
 
