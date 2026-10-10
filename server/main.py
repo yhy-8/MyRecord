@@ -17,7 +17,7 @@ from .hub.store import Store
 def _store(data_dir: Path) -> tuple[Store, Path]:
     data_dir.mkdir(parents=True, exist_ok=True)
     state_path = data_dir / "state.json"
-    store = Store(state_path, data_dir / "Records", data_dir / "Trash")
+    store = Store(state_path, data_dir / "Records")
     return store, data_dir
 
 
@@ -36,7 +36,7 @@ def _command_run(args: argparse.Namespace) -> int:
     ai_analysis._purge_empty_placeholder_days()
 
     def render_records() -> None:
-        store.render_records(data_dir / "Records", data_dir / "Trash")
+        store.render_records(data_dir / "Records")
 
     def list_reports(kind: str) -> list[str]:
         base = data_dir / "AnalysisReports"
@@ -85,7 +85,7 @@ def _command_run(args: argparse.Namespace) -> int:
             pass
         current = store.data["version"]
         if current != store.rendered_version():
-            store.render_records(data_dir / "Records", data_dir / "Trash")
+            store.render_records(data_dir / "Records")
 
     def admin_retry():
         return ai_analysis.retry_failed_automatic_tasks()
@@ -242,7 +242,7 @@ def _command_import(args: argparse.Namespace) -> int:
 
 def _command_render(args: argparse.Namespace) -> int:
     store, data_dir = _store(Path(config.load()["server"]["data_dir"]))
-    store.render_records(data_dir / "Records", data_dir / "Trash")
+    store.render_records(data_dir / "Records")
     print("Records 渲染完成。")
     return 0
 

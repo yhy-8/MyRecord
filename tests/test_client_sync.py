@@ -147,7 +147,7 @@ class FanoutBetweenDevicesTest(ClientSyncE2ETestBase):
 
 
 class TombstoneAntiResurrectionTest(ClientSyncE2ETestBase):
-    """A 在线删除当天最新一条；B 离线时本地已有该条，上线拉取后被移除且不推回。"""
+    """A 删除本地最新一条（离线语义）；B 离线时本地已有该条，上线拉取后被移除且不推回。"""
 
     def test_deleted_entry_not_resurrected_on_b(self):
         root_a = _tmp_dir("cli-a-")
@@ -160,9 +160,12 @@ class TombstoneAntiResurrectionTest(ClientSyncE2ETestBase):
             b_file = root_b / "Records" / f"{_TODAY}.md"
             self.assertIn("将被删除", b_file.read_text(encoding="utf-8"))
 
-            # A 在线删除当天最新一条 → 服务端 tombstone
-            deleted = client_a.delete_latest(_TODAY)
-            self.assertEqual(deleted, f"{self.device_a}-1")
+            # A 删除本地最新一条：写墓碑并入队，推送到服务端
+            latest = journal.latest_local_entry(_TODAY)
+            self.assertEqual(latest["entry_id"], f"{self.device_a}-1")
+            self.assertTrue(journal.delete_record(latest))
+            client_a.enqueue_delete(latest)
+            client_a.send_pending()
 
             # B 上线拉取 → 本地移除该条，且不会把已删条目推回服务端
             client_b.pull()
@@ -198,9 +201,11 @@ class OutboxRepushResurrectionTest(ClientSyncE2ETestBase):
             client_a.push_new(self._entry(self.device_a, 1, 1717200060, "将被删"))
             self.assertEqual(len(self.store.data["entries"]), 1)
 
-            # A 在线删除当天最新一条 → 服务端 tombstone，条目从 entries 移除
-            deleted = client_a.delete_latest(_TODAY)
-            self.assertEqual(deleted, f"{self.device_a}-1")
+            # A 删除本地最新一条 → 服务端 tombstone，条目从 entries 移除
+            latest = journal.latest_local_entry(_TODAY)
+            self.assertTrue(journal.delete_record(latest))
+            client_a.enqueue_delete(latest)
+            client_a.send_pending()
             self.assertEqual(self.store.data["entries"], {})
             self.assertEqual(len(self.store.data["tombstones"]), 1)
 
@@ -276,7 +281,7 @@ class MultiClientConsistencyTest(ClientSyncE2ETestBase):
             client.full_sync()
             client_content = (root / "Records" / f"{_TODAY}.md").read_text(encoding="utf-8")
             srv_records = _tmp_dir("mc-srv-") / "Records"
-            self.store.render_records(srv_records, srv_records.parent / "Trash")
+            self.store.render_records(srv_records)
             server_content = (srv_records / f"{_TODAY}.md").read_text(encoding="utf-8")
             # 客户端镜像与服务端渲染逐字节一致：同格式、同时序、墓碑同位置
             self.assertEqual(client_content, server_content)
@@ -310,13 +315,15 @@ class MultiClientConsistencyTest(ClientSyncE2ETestBase):
             content = (roots[dev] / "Records" / f"{_TODAY}.md").read_text(encoding="utf-8")
             self.assertIn("将被删", content)
 
-        # A 在线删除当天最新一条
+        # A 删除本地最新一条（离线语义）并推送
         ca, pa = self._new_client(self.device_a, self.token_a, roots["a"])
         try:
-            deleted = ca.delete_latest(_TODAY)
+            latest = journal.latest_local_entry(_TODAY)
+            self.assertTrue(journal.delete_record(latest))
+            ca.enqueue_delete(latest)
+            ca.send_pending()
         finally:
             self._stop(pa)
-        self.assertEqual(deleted, f"{self.device_a}-1")
         self.assertEqual(len(self.store.data["tombstones"]), 1)
 
         # B、C 上线拉取 → 本地移除且不复活
@@ -957,6 +964,135 @@ class OnlyWriteTodayTest(unittest.TestCase):
             self.assertIn("今天内容", (records / f"{today}.md").read_text(encoding="utf-8"))
             # 本地没有今天的过期残留条目
             self.assertFalse((records / "2000-01-01.md").exists())
+
+
+class LocalDeleteAndTrashTest(unittest.TestCase):
+    """离线删除：删本地最新一条、原位墓碑、正文并入单文件垃圾桶 Records/trash.md。"""
+
+    def setUp(self):
+        self.root = _tmp_dir("cli-del-")
+        self.records = self.root / "Records"
+        self.records.mkdir(parents=True, exist_ok=True)
+        cfg = {
+            "client": {
+                "records_dir": self.records,
+                "analysis_dir": self.root / "A",
+                "server_url": "http://x",
+            }
+        }
+        self._patch = patch.object(client_config, "load", return_value=cfg)
+        self._patch.start()
+
+    def tearDown(self):
+        self._patch.stop()
+
+    def _entry(self, entry_id, ts, text):
+        return {
+            "entry_id": entry_id,
+            "device_id": "d",
+            "date": _TODAY,
+            "ts": ts,
+            "tag": "",
+            "text": text,
+        }
+
+    def test_latest_local_entry_and_delete_record_move_body_to_trash(self):
+        journal.rebuild_records(
+            [self._entry("1000", 1000, "早"), self._entry("2000", 2000, "晚")], []
+        )
+        latest = journal.latest_local_entry(_TODAY)
+        self.assertEqual(latest["entry_id"], "2000")
+        self.assertTrue(journal.delete_record(latest))
+
+        content = (self.records / f"{_TODAY}.md").read_text(encoding="utf-8")
+        self.assertNotIn("myrecord-time:2000 -->", content)
+        self.assertIn("myrecord-tombstone-time:2000", content)
+        self.assertIn("myrecord-time:1000 -->", content)  # 较早一条仍在
+
+        trash = (self.records / "trash.md").read_text(encoding="utf-8")
+        self.assertIn("晚", trash)
+        self.assertNotIn("早", trash)
+
+    def test_delete_record_ignores_history_date(self):
+        entry = {"entry_id": "x", "date": "2000-01-01", "ts": 1, "tag": "", "text": "历史"}
+        self.assertFalse(journal.delete_record(entry))
+
+    def test_apply_delta_remote_tombstone_moves_local_body_to_trash(self):
+        journal.rebuild_records([self._entry("1000", 1000, "别端删我")], [])
+        journal.apply_delta([], [{"entry_id": "1000", "date": _TODAY, "entry_ts": 1000}])
+        trash = (self.records / "trash.md").read_text(encoding="utf-8")
+        self.assertIn("别端删我", trash)
+        content = (self.records / f"{_TODAY}.md").read_text(encoding="utf-8")
+        self.assertIn("myrecord-tombstone-time:1000", content)
+
+    def test_rebuild_records_moves_tombstoned_local_body_to_trash(self):
+        journal.rebuild_records([self._entry("1000", 1000, "全量删我")], [])
+        journal.rebuild_records([], [{"entry_id": "1000", "date": _TODAY, "entry_ts": 1000}])
+        trash = (self.records / "trash.md").read_text(encoding="utf-8")
+        self.assertIn("全量删我", trash)
+        self.assertIn(
+            "myrecord-tombstone-time:1000",
+            (self.records / f"{_TODAY}.md").read_text(encoding="utf-8"),
+        )
+
+
+class OfflineDeleteE2ETest(ClientSyncE2ETestBase):
+    """A 离线删本地最新一条 → 上线推送墓碑与正文 → 服务端与 B 端展开删除且正文进垃圾桶。"""
+
+    def test_offline_delete_then_online_syncs_tombstone_and_trash(self):
+        root_a = _tmp_dir("del-a-")
+        root_b = _tmp_dir("del-b-")
+        # 让服务端有 Records 目录，使删除可渲染单文件垃圾桶
+        srv_records = self._data / "Records"
+        srv_records.mkdir(parents=True, exist_ok=True)
+        self.store.records_dir = srv_records
+        entry = self._entry(self.device_a, 1, 1717200000, "将被删")
+
+        # A 写入并同步（在本地 journal 与云端均落盘），B 同步持有该条
+        ca, pa = self._new_client(self.device_a, self.token_a, root_a)
+        try:
+            journal.append_record(entry)
+            ca.push_new(entry)
+        finally:
+            self._stop(pa)
+        cb, pb = self._new_client(self.device_b, self.token_b, root_b)
+        try:
+            cb.full_sync()
+            self.assertIn(
+                "将被删", (root_b / "Records" / f"{_TODAY}.md").read_text(encoding="utf-8")
+            )
+        finally:
+            self._stop(pb)
+
+        # A 离线删除本地最新一条：入队（不联网），随后上线冲刷
+        ca, pa = self._new_client(self.device_a, self.token_a, root_a)
+        try:
+            latest = journal.latest_local_entry(_TODAY)
+            self.assertEqual(latest["entry_id"], f"{self.device_a}-1")
+            self.assertTrue(journal.delete_record(latest))
+            ca.enqueue_delete(latest)
+            self.assertEqual(
+                [d["entry_id"] for d in sync._load_deletes()], [f"{self.device_a}-1"]
+            )
+            ca.send_pending()
+        finally:
+            self._stop(pa)
+
+        # 服务端：条目移除、墓碑存在、正文进单文件垃圾桶
+        self.assertEqual(self.store.data["entries"], {})
+        self.assertIn(f"{self.device_a}-1", self.store.data["tombstones"])
+        self.assertIn("将被删", (srv_records / "trash.md").read_text(encoding="utf-8"))
+
+        # B 重连完整对账：条目被删、正文进入 B 的本地垃圾桶
+        cb, pb = self._new_client(self.device_b, self.token_b, root_b)
+        try:
+            cb.full_sync()
+        finally:
+            self._stop(pb)
+        self.assertNotIn(
+            "将被删", (root_b / "Records" / f"{_TODAY}.md").read_text(encoding="utf-8")
+        )
+        self.assertIn("将被删", (root_b / "Records" / "trash.md").read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

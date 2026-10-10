@@ -76,7 +76,7 @@ def _configured_path(key: str, default: str | Path) -> Path:
 
 
 # AI 数据空间默认与 server.config 的 data_dir 同根：diary/报告/日志都放在 data/ 下，
-# 与同步所用的 state.json/Records/Trash/tls 一致，避免「数据空间」分裂成多处。
+# 与同步所用的 state.json/Records（含单文件垃圾桶 trash.md）/tls 一致，避免「数据空间」分裂成多处。
 _SERVER_DATA_DIR = server_config.load()["server"]["data_dir"]
 
 DIARY_DIR = _configured_path("diary_dir", _SERVER_DATA_DIR / "Records")

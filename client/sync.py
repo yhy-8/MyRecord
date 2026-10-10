@@ -1,13 +1,16 @@
-"""客户端同步：持续/完整同步、写后即 push、离线队列、长连接（长轮询）扇出即拉取、在线删除。
+"""客户端同步：持续/完整同步、非阻塞入队 + 后台推送、离线队列、长连接（长轮询）
+扇出即拉取、在线删除。
 
-同步模型：不密集轮询云端。后台线程连接成功即完整对账，之后保持一条长连接
-（长轮询挂起，服务端有更新即返回并立即应用），每条记录写入即触发 push；
-断线自动重连重新完整对账。
+同步模型：不密集轮询云端。后台**接收线程**连接成功即完整对账，之后保持一条长连接
+（长轮询挂起，服务端有更新即返回并立即应用）；记录写入只做本地入队（`enqueue`，不
+联网），由后台**推送线程**（`flush_pending_loop`）入队即推、失败定期重试。连接复用
+（HTTP/1.1 keep-alive）避免每次请求重做 TLS；断线自动重连重新完整对账。
 """
 
 import hashlib
 import json
 import logging
+import threading
 
 import requests
 import urllib3
@@ -52,8 +55,11 @@ def _save_state(version: int) -> None:
     atomic_write(_state_path(), json.dumps({"version": version}))
 
 
-def _save_outbox(entries: list[dict]) -> None:
-    atomic_write(_outbox_path(), json.dumps({"entries": entries}, ensure_ascii=False))
+def _save_outbox(entries: list[dict], deletes: list[dict] | None = None) -> None:
+    atomic_write(
+        _outbox_path(),
+        json.dumps({"entries": entries, "deletes": deletes or []}, ensure_ascii=False),
+    )
 
 
 def _load_outbox() -> list[dict]:
@@ -67,11 +73,29 @@ def _load_outbox() -> list[dict]:
         return []
 
 
+def _load_deletes() -> list[dict]:
+    """离线待推送的删除（tombstone + 被删正文）。"""
+    path = _outbox_path()
+    if not path.exists():
+        return []
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        return list(value.get("deletes", [])) if isinstance(value, dict) else []
+    except (OSError, ValueError, TypeError):
+        return []
+
+
 class SyncClient:
     def __init__(self, server_url: str | None = None):
         self.base_url = (server_url or config.load()["client"]["server_url"]).rstrip("/")
         self._session: requests.Session | None = None
         self._session_key = None
+        # 入队信号：输入线程 enqueue 后唤醒后台推送线程，输入线程绝不做网络 I/O。
+        self._outbox_event = threading.Event()
+        # 串行化 full_sync 与后台推送（两者都会 send_pending），避免并发重复推送/写库。
+        self._sync_lock = threading.Lock()
+        # 接收/发送两个后台线程会并发调用 _client()，加锁避免重复建 Session/互相覆盖。
+        self._session_lock = threading.Lock()
 
     # ---------- 底层请求 ----------
 
@@ -84,16 +108,17 @@ class SyncClient:
         """
         cafile = trust.pinned_cert()
         key = str(cafile) if cafile else ""
-        if self._session is not None and self._session_key == key:
-            return self._session
-        session = requests.Session()
-        if cafile:
-            session.mount("https://", trust.PinnedHTTPAdapter(str(cafile)))
-        else:
-            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-            session.verify = False
-        self._session, self._session_key = session, key
-        return session
+        with self._session_lock:
+            if self._session is not None and self._session_key == key:
+                return self._session
+            session = requests.Session()
+            if cafile:
+                session.mount("https://", trust.PinnedHTTPAdapter(str(cafile)))
+            else:
+                urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+                session.verify = False
+            self._session, self._session_key = session, key
+            return session
 
     def ensure_trust(self) -> bool:
         """建立/确认服务端证书信任（TOFU）；返回 False 表示用户拒绝，调用方应退出。"""
@@ -203,13 +228,14 @@ class SyncClient:
 
     # ---------- push / 离线队列 ----------
 
-    def push_new(self, entry: dict) -> None:
-        """先把条目写入 outbox（写后即触发），再尝试立即 push。离线则留在队列。
+    def _store_in_outbox(self, entry: dict) -> None:
+        """把条目写入离线队列（本地、快速，不做任何网络 I/O）。
 
         仅“今天”（UTC+8）的条目才进队列；`date < 今天` 的过期条目不推（由 send_pending 作废）。
         """
         with file_lock(_outbox_path()):
             outbox = _load_outbox()
+            deletes = _load_deletes()
             if entry.get("date") == journal.today_utc8():
                 if not any(e.get("entry_id") == entry["entry_id"] for e in outbox):
                     outbox.append(entry)
@@ -220,50 +246,113 @@ class SyncClient:
                     entry.get("entry_id"),
                     entry.get("date"),
                 )
-            _save_outbox(outbox)
+            _save_outbox(outbox, deletes)
+
+    def _store_delete_in_outbox(self, delete: dict) -> None:
+        """把一条删除（墓碑 + 被删正文）写入离线队列（本地、快速，不联网）。"""
+        with file_lock(_outbox_path()):
+            outbox = _load_outbox()
+            deletes = _load_deletes()
+            if not any(d.get("entry_id") == delete["entry_id"] for d in deletes):
+                deletes.append(delete)
+            _save_outbox(outbox, deletes)
+
+    def enqueue_delete(self, entry: dict) -> None:
+        """本地入队一条删除并唤醒后台推送线程（**不联网、不阻塞**）。
+
+        ``entry`` 是被删条目（正文一并带上，即使云端从未见过它，也能进服务端垃圾桶）。
+        """
+        self._store_delete_in_outbox(
+            {
+                "entry_id": entry["entry_id"],
+                "date": entry.get("date", ""),
+                "entry": entry,
+            }
+        )
+        self._outbox_event.set()
+
+    def enqueue(self, entry: dict) -> None:
+        """本地入队并唤醒后台推送线程（**不联网、不阻塞**）。
+
+        客户端主输入线程专用：记录先落盘、再入队即返回；能否立即推送、何时重试，
+        全部交给后台推送线程（flush_pending_loop）。即使启动时连不上服务端，
+        后续每条记录也不会因网络而卡顿。
+        """
+        self._store_in_outbox(entry)
+        self._outbox_event.set()
+
+    def flush_pending_loop(self, interval: float = 5.0) -> None:
+        """后台推送循环：入队即推；失败则每 interval 秒重试（直到成功或过期作废）。
+
+        运行在 daemon 线程，永不向外抛异常（网络/磁盘错误只记日志并保持队列）。
+        send_pending 在 outbox 为空时直接返回、不发请求，因此空转的成本极低。
+        """
+        while True:
+            self._outbox_event.wait(timeout=interval)
+            self._outbox_event.clear()
+            try:
+                with self._sync_lock:
+                    self.send_pending()
+            except Exception as error:  # noqa: BLE001 - 后台线程必须自愈，绝不退出
+                # debug 而非 warning：离线时每 interval 秒会失败一次，warning 会刷屏。
+                logger.debug("flush_pending_failed error=%s", error)
+
+    def push_new(self, entry: dict) -> None:
+        """先把条目写入 outbox，再尝试立即 push。离线则留在队列。
+
+        ``enqueue`` 的非阻塞版是 cli 的默认路径；本方法保留给需要“写后即确认”的调用方。
+        """
+        self._store_in_outbox(entry)
         try:
             self.send_pending()
         except SyncError:
             pass  # 离线：保留队列，等待下次拉取/推送补齐
 
     def send_pending(self) -> dict:
-        """冲刷离线队列：仅发“今天”的条目；过期（date < 今天）直接作废清除。
+        """冲刷离线队列：仅发“今天”的条目与删除；过期（date < 今天）直接作废清除。
 
         网络请求在 outbox 锁外进行：即使服务端慢或断连，也不一直占用 outbox 锁，
         其余线程（写入 / 后台同步）仍可继续维护离线队列。
         """
         with file_lock(_outbox_path()):
             outbox = _load_outbox()
+            deletes = _load_deletes()
             today = journal.today_utc8()
-            # 过期作废：date != 今天的条目从 outbox 永久移除（date < 今天 = 过期；> 今天 = 异常）。
+            # 过期作废：date != 今天的条目/删除从 outbox 永久移除（过期或异常）。
             pending = [e for e in outbox if e.get("date") == today]
-            if len(pending) != len(outbox):
-                _save_outbox(pending)
-            if not pending:
+            pending_deletes = [d for d in deletes if d.get("date") == today]
+            if len(pending) != len(outbox) or len(pending_deletes) != len(deletes):
+                _save_outbox(pending, pending_deletes)
+            if not pending and not pending_deletes:
                 return {"accepted": [], "version": _read_state(), "entries": [], "tombstones": []}
         status, delta = self._request_payload(
             "POST",
             "/api/sync/push",
-            json_body={"entries": pending, "version": _read_state()},
+            json_body={
+                "entries": pending,
+                "deletes": pending_deletes,
+                "version": _read_state(),
+            },
         )
         if status >= 400 and status != 422:
             # 404/500 等非预期，交由上层当作网络问题重试（outbox 保留）。
             raise SyncError(f"服务端返回 {status}。")
-        if status == 422:
-            # 服务端拒绝批次：rejected 里的 id 作废（不入库、不要重试）；其余保留待下次重推。
-            rejected = set((delta or {}).get("rejected", []) or [])
-            removed = {e["entry_id"] for e in pending if e["entry_id"] in rejected}
-        else:
-            accepted = set((delta or {}).get("accepted", []) or [])
-            removed = {e["entry_id"] for e in pending if e["entry_id"] in accepted}
+        rejected = set((delta or {}).get("rejected", []) or [])
+        accepted = set((delta or {}).get("accepted", []) or [])
+        # 422：服务端已处理但未入库的 id（含整批拒绝时仍已应用的删除）都要清出队列。
+        removed = rejected | accepted if status == 422 else accepted
         with file_lock(_outbox_path()):
-            # 只移除本次已确认处理（被接受/被拒作废）的条目；
+            # 只移除本次已确认处理（被接受/被拒作废）的条目与删除；
             # 保留网络请求期间其它线程新增到 outbox 的条目。
             current = _load_outbox()
-            _save_outbox([e for e in current if e["entry_id"] not in removed])
+            current_deletes = _load_deletes()
+            _save_outbox(
+                [e for e in current if e["entry_id"] not in removed],
+                [d for d in current_deletes if d["entry_id"] not in removed],
+            )
         if status == 422:
             return {
-                "accepted": [],
+                "accepted": sorted(accepted),
                 "version": _read_state(),
                 "entries": [],
                 "tombstones": [],
@@ -287,6 +376,11 @@ class SyncClient:
         self.reconcile()
         self.sync_history_files()
         self.sync_reports()
+
+    def run_full_sync(self) -> None:
+        """与后台推送循环互斥地做一次完整同步（供后台接收线程/启动调用）。"""
+        with self._sync_lock:
+            self.full_sync()
 
     def reconcile(self) -> None:
         """从服务端权威状态完整对账：拉取“今天”的条目与墓碑，重建/补齐本地今天镜像。
@@ -317,28 +411,13 @@ class SyncClient:
 
     # ---------- 删除 ----------
 
-    def delete_latest(self, date: str) -> str | None:
-        # 仅“今天”可删（历史日只读，服务端也拒绝）。
-        if date != journal.today_utc8():
-            logger.warning("delete_latest_not_today skips date=%s", date)
-            return None
-        # 附带本地当前游标，服务端据此返回 gap-free 增量（只补客户端缺失的部分），
-        # 避免用“被删条目的版本-1”做粗粒度对账而多推数据或漏推中间版本。
-        delta = self._request(
-            "POST",
-            "/api/entries/delete",
-            json_body={"date": date, "version": _read_state()},
-        )
-        self._apply_delta(delta)
-        return delta.get("deleted")
-
     # ---------- 历史日整文件校验 ----------
 
-    def _fetch_record_file(self, date: str) -> str | None:
-        """拉取 /api/records/<date> 整文件原文；不存在（404）或异常返回 None。"""
+    def _fetch_record_file(self, name: str) -> str | None:
+        """拉取 /api/records/<name> 整文件原文（name 为日期或特殊名 ``trash``）；异常返回 None。"""
         try:
             resp = self._client().get(
-                self.base_url + "/api/records/" + date,
+                self.base_url + "/api/records/" + name,
                 headers=self._headers(),
                 timeout=30.0,
             )
@@ -390,11 +469,23 @@ class SyncClient:
             # 直接整文件覆盖（云端文件已含 <summary>，不再本地保留本地 summary）。
             atomic_write(path, content)
             logger.info("history_file_overwrite date=%s", date)
+        # 1b) 单文件垃圾桶 Records/trash.md：清单里的 `trash` 字段是与云端对账的哈希，整文件覆盖。
+        #     离线删除的正文已由 send_pending 先推给服务端，云端为准不会丢；
+        #     服务端未提供 trash 哈希（旧版/未渲染）时保留本地，不删。
+        trash_sha = data.get("trash")
+        if trash_sha is not None:
+            trash = records_dir / "trash.md"
+            if not (trash.exists() and self._file_sha256(trash) == trash_sha):
+                content = self._fetch_record_file("trash")
+                if content is not None:
+                    atomic_write(trash, content)
+                    logger.info("trash_file_overwrite")
         # 2) 删除：本地存在但云端没有的文件（不保护“今天”，今天由对账/推送维护）。
         #    date < 今天且不在云端 => 作废；date > 今天（未来日期）也不在云端 => 异常残留，一并清理。
+        #    trash.md 不是日期文件，由上面的 trash 哈希单独对账，这里跳过。
         local_files = {p.stem for p in records_dir.glob("*.md")}
         for date in sorted(local_files):
-            if date == today:
+            if date == today or date == "trash":
                 continue
             if date in cloud:
                 continue

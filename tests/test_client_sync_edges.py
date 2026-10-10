@@ -5,6 +5,8 @@
 """
 
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -176,19 +178,97 @@ class SendPendingTests(SyncClientEdgeBase):
         self.assertEqual(1, sync._read_state())
 
 
-class DeleteLatestTests(SyncClientEdgeBase):
-    def test_delete_latest_skips_non_today(self):
-        self.assertIsNone(self.client.delete_latest(_YESTERDAY))
+class EnqueueNonBlockingTests(SyncClientEdgeBase):
+    """enqueue 只写队列 + 唤醒信号，绝不在调用线程做网络 I/O。"""
 
-    @patch("client.sync.requests.Session.request", return_value=_Resp(200, {"deleted": "x"}))
-    def test_delete_latest_forwards_version(self, req):
-        self.client.delete_latest(_TODAY)
+    def test_enqueue_writes_outbox_and_signals_without_network(self):
+        entry = {"entry_id": "a", "date": _TODAY, "ts": 1, "tag": "", "text": "x"}
+        with patch.object(
+            sync.requests.Session, "request", side_effect=AssertionError("不应触网")
+        ):
+            self.client.enqueue(entry)
+        self.assertEqual(["a"], [e["entry_id"] for e in sync._load_outbox()])
+        self.assertTrue(self.client._outbox_event.is_set())
+
+    def test_enqueue_dedupes_same_entry_id(self):
+        entry = {"entry_id": "a", "date": _TODAY, "ts": 1, "tag": "", "text": "x"}
+        self.client.enqueue(entry)
+        self.client.enqueue(entry)
+        self.assertEqual(1, len(sync._load_outbox()))
+
+    @patch("client.sync.requests.Session.request")
+    def test_flush_pending_loop_sends_queued_entry(self, req):
+        req.return_value = _Resp(
+            200, {"accepted": ["a"], "version": 1, "entries": [], "tombstones": []}
+        )
+        self.client.enqueue(
+            {"entry_id": "a", "date": _TODAY, "ts": 1, "tag": "", "text": "x"}
+        )
+        thread = threading.Thread(
+            target=self.client.flush_pending_loop, kwargs={"interval": 0.02}, daemon=True
+        )
+        thread.start()
+        for _ in range(200):
+            if not sync._load_outbox():
+                break
+            time.sleep(0.01)
+        self.assertEqual([], sync._load_outbox())
+
+
+class OutboxDeleteTests(SyncClientEdgeBase):
+    """离线删除进入 outbox deletes：随 push 发送、按 accepted/rejected 清理、过期作废。"""
+
+    @patch("client.sync.requests.Session.request")
+    def test_send_pending_pushes_delete_and_clears(self, req):
+        entry = {"entry_id": "d1", "date": _TODAY, "ts": 5, "text": "x"}
+        self.client.enqueue_delete(entry)
+        req.return_value = _Resp(
+            200, {"accepted": ["d1"], "version": 1, "entries": [], "tombstones": []}
+        )
+        self.client.send_pending()
+        self.assertEqual([], sync._load_deletes())
         body = req.call_args.kwargs.get("json")
-        self.assertEqual(_TODAY, body["date"])
-        self.assertEqual(0, body["version"])
+        self.assertEqual(["d1"], [d["entry_id"] for d in body["deletes"]])
+        self.assertEqual([], body["entries"])
+
+    def test_send_pending_drops_expired_delete_without_network(self):
+        sync._save_outbox([], [{"entry_id": "old", "date": "2000-01-01", "entry": {}}])
+        with patch.object(
+            sync.requests.Session, "request", side_effect=AssertionError("不应触网")
+        ):
+            self.client.send_pending()
+        self.assertEqual([], sync._load_deletes())
+
+    @patch("client.sync.requests.Session.request")
+    def test_send_pending_422_removes_accepted_and_rejected_deletes(self, req):
+        self.client.enqueue_delete({"entry_id": "d1", "date": _TODAY, "ts": 5, "text": "x"})
+        self.client.enqueue_delete({"entry_id": "d2", "date": _TODAY, "ts": 6, "text": "y"})
+        # 服务端批内有效删除已应用（accepted），同时存在过期删除（rejected）
+        req.return_value = _Resp(
+            422, {"ok": False, "error": "expired", "accepted": ["d1"], "rejected": ["d2"]}
+        )
+        self.client.send_pending()
+        self.assertEqual([], sync._load_deletes())
 
 
 class HistorySyncErrorTests(SyncClientEdgeBase):
+    @patch("client.sync.requests.Session.request")
+    def test_sync_history_files_pulls_trash_file(self, req):
+        """清单里的 trash 哈希不同时，客户端整文件拉取 Records/trash.md。"""
+
+        def respond(method, url, **kwargs):
+            if url.endswith("/api/records"):
+                return _Resp(200, {"files": [], "trash": "deadbeef"})
+            if url.endswith("/api/records/trash"):
+                return _Resp(200, text="<!-- myrecord-time:1 -->\n**08:00:** 已删\n\n")
+            return _Resp(404)
+
+        req.side_effect = respond
+        self.client.sync_history_files()
+        trash = self.records / "trash.md"
+        self.assertTrue(trash.exists())
+        self.assertIn("已删", trash.read_text(encoding="utf-8"))
+
     @patch("client.sync.requests.Session.request", side_effect=sync.requests.ConnectionError("down"))
     def test_sync_history_files_survives_network_error(self, req):
         # 服务端不可达：保留本地历史文件，不抛异常、不误删

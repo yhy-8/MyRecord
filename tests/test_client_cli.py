@@ -4,7 +4,7 @@
 - 每个命令的调度路由
 - 普通输入 → 生成 entry 并写本地 + 即时 push
 - 启动时 full_sync（连上云端对账）
-- /d 在线删除当天最新一条（服务端确认，入垃圾桶）
+- /d 删除本地当天最新一条（离线可用，正文入垃圾桶，联网后自动同步）
 - /model 按服务端模型列表循环切换
 """
 
@@ -123,7 +123,7 @@ class ClientCLIUnconfiguredOfflineTests(unittest.TestCase):
 
 
 class ClientCLIPlainInputTests(unittest.TestCase):
-    def test_plain_input_builds_entry_and_writes_and_pushes(self):
+    def test_plain_input_builds_entry_and_writes_and_enqueues(self):
         with patch.object(cli_app, "journal") as journal, patch.object(
             client_identity, "make_entry_id"
         ) as make_entry_id, patch.object(client_identity, "device_name") as device_name:
@@ -134,7 +134,7 @@ class ClientCLIPlainInputTests(unittest.TestCase):
             client = Mock()
             cli_app._write_record(client, "普通记录")
 
-            entry = client.push_new.call_args.args[0]
+            entry = client.enqueue.call_args.args[0]
             self.assertEqual("e2e-a-1", entry["entry_id"])
             self.assertEqual("e2e-a", entry["device_id"])
             self.assertEqual("普通记录", entry["text"])
@@ -142,6 +142,8 @@ class ClientCLIPlainInputTests(unittest.TestCase):
             # ts 应为毫秒精度：连续快速记录时同秒不会碰撞，按 ts 排序即等于写入顺序
             self.assertGreaterEqual(entry["ts"], 10_000_000_000)
             journal.append_record.assert_called_once_with(entry)
+            # 输入线程只入队、不直接 push（网络交给后台线程）
+            client.push_new.assert_not_called()
 
 
 class ClientCLICommandRoutingTests(unittest.TestCase):
@@ -182,7 +184,7 @@ class ClientCLICommandRoutingTests(unittest.TestCase):
             show_day.assert_called_once()
             # 启动时 full_sync 一次（连接即完整对账），后台自动持续同步
             client.full_sync.assert_called()
-            client.delete_latest.assert_called_once()  # 当天最新一条
+            client.enqueue_delete.assert_called_once()  # 离线删除本地最新一条
             client.status.assert_called()
             # /model 切到服务端模型列表的下一个
             client.admin_set_model.assert_called_once_with("deepseek-v4-flash")

@@ -92,22 +92,38 @@ class StoreTest(unittest.TestCase):
         self.assertEqual(rejected, ["old-1"])
         self.assertEqual(store.data["entries"], {})
 
-    def test_pull_increment_only_today(self):
+    def test_pull_returns_full_today_regardless_of_token(self):
+        """游标已降级：pull 始终返回今天全量，客户端按 entry_id 幂等合并。"""
         data = _tmp_data_dir() / "state.json"
         store = Store(data)
-        # 混入历史日条目（先入库再验证 pull 只回今天——历史日本就不应入 state，这里模拟残留）
         store.append_entries(
             "a", [{"entry_id": "a-1", "date": _today(), "ts": _today_ts(8), "tag": "", "text": "x"}]
         )
-        # 直接写入 state 的一笔“过去日”残留，验证 pull 过滤掉它
+        # 直接写入 state 的一笔“过去日”残留，验证 today_state 过滤掉它
         store.data["entries"]["old-1"] = {
-            "entry_id": "old-1", "device_id": "a", "date": "2000-01-01", "ts": 1, "tag": "", "text": "old", "v": 99,
+            "entry_id": "old-1", "device_id": "a", "date": "2000-01-01", "ts": 1, "tag": "", "text": "old",
         }
-        delta = store.pull(0)
-        self.assertEqual(len(delta["entries"]), 1)
-        self.assertEqual(delta["entries"][0]["entry_id"], "a-1")
-        self.assertEqual(delta["version"], 1)
-        self.assertEqual(store.pull(1)["entries"], [])
+        first = store.pull(0)
+        self.assertEqual([e["entry_id"] for e in first["entries"]], ["a-1"])
+        # 传一个更大的令牌仍返回今天全量（不依赖游标筛选，不会漏数据）。
+        again = store.pull(99)
+        self.assertEqual([e["entry_id"] for e in again["entries"]], ["a-1"])
+
+    def test_wait_for_change_timeout_returns_empty_delta(self):
+        """长轮询超时无变化：返回空增量（不重复下发全量），令牌用于唤醒。"""
+        data = _tmp_data_dir() / "state.json"
+        store = Store(data)
+        store.append_entries(
+            "a", [{"entry_id": "a-1", "date": _today(), "ts": _today_ts(8), "tag": "", "text": "x"}]
+        )
+        version = store.data["version"]
+        # 令牌已是当前值：无变化，超时返回空
+        delta = store.wait_for_change(version, timeout=0.05)
+        self.assertEqual(delta["entries"], [])
+        self.assertEqual(delta["tombstones"], [])
+        # 令牌落后：立即返回今天全量
+        delta = store.wait_for_change(0, timeout=0.05)
+        self.assertEqual([e["entry_id"] for e in delta["entries"]], ["a-1"])
 
     def test_tombstone_moves_to_trash(self):
         data = _tmp_data_dir() / "state.json"
@@ -136,9 +152,9 @@ class StoreTest(unittest.TestCase):
             }),
             encoding="utf-8",
         )
-        # 传入 records_dir/trash_dir，让封存先渲染历史日文件再清理（否则无落盘目录时
+        # 传入 records_dir，让封存先渲染历史日文件再清理（否则无落盘目录时
         # 封存会跳过清理，以“仅今天常驻 state”语义不再把历史日条目态清掉——那是数据丢失）。
-        store = Store(data, data.parent / "Records", data.parent / "Trash")
+        store = Store(data, data.parent / "Records")
         # 历史日条目不可删（返回 False）
         self.assertFalse(store.tombstone("old-1", "a"))
         # 首次访问触发封存：历史日条目态被移除（不再常驻 state，以整文件为准）
@@ -172,19 +188,6 @@ class StoreTest(unittest.TestCase):
         # 新条目不受影响
         store.append_entries("a", [{"entry_id": "y-2", "date": _today(), "ts": _today_ts(9), "tag": "", "text": "新"}])
         self.assertIn("y-2", store.data["entries"])
-
-    def test_latest_entry_for_date_only_today(self):
-        data = _tmp_data_dir() / "state.json"
-        store = Store(data)
-        store.append_entries("a", [
-            {"entry_id": "a-1", "date": _today(), "ts": _today_ts(8), "tag": "", "text": "first"},
-            {"entry_id": "b-1", "date": _today(), "ts": _today_ts(9), "tag": "", "text": "second"},
-        ])
-        latest = store.latest_entry_for_date(_today())
-        self.assertEqual(latest["entry_id"], "b-1")
-        # 今天之外不可删：无论过去日还是未来日，都返回 None
-        self.assertIsNone(store.latest_entry_for_date("2000-01-01"))
-        self.assertIsNone(store.latest_entry_for_date("2099-01-01"))
 
     def test_wait_for_change_returns_tombstone_after_delete(self):
         """长轮询等待路径：A 删后，B 的 wait_for_change 返回墓碑（用于扇出删除）。"""
@@ -336,30 +339,29 @@ class StoreRenderTest(unittest.TestCase):
         data = _tmp_data_dir() / "state.json"
         store = self._store_with_entries(data)
         records_dir = data.parent / "Records"
-        trash_dir = data.parent / "Trash"
 
-        store.render_records(records_dir, trash_dir)
+        store.render_records(records_dir)
 
         records = (records_dir / f"{_today()}.md").read_text(encoding="utf-8")
         self.assertIn("保留正文", records)
         self.assertNotIn("待删除正文", records)
         self.assertIn("myrecord-tombstone", records)
 
-        trash = (trash_dir / f"{_today()}.md").read_text(encoding="utf-8")
+        # 单文件垃圾桶 Records/trash.md（不再按天分文件）
+        trash = (records_dir / "trash.md").read_text(encoding="utf-8")
         self.assertIn("待删除正文", trash)
         self.assertNotIn("保留正文", trash)
 
     def test_render_records_empty_day_creates_no_placeholder_file(self):
-        """空日（无条目、无墓碑）不生成 Records/<date>.md 占位文件。"""
+        """空日（无条目、无墓碑）不生成 Records/<date>.md 占位文件；trash.md 为空。"""
         data = _tmp_data_dir() / "state.json"
         store = Store(data)
         records_dir = data.parent / "Records"
-        trash_dir = data.parent / "Trash"
 
-        store.render_records(records_dir, trash_dir)
+        store.render_records(records_dir)
 
         self.assertFalse((records_dir / f"{_today()}.md").exists())
-        self.assertFalse((trash_dir / f"{_today()}.md").exists())
+        self.assertEqual("", (records_dir / "trash.md").read_text(encoding="utf-8"))
 
     def test_render_records_does_not_touch_history_files(self):
         """render_records 只渲染今天：历史/旧格式整文件不被重排/重写。"""
@@ -371,7 +373,7 @@ class StoreRenderTest(unittest.TestCase):
         legacy = records_dir / "2000-01-01.md"
         legacy.write_text("# 2000-01-01\n\n旧格式 **08:00:** 内容\n", encoding="utf-8")
 
-        store.render_records(records_dir, data.parent / "Trash")
+        store.render_records(records_dir)
 
         self.assertEqual(legacy.read_text(encoding="utf-8"), "# 2000-01-01\n\n旧格式 **08:00:** 内容\n")
 
@@ -386,7 +388,7 @@ class StoreRenderTest(unittest.TestCase):
             encoding="utf-8",
         )
 
-        store.render_records(records_dir, data.parent / "Trash")
+        store.render_records(records_dir)
 
         content = (records_dir / f"{_today()}.md").read_text(encoding="utf-8")
         self.assertIn("已有总结", content)
@@ -430,7 +432,7 @@ class StoreRenderTest(unittest.TestCase):
         datetime.date.fromisoformat(stored_date)  # 必须可解析为合法日期
 
         records = _tmp_data_dir() / "Records"
-        store.render_records(records, records.parent / "Trash")
+        store.render_records(records)
         self.assertFalse((records.parent / "escape.md").exists())
 
 
@@ -440,7 +442,7 @@ class StoreSealPreviousDayTest(unittest.TestCase):
     def test_seal_purges_stale_dates_and_preserves_history_files(self):
         data = _tmp_data_dir() / "state.json"
         records_dir = data.parent / "Records"
-        store = Store(data, records_dir, data.parent / "Trash")
+        store = Store(data, records_dir)
         # 模拟“昨天”的条目已入库（进程运行到昨天），强制其 date=昨天
         store._today = _today()  # 无日界
         yesterday = (
@@ -495,9 +497,9 @@ class StoreSealPreviousDayTest(unittest.TestCase):
         封存清理历史日条目态后，历史设备名随之消失（不再通过 seen_devices 额外缓存保留）。
         """
         data = _tmp_data_dir() / "state.json"
-        # 传入 records_dir/trash_dir：封存先渲染历史日文件再清理条目态（真正验证“历史日
+        # 传入 records_dir：封存先渲染历史日文件再清理条目态（真正验证“历史日
         # 设备名随条目态清理而消失”的语义；无落盘目录时封存会跳过清理、不丢数据）。
-        store = Store(data, data.parent / "Records", data.parent / "Trash")
+        store = Store(data, data.parent / "Records")
         store._today = _today()  # 无日界，便于注入“昨天”条目
         yesterday = (
             datetime.date.fromisoformat(_today()) - datetime.timedelta(days=1)
@@ -516,12 +518,12 @@ class StoreSealPreviousDayTest(unittest.TestCase):
 
 
 class StoreImmediateRenderTest(unittest.TestCase):
-    """构造时传入 records_dir/trash_dir 后，写操作应立即渲染对应日期文件（即时落盘）。"""
+    """构造时传入 records_dir 后，写操作应立即渲染对应日期文件与 trash.md（即时落盘）。"""
 
     def test_append_entries_renders_date_immediately(self):
         data = _tmp_data_dir() / "state.json"
         records_dir = data.parent / "Records"
-        store = Store(data, records_dir, data.parent / "Trash")
+        store = Store(data, records_dir)
 
         store.append_entries(
             "a",
@@ -536,7 +538,7 @@ class StoreImmediateRenderTest(unittest.TestCase):
     def test_tombstone_overwrites_date_file_immediately(self):
         data = _tmp_data_dir() / "state.json"
         records_dir = data.parent / "Records"
-        store = Store(data, records_dir, data.parent / "Trash")
+        store = Store(data, records_dir)
         store.append_entries(
             "a",
             [{"entry_id": "a-1", "date": _today(), "ts": _today_ts(8), "tag": "", "text": "将被删"}],
@@ -549,13 +551,13 @@ class StoreImmediateRenderTest(unittest.TestCase):
         content = target.read_text(encoding="utf-8")
         self.assertNotIn("将被删", content)
         self.assertIn("myrecord-tombstone", content)
-        trash = (data.parent / "Trash" / f"{_today()}.md").read_text(encoding="utf-8")
+        trash = (records_dir / "trash.md").read_text(encoding="utf-8")
         self.assertIn("将被删", trash)
 
     def test_append_rejects_history_without_rendering(self):
         data = _tmp_data_dir() / "state.json"
         records_dir = data.parent / "Records"
-        store = Store(data, records_dir, data.parent / "Trash")
+        store = Store(data, records_dir)
         accepted, rejected = store.append_entries(
             "a",
             [{"entry_id": "old-1", "date": "2000-01-01", "ts": 946684800000, "tag": "", "text": "old"}],
@@ -568,6 +570,64 @@ class StoreImmediateRenderTest(unittest.TestCase):
         store = Store(data)
         store.append_entries("a", [{"entry_id": "a-1", "date": _today(), "ts": _today_ts(8), "tag": "", "text": "x"}])
         self.assertFalse((data.parent / "Records" / f"{_today()}.md").exists())
+
+
+class StoreDeleteTest(unittest.TestCase):
+    """apply_deletes：客户端发起的 id 级删除（可离线），正文入垃圾桶、墓碑防复活。"""
+
+    def _store(self, data):
+        return Store(data, data.parent / "Records")
+
+    def test_apply_deletes_tombstones_and_trashes_body(self):
+        data = _tmp_data_dir() / "state.json"
+        store = self._store(data)
+        store.append_entries(
+            "a", [{"entry_id": "a-1", "date": _today(), "ts": _today_ts(8), "tag": "", "text": "将被删"}]
+        )
+        accepted, rejected = store.apply_deletes(
+            "b", [{"entry_id": "a-1", "date": _today(), "entry": {"ts": _today_ts(8)}}]
+        )
+        self.assertEqual(accepted, ["a-1"])
+        self.assertEqual(rejected, [])
+        self.assertNotIn("a-1", store.data["entries"])
+        self.assertIn("a-1", store.data["tombstones"])
+        self.assertEqual(store.data["trash"]["a-1"]["text"], "将被删")
+        trash = (data.parent / "Records" / "trash.md").read_text(encoding="utf-8")
+        self.assertIn("将被删", trash)
+
+    def test_apply_deletes_unknown_id_with_body(self):
+        """离线新建、从未推送就删除：服务端从未有过该条，凭 payload 正文进垃圾桶 + 墓碑。"""
+        data = _tmp_data_dir() / "state.json"
+        store = self._store(data)
+        entry = {"entry_id": "ghost-1", "date": _today(), "ts": _today_ts(8), "tag": "", "text": "幽灵"}
+        accepted, rejected = store.apply_deletes(
+            "b", [{"entry_id": "ghost-1", "date": _today(), "entry": entry}]
+        )
+        self.assertEqual(accepted, ["ghost-1"])
+        self.assertIn("ghost-1", store.data["tombstones"])
+        self.assertEqual(store.data["trash"]["ghost-1"]["text"], "幽灵")
+
+    def test_apply_deletes_rejects_history_date(self):
+        data = _tmp_data_dir() / "state.json"
+        store = self._store(data)
+        accepted, rejected = store.apply_deletes(
+            "b", [{"entry_id": "old-1", "date": "2000-01-01", "entry": {"ts": 1}}]
+        )
+        self.assertEqual(accepted, [])
+        self.assertEqual(rejected, ["old-1"])
+        self.assertEqual(store.data["tombstones"], {})
+
+    def test_apply_deletes_idempotent(self):
+        data = _tmp_data_dir() / "state.json"
+        store = self._store(data)
+        store.append_entries(
+            "a", [{"entry_id": "a-1", "date": _today(), "ts": _today_ts(8), "tag": "", "text": "x"}]
+        )
+        item = {"entry_id": "a-1", "date": _today(), "entry": {"ts": _today_ts(8)}}
+        store.apply_deletes("b", [item])
+        accepted, _ = store.apply_deletes("b", [item])
+        self.assertEqual(accepted, ["a-1"])
+        self.assertEqual(len(store.data["tombstones"]), 1)
 
 
 class AdminEndpointTest(unittest.TestCase):
@@ -666,34 +726,48 @@ class ServerHttpTest(unittest.TestCase):
         self.assertEqual(body["rejected"], ["old-1"])
         self.assertEqual(self.store.data["entries"], {})
 
+    def test_push_with_deletes_tombstones_and_trashes(self):
+        self._push_one({"entry_id": "a-1", "date": _today(), "ts": _today_ts(8), "tag": "", "text": "x"})
+        resp = requests.post(
+            f"{self.base}/api/sync/push",
+            headers=self.headers,
+            json={
+                "entries": [],
+                "deletes": [
+                    {
+                        "entry_id": "a-1",
+                        "date": _today(),
+                        "entry": {
+                            "entry_id": "a-1",
+                            "date": _today(),
+                            "ts": _today_ts(8),
+                            "tag": "",
+                            "text": "x",
+                        },
+                    }
+                ],
+            },
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertIn("a-1", body["accepted"])
+        self.assertEqual(self.store.data["entries"], {})
+        self.assertIn("a-1", self.store.data["tombstones"])
+
+    def test_push_rejects_expired_delete_batch(self):
+        resp = requests.post(
+            f"{self.base}/api/sync/push",
+            headers=self.headers,
+            json={"entries": [], "deletes": [{"entry_id": "old-1", "date": "2000-01-01"}]},
+        )
+        self.assertEqual(resp.status_code, 422)
+        self.assertEqual(resp.json()["rejected"], ["old-1"])
+        self.assertEqual(self.store.data["tombstones"], {})
+
     def test_unauthorized(self):
         bad = {"Authorization": "Bearer wrong", "X-Device-Id": self.device_id}
         resp = requests.get(f"{self.base}/api/sync/pull?version=0", headers=bad)
         self.assertEqual(resp.status_code, 401)
-
-    def test_delete_only_today(self):
-        self._push_one({"entry_id": "a-1", "date": _today(), "ts": _today_ts(8), "tag": "", "text": "x"})
-        self._push_one({"entry_id": "b-1", "date": _today(), "ts": _today_ts(9), "tag": "", "text": "y"})
-        resp = requests.post(
-            f"{self.base}/api/entries/delete",
-            headers=self.headers,
-            json={"date": _today()},
-        )
-        self.assertEqual(resp.status_code, 200)
-        body = resp.json()
-        self.assertEqual(body["deleted"], "b-1")
-        pull = requests.get(f"{self.base}/api/sync/pull?version=0", headers=self.headers)
-        self.assertEqual(pull.json()["tombstones"][0]["entry_id"], "b-1")
-
-    def test_delete_history_date_returns_none(self):
-        """删除历史日：服务端不返回可删条目（今天之外只读）。"""
-        resp = requests.post(
-            f"{self.base}/api/entries/delete",
-            headers=self.headers,
-            json={"date": "2000-01-01"},
-        )
-        self.assertEqual(resp.status_code, 200)
-        self.assertIsNone(resp.json()["deleted"])
 
     def test_longpoll_fanout(self):
         result = {}
@@ -730,14 +804,13 @@ class ServerHttpTest(unittest.TestCase):
 
 
 class RecordsEndpointTest(unittest.TestCase):
-    """GET /api/records（列表）与 /api/records/<date>（整文件回传）。"""
+    """GET /api/records（列表）与 /api/records/<name>（整文件回传，name=日期或 trash）。"""
 
     def setUp(self):
         self._dir = _tmp_data_dir()
         records_dir = self._dir / "Records"
-        trash_dir = self._dir / "Trash"
         records_dir.mkdir(parents=True, exist_ok=True)
-        self.store = Store(self._dir / "state.json", records_dir, trash_dir)
+        self.store = Store(self._dir / "state.json", records_dir)
         token = auth.new_token()
         self.device_id = self.store.register_device("records-test", token)
         self.token = token
@@ -800,6 +873,43 @@ class RecordsEndpointTest(unittest.TestCase):
         self.assertIn("2000-01-01", files)
         self.assertIn("2000-01-02", files)
         self.assertEqual("", files["2000-01-02"])
+
+    def test_records_manifest_includes_trash_and_file_fetch(self):
+        """单文件垃圾桶在 sha256 清单里单独一项，且可整文件拉取。"""
+        self.store.append_entries(
+            "a", [{"entry_id": "a-1", "date": _today(), "ts": _today_ts(8), "tag": "", "text": "待删正文"}]
+        )
+        self.store.tombstone("a-1", "a")  # 删除即渲染 Records/trash.md
+        listed = requests.get(f"{self.base}/api/records", headers=self.headers)
+        self.assertEqual(listed.status_code, 200)
+        self.assertIn("trash", listed.json())
+        self.assertEqual(len(listed.json()["trash"]), 64)
+        # trash 不出现在日期 files 列表里（它不是日期名）
+        self.assertNotIn("trash", {f["date"] for f in listed.json()["files"]})
+        resp = requests.get(f"{self.base}/api/records/trash", headers=self.headers)
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("待删正文", resp.text)
+
+    def test_status_counts_follow_records_file(self):
+        """/status 计数以今天 Records 文件为准：用户直接编辑文件后计数随之变化。"""
+        self.store.append_entries(
+            "a",
+            [{"entry_id": "a-1", "date": _today(), "ts": _today_ts(8), "tag": "", "text": "原记录"}],
+        )
+        before = requests.get(f"{self.base}/api/status", headers=self.headers).json()
+        self.assertEqual(before["entry_count"], 1)
+        self.assertEqual(before["tombstone_count"], 0)
+
+        # 绕过 state.json 直接编辑今天文件：追加一条新条目 + 一条墓碑。
+        path = self._dir / "Records" / f"{_today()}.md"
+        content = path.read_text(encoding="utf-8")
+        content += "<!-- myrecord-time:manual-1 -->\n**09:00:** 手工补充\n\n"
+        content += "<!-- myrecord-tombstone-time:a-1 -->\n"
+        path.write_text(content, encoding="utf-8")
+
+        after = requests.get(f"{self.base}/api/status", headers=self.headers).json()
+        self.assertEqual(after["entry_count"], 2)
+        self.assertEqual(after["tombstone_count"], 1)
 
 
 if __name__ == "__main__":

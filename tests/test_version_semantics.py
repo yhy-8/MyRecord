@@ -1,13 +1,14 @@
-"""hub/server.py 的 version 语义测试（读端点 vs 写端点）。
+"""hub/server.py 的同步令牌语义测试（游标已降级为「变更令牌 revision」）。
 
-设计基线 §4：version 是服务端全局单调递增游标。
+设计基线 §4：``version`` 不再是数据筛选游标，而是服务端单调递增的**变更令牌**：
 
-- **读端点**（pull / longpoll）：version 是请求输入；缺失/为空回退 0（全量）；
-  传入**非数字** version → 400。
-- **写端点**（push / delete）：version 只是辅助游标，主操作不依赖它；
-  非法/缺失回退 0（全量），保证 gap-free。
+- **读端点**（pull）：始终返回「今天」全量（游标不参与筛选）；缺失/为空回退 0，
+  传入**非数字** version 仍返回 400（无法解析为合法令牌）。
+- **长轮询**（longpoll）：令牌是「自上次询问后变了没」的输入；非数字 → 400；
+  令牌落后即有变化则立即返回今天全量，无变化则挂起至超时并返回空增量。
+- **写端点**（push / delete）：令牌仅作辅助，主操作不依赖它；写端点直接返回今天全量。
 
-本模块用真实 ThreadingHTTPServer 走 HTTP 断言这些状态码与增量边界。
+本模块用真实 ThreadingHTTPServer 走 HTTP 断言这些状态码与全量语义。
 """
 
 import threading
@@ -76,15 +77,14 @@ class ServerVersionSemanticsTest(unittest.TestCase):
         self.assertEqual(r.status_code, 400)
         self.assertEqual(r.json()["error"], "bad version")
 
-    def test_pull_zero_then_increment(self):
-        # version=0 全量；再拉到最新 version 后 pull 应无新增
+    def test_pull_always_returns_full_today(self):
+        # 游标降级：无论传什么 version，pull 都返回今天全量（客户端按 id 幂等合并）
         self._push({"entry_id": "a-1", "date": today_utc8(), "ts": _ts(8), "text": "x"})
         r0 = requests.get(f"{self.base}/api/sync/pull?version=0", headers=self.h)
+        self.assertEqual([e["entry_id"] for e in r0.json()["entries"]], ["a-1"])
         v = r0.json()["version"]
-        self.assertTrue(v >= 1)
         r_after = requests.get(f"{self.base}/api/sync/pull?version={v}", headers=self.h)
-        self.assertEqual(r_after.json()["entries"], [])
-        self.assertEqual(r_after.json()["tombstones"], [])
+        self.assertEqual([e["entry_id"] for e in r_after.json()["entries"]], ["a-1"])
 
     def test_live_pull_returns_latest_version(self):
         self._push({"entry_id": "a-1", "date": today_utc8(), "ts": _ts(8), "text": "x"})
@@ -116,19 +116,6 @@ class ServerVersionSemanticsTest(unittest.TestCase):
         )
         self.assertEqual(r.status_code, 200)
         self.assertIn("a-1", {e["entry_id"] for e in r.json()["entries"]})
-
-    def test_delete_missing_version_returns_full_gap_free(self):
-        self._push({"entry_id": "a-1", "date": today_utc8(), "ts": _ts(8), "text": "x"}, version=0)
-        self._push({"entry_id": "b-1", "date": today_utc8(), "ts": _ts(9), "text": "y"}, version=0)
-        r = requests.post(
-            f"{self.base}/api/entries/delete", headers=self.h,
-            json={"date": today_utc8()},
-        )
-        self.assertEqual(r.status_code, 200)
-        body = r.json()
-        # 删除产生墓碑；缺失 version 回退全量，应把全部增量（条目+墓碑）下发
-        self.assertEqual(body["deleted"], "b-1")
-        self.assertTrue(any(t["entry_id"] == "b-1" for t in body.get("tombstones", [])))
 
     def test_push_bad_request_when_entries_not_a_list(self):
         r = requests.post(f"{self.base}/api/sync/push", headers=self.h,

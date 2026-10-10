@@ -67,8 +67,8 @@ python -m server.main deploy            一键安装并启动 systemd 服务（�
 
 | 文件 | 职责 |
 |---|---|
-| `hub/server.py` | HTTP 同步服务（stdlib ThreadingHTTPServer）：`/api/sync/push`、`/api/sync/pull`、`/api/sync/longpoll`、`/api/entries/delete`、`/api/records`、`/api/records/<date>`（历史日整文件拉取）、`/api/status`、`/api/reports`、`/api/admin/*`、`/api/health`；Bearer + device_id 鉴权 |
-| `hub/store.py` | 权威存储：`state.json` **仅“今天”**的条目/tombstone/垃圾桶/设备令牌/全局 `version` 游标；append-only 合并（按 entry_id 去重，仅今天）、`wait_for_change`（长轮询）、`pull(version)`（仅今天增量）、历史日整文件回传 |
+| `hub/server.py` | HTTP 同步服务（stdlib ThreadingHTTPServer）：`/api/sync/push`（收条目与删除）、`/api/sync/pull`、`/api/sync/longpoll`、`/api/records`（历史日 + 单文件垃圾桶哈希清单）、`/api/records/<name>`（日期或 `trash` 整文件拉取）、`/api/status`、`/api/reports`、`/api/admin/*`、`/api/health`；Bearer + device_id 鉴权 |
+| `hub/store.py` | 权威存储：`state.json` **仅“今天”**的条目/tombstone/垃圾桶账本/设备令牌/变更令牌 `version`；`append_entries`（按 entry_id 去重）、`apply_deletes`（按 entry_id 写墓碑 + 正文入垃圾桶）、`wait_for_change`（长轮询）、`pull`（今天全量）、历史日整文件回传；单文件垃圾桶渲染成 `Records/trash.md` |
 | `hub/auth.py` | 链接凭证令牌哈希（scrypt，加盐、常量时间），只存哈希，不落明文 |
 | `hub/atomic_write.py` | 原子文件写入（服务端自带小工具，与客户端各自独立） |
 | `hub/render.py` | 日记文件格式（新格式；客户端独立镜像同款格式，由测试锁齐）：渲染 entry 标记、tombstone 占位、`<summary>` 区域；**不再解析旧格式/裸记录**（历史日整文件为准） |
@@ -146,8 +146,8 @@ sudo python -m server.main deploy
 - `myrecord-server.service` — 服务端单元（`deploy` 自动生成/写入；此文件为等价参照）。
 - `backup.sh` — 备份 `data` 空间为 tar（保留最近 N 份；服务端内置调度与手动/cron 均调用它）。
 
-数据空间(运行时生成):`server/data/` - `state.json`（**仅“今天”**的条目/设备/垃圾桶/version 游标）、
-`Records/`（权威每日日记；历史日整文件为准，可承载旧格式）、`Trash/`（被删正文）、`AnalysisReports/`（报告与自动任务状态）、
+数据空间(运行时生成):`server/data/` - `state.json`（**仅“今天”**的条目/tombstone/垃圾桶账本/设备/变更令牌 version）、
+`Records/`（权威每日日记；历史日整文件为准，可承载旧格式；`trash.md` 为单文件垃圾桶，进 sha256 同步清单）、`AnalysisReports/`（报告与自动任务状态）、
 `Log/`（服务端日志）。
 
 ## 数据与安全
@@ -160,7 +160,10 @@ sudo python -m server.main deploy
   **服务端自签证书（自签公钥）**，客户端首次连接 TOFU 确认后固定该证书、不校验 IP/主机名（自签直连，
   无需反向代理）。证书 SAN 对客户端非必需，仅浏览器/curl 等按主机名校验的客户端需要（`deploy`
   生成时会交互询问并写入）。
-- **服务端记录详细日志**到 `data/Log/MyRecord.log`：客户端连接/鉴权、对日志的推送与在线删除、AI 报告
+- **直连 TLS 的健壮性**：TLS 握手延迟到每个连接的工作线程执行（并有 10s 超时），accept 主循环
+  不会因只建 TCP 不握手的半开连接（睡眠/掉线/NAT 超时/端口扫描）而卡死；HTTP 走 **HTTP/1.1
+  keep-alive**，客户端可复用同一条连接发多个请求（长连接），空闲连接有 socket 超时回收。
+- **服务端记录详细日志**到 `data/Log/MyRecord.log`：客户端连接/鉴权、推送与删除、AI 报告
   生成成败与每步 Agent 调用、自动任务重试；不记录日记正文、模型密钥、token 明文。
 - 模型密钥只在服务端；不入数据空间、不入日志。
 - 日记文件统一使用 `<!-- myrecord-* -->` 条目/删除标记（新格式）。仅“今天”条目按此解析/合并；

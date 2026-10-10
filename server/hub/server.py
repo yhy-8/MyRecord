@@ -1,13 +1,12 @@
 """HTTP 同步服务（stdlib ThreadingHTTPServer，无第三方框架）。
 
 路由：
-- POST /api/sync/push        推送新条目 {entries, version}（**仅今天**；历史日被拒绝 422）
-- GET  /api/sync/pull?version=N  拉取增量（**仅今天**）
-- GET  /api/sync/longpoll?version=N 长轮询增量（扇出；**仅今天**）
-- POST /api/entries/delete   在线删除当天最新一条 {date}（**仅今天**）
-- GET  /api/status           中心状态
-- GET  /api/records          云端已有历史日哈希清单（date + sha256）
-- GET  /api/records/<date>   该日 Records/<date>.md 整文件原文（历史日整文件同步）
+- POST /api/sync/push        推送新条目/删除 {entries, deletes}（**仅今天**；历史日被拒绝 422）
+- GET  /api/sync/pull?version=N  拉取今天全量（游标仅作变更令牌，不筛选数据）
+- GET  /api/sync/longpoll?version=N 长轮询扇出（令牌落后且有变化即返回全量）
+- GET  /api/status           中心状态（计数从今天的 Records 文件解析）
+- GET  /api/records          哈希清单（历史日 date+sha256 + 单文件垃圾桶 trash）
+- GET  /api/records/<name>   Records/<name>.md 整文件原文（日期或 trash）
 - GET  /api/reports[?kind=...] 报告哈希清单（rel + sha256）
 - GET  /api/reports/<kind>/<name> 报告内容
 - GET  /api/health
@@ -20,12 +19,21 @@ import hashlib
 import json
 import logging
 import re
+import ssl
+import sys
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 
 logger = logging.getLogger(__name__)
+
+# TLS 握手超时：只建了 TCP 却不握手的半开连接（客户端睡眠/掉线、端口扫描）必须在有限
+# 时间内放弃，绝不能阻塞 accept 主循环（见 SyncHandler.setup 的延迟握手）。
+_TLS_HANDSHAKE_TIMEOUT = 10.0
+# 单条连接的 socket 超时：空闲 keep-alive 连接与慢请求读取超过该值即关闭、释放工作线程。
+# 长轮询的服务端 25 秒挂起期间不进行 socket 读，因此不受此超时影响。
+_REQUEST_TIMEOUT = 35.0
 
 
 _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -94,22 +102,6 @@ def _authed(method):
 _LOCKOUT_THRESHOLD = 5
 
 
-def _write_response_version(value: object) -> int:
-    """写操作（push/delete）响应的增量游标：优先用客户端传来的 version，
-    非法/缺失时回退到 0（全量）。
-
-    push/delete 的主操作（入库 / 删墓碑）不依赖 version，version 只决定响应里
-    返回哪段增量。非法/缺失时回退 0 会多返回一次，但保证 gap-free：即使客户端
-    游标未知或落后，也不会漏掉中间条目。
-    """
-    if value is None:
-        return 0
-    try:
-        return max(0, int(value))
-    except (TypeError, ValueError):
-        return 0
-
-
 def _read_json(handler) -> dict | None:
     length = int(handler.headers.get("Content-Length", 0) or 0)
     raw = handler.rfile.read(length) if length else b""
@@ -124,7 +116,41 @@ def _device_id(handler) -> str:
     return handler.headers.get("X-Device-Id", "")
 
 
+class _SyncHTTPServer(ThreadingHTTPServer):
+    """ThreadingHTTPServer + 延迟 TLS 握手开关 + 精简错误日志。
+
+    daemon_threads=True（ThreadingHTTPServer 默认），工作线程不阻塞进程退出。
+    """
+
+    tls_deferred = False
+
+    def handle_error(self, request, client_address):
+        # 默认实现把完整 traceback 打到 stderr；半开连接/端口扫描会不断刷屏。
+        # 这里只记一行简明原因（异常仍在 sys.exc_info() 中）。
+        logger.warning(
+            "request_error addr=%s error=%s", client_address, sys.exc_info()[1]
+        )
+
+
 class SyncHandler(BaseHTTPRequestHandler):
+    # HTTP/1.1 允许 keep-alive：客户端一次 TLS 握手后可复用同一条连接发多个请求
+    # （长连接），不必每条记录、每次拉取都重做一次 TLS 握手。
+    protocol_version = "HTTP/1.1"
+    timeout = _REQUEST_TIMEOUT
+
+    def setup(self):
+        # 延迟 TLS 握手到工作线程执行：serve() 用 do_handshake_on_connect=False 包裹
+        # 监听 socket，accept 返回后不再做握手。否则任一客户端只建 TCP 不握手（睡眠、
+        # 掉线、NAT 超时、端口扫描）都会把 accept 主循环卡死，整个服务端假死到重启。
+        if getattr(self.server, "tls_deferred", False):
+            self.request.settimeout(_TLS_HANDSHAKE_TIMEOUT)
+            try:
+                self.request.do_handshake()
+            except (OSError, ssl.SSLError):
+                # 由 _SyncHTTPServer.handle_error 统一记录一行简明原因后关闭连接。
+                raise
+        super().setup()
+
     def log_message(self, fmt, *args):  # 静默访问日志
         pass
 
@@ -182,8 +208,6 @@ class SyncHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/api/sync/push":
             return self._push()
-        if parsed.path == "/api/entries/delete":
-            return self._delete()
         if parsed.path == "/api/admin/retry":
             return self._admin_retry()
         if parsed.path == "/api/admin/model":
@@ -195,35 +219,40 @@ class SyncHandler(BaseHTTPRequestHandler):
     @_authed
     def _push(self):
         body = _read_json(self)
-        if body is None or not isinstance(body.get("entries"), list):
+        if body is None or not isinstance(body.get("entries", []), list):
             return self._send_json(400, {"error": "bad request"})
         store = self.server.store
         device = _device_id(self)
-        entries = body["entries"] or []
+        entries = body.get("entries") or []
+        deletes = body.get("deletes") or []
         accepted, rejected = store.append_entries(device, entries)
+        delete_accepted, delete_rejected = store.apply_deletes(device, deletes)
+        accepted = accepted + delete_accepted
+        rejected = rejected + delete_rejected
         logger.info(
-            "sync_push device=%s sent=%d accepted=%d rejected=%d version=%d",
+            "sync_push device=%s entries=%d deletes=%d accepted=%d rejected=%d version=%d",
             device,
             len(entries),
+            len(deletes),
             len(accepted),
             len(rejected),
             store.data["version"],
         )
         if rejected:
-            # 批次内含历史日/异常条目：服务器「已处理但未入库」，客户端应作废这些 id，不要重试。
+            # 批次内含历史日/异常条目或删除：服务器「已处理但未入库」，
+            # 客户端应作废这些 id，不要重试。
             return self._send_json(
                 422,
-                {"ok": False, "error": "expired", "rejected": rejected},
+                {"ok": False, "error": "expired", "rejected": rejected, "accepted": accepted},
             )
-        after_version = _write_response_version(body.get("version"))
-        delta = store.pull(after_version)
+        # 游标已降级：写端点不再下发“增量”，直接返回今天全量（客户端按 entry_id 幂等合并）。
+        state = store.today_state()
         self._send_json(
             200,
             {
                 "ok": True,
                 "accepted": accepted,
-                "version": store.data["version"],
-                **delta,
+                **state,
             },
         )
 
@@ -261,61 +290,24 @@ class SyncHandler(BaseHTTPRequestHandler):
         )
         self._send_json(200, delta)
 
-    # ---------- 删除 ----------
-
-    @_authed
-    def _delete(self):
-        body = _read_json(self)
-        if body is None:
-            return self._send_json(400, {"error": "bad request"})
-        date = str(body.get("date") or "")
-        store = self.server.store
-        entry = store.latest_entry_for_date(date)
-        if entry is None:
-            logger.info("sync_delete device=%s date=%s deleted=none", _device_id(self), date)
-            return self._send_json(
-                200,
-                {"ok": True, "deleted": None, "version": store.data["version"]},
-            )
-        store.tombstone(entry["entry_id"], _device_id(self))
-        # 删除只影响当天最新一条。用客户端传来的游标做 gap-free 增量：只返回客户端
-        # 缺失的部分（含本删除产生的墓碑），不重复下发客户端已持有的条目。
-        # 客户端未带/非法 version 时回退到全量对账（见 _write_response_version），仍保证无缺口。
-        after_version = _write_response_version(body.get("version"))
-        logger.info(
-            "sync_delete device=%s date=%s deleted=%s version=%d after=%d",
-            _device_id(self),
-            date,
-            entry["entry_id"],
-            store.data["version"],
-            after_version,
-        )
-        self._send_json(
-            200,
-            {
-                "ok": True,
-                "deleted": entry["entry_id"],
-                "version": store.data["version"],
-                **store.pull(after_version),
-            },
-        )
-
     # ---------- 状态 ----------
 
     @_authed
     def _status(self):
-        snapshot = self.server.store.snapshot()
+        # 计数以「今天」的 Records 文件为准（而非 state.json 内存副本）：用户直接编辑
+        # 日记文件后，/status 立即反映文件真实内容，不会因 state 与文件不一致而失真。
+        entry_count, tombstone_count = self.server.store.today_file_counts()
         logger.info(
             "status_request device=%s entries=%d tombstones=%d",
             _device_id(self),
-            len(snapshot["entries"]),
-            len(snapshot["tombstones"]),
+            entry_count,
+            tombstone_count,
         )
         self._send_json(
             200,
             {
-                "entry_count": len(snapshot["entries"]),
-                "tombstone_count": len(snapshot["tombstones"]),
+                "entry_count": entry_count,
+                "tombstone_count": tombstone_count,
                 "devices": {
                     name: {} for name in self.server.store.device_names()
                 },
@@ -328,16 +320,17 @@ class SyncHandler(BaseHTTPRequestHandler):
 
     @_authed
     def _records_list(self):
-        """GET /api/records：返回云端已有历史日哈希清单（date + sha256）。
+        """GET /api/records：返回 Records 下历史日哈希清单（date+sha256）与单文件垃圾桶哈希。
 
         清单即权威全集：客户端据此对每个历史日算本地哈希比对，仅哈希不同才下载整文件。
+        ``Records/trash.md``（单文件垃圾桶）作为清单的一个成员单独返回哈希（``trash`` 字段），
+        客户端整文件对账；它不按日期命名，不进入 ``files`` 的日期列表。
         """
         store = self.server.store
         records_dir = store.records_dir
-        if not records_dir or not records_dir.is_dir():
-            files = []
-        else:
-            files = []
+        files = []
+        trash_digest = None
+        if records_dir and records_dir.is_dir():
             for path in sorted(records_dir.glob("*.md")):
                 # 对规范化后的文本取哈希（read_text 统一 \r\n -> \n），与
                 # _records_file 下发的字节表示（content.encode("utf-8")）一致，
@@ -350,30 +343,45 @@ class SyncHandler(BaseHTTPRequestHandler):
                         path.read_text(encoding="utf-8").encode("utf-8")
                     ).hexdigest()
                 except (OSError, UnicodeError):
-                    logger.warning("records_list_unreadable date=%s", path.stem)
+                    logger.warning("records_list_unreadable name=%s", path.stem)
                     digest = ""
+                if path.stem == "trash":
+                    trash_digest = digest
+                    continue
                 files.append({"date": path.stem, "sha256": digest})
-        logger.info("records_list device=%s count=%d", _device_id(self), len(files))
-        self._send_json(200, {"files": files})
+        logger.info(
+            "records_list device=%s count=%d trash=%s",
+            _device_id(self),
+            len(files),
+            trash_digest is not None,
+        )
+        payload = {"files": files}
+        if trash_digest is not None:
+            payload["trash"] = trash_digest
+        self._send_json(200, payload)
 
     @_authed
     def _records_file(self, path):
-        """GET /api/records/<date>：返回该日 Records/<date>.md 整文件原文（历史日整文件同步）。
+        """GET /api/records/<name>：返回 Records/<name>.md 整文件原文。
 
-        校验 date 为合法 YYYY-MM-DD（防路径穿越），存在则原样回传；不存在返回 404。
-        该文件是权威文件（可承载旧格式），原样回传，不解析、不重排。
+        ``name`` 为合法 YYYY-MM-DD（历史日整文件同步）或特殊名 ``trash``（单文件垃圾桶）。
+        校验防止路径穿越，存在则原样回传；不存在返回 404。文件是权威内容（可承载旧格式），
+        原样回传，不解析、不重排。
         """
-        date = path[len("/api/records/"):].strip("/")
-        if not _valid_iso_date(date):
-            return self._send_json(400, {"error": "bad date"})
+        name = path[len("/api/records/"):].strip("/")
         store = self.server.store
         records_dir = store.records_dir
         if records_dir is None:
             return self._send_json(404, {"error": "not found"})
-        target = (records_dir / f"{date}.md").resolve()
+        if name == "trash":
+            target = (records_dir / "trash.md").resolve()
+        else:
+            if not _valid_iso_date(name):
+                return self._send_json(400, {"error": "bad date"})
+            target = (records_dir / f"{name}.md").resolve()
         if not target.is_relative_to(records_dir.resolve()) or not target.is_file():
             logger.info(
-                "records_file device=%s date=%s status=404", _device_id(self), date
+                "records_file device=%s name=%s status=404", _device_id(self), name
             )
             return self._send_json(404, {"error": "not found"})
         try:
@@ -381,7 +389,7 @@ class SyncHandler(BaseHTTPRequestHandler):
         except (OSError, UnicodeError):
             return self._send_json(500, {"error": "read failed"})
         logger.info(
-            "records_file device=%s date=%s bytes=%d", _device_id(self), date, len(content)
+            "records_file device=%s name=%s bytes=%d", _device_id(self), name, len(content)
         )
         data = content.encode("utf-8")
         self.send_response(200)
@@ -460,10 +468,15 @@ def serve(
     status_ai=None,
     ssl_context=None,
 ):
-    server = ThreadingHTTPServer((host, port), SyncHandler)
+    server = _SyncHTTPServer((host, port), SyncHandler)
     if ssl_context is not None:
-        # 用自签证书直连 TLS：把监听 socket 包成 TLS，客户端用 verify 校验证书
-        server.socket = ssl_context.wrap_socket(server.socket, server_side=True)
+        # 用自签证书直连 TLS：把监听 socket 包成 TLS，客户端用 verify 校验证书。
+        # do_handshake_on_connect=False 让 accept 不在主循环里做握手，改由工作线程
+        # 在 SyncHandler.setup 中限时握手——避免半开连接卡死 accept 主循环。
+        server.socket = ssl_context.wrap_socket(
+            server.socket, server_side=True, do_handshake_on_connect=False
+        )
+        server.tls_deferred = True
     server.store = store
     server.list_reports = list_reports or (lambda kind: [])
     server.read_report = read_report or (lambda rel: None)

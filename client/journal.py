@@ -59,6 +59,11 @@ def day_path(date: str):
     return records_dir() / f"{date}.md"
 
 
+def trash_path():
+    """单文件垃圾桶 ``Records/trash.md``（全部已删正文，按时间戳排序，永不清理）。"""
+    return records_dir() / "trash.md"
+
+
 def ensure_day_file(date: str) -> None:
     path = day_path(date)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -206,11 +211,18 @@ def apply_delta(entries: list[dict], tombstones: list[dict]) -> None:
                 blocks.append(
                     (int(entry.get("ts", 0)), entry["entry_id"], entry_block(entry) + "\n")
                 )
-            # 墓碑：把对应条目块替换/补写为占位符，按原条目时间插回原位置
+            # 墓碑：把对应条目块替换/补写为占位符，按原条目时间插回原位置；
+            # 被移除的正文块同步并入本地垃圾桶（收到别端的删除也不丢正文）。
+            removed_trash = []
             for tombstone in tomb_by_date.get(date, []):
                 entry_id = tombstone["entry_id"]
                 if entry_id in existing_tombs:
                     continue  # 已存在占位符，幂等
+                removed_trash.extend(
+                    b[2]
+                    for b in blocks
+                    if b[1] == entry_id and b[2].lstrip().startswith(ENTRY_MARKER_PREFIX)
+                )
                 sort_ts = int(tombstone.get("entry_ts", tombstone.get("ts", 0)))
                 blocks = [b for b in blocks if b[1] != entry_id]
                 blocks.append((sort_ts, entry_id, tombstone_block(entry_id) + "\n"))
@@ -219,6 +231,7 @@ def apply_delta(entries: list[dict], tombstones: list[dict]) -> None:
             rebuilt = header + "".join(b[2] for b in blocks)
             if rebuilt != content:
                 atomic_write(path, rebuilt)
+            _append_trash_blocks(removed_trash)
 
 
 _SUMMARY_RE = re.compile(r"<summary>(.*?)</summary>", re.DOTALL)
@@ -262,6 +275,25 @@ def rebuild_records(entries: list[dict], tombstones: list[dict]) -> None:
                 continue
             ensure_day_file(date)
             path = day_path(date)
+            # 重建前先记下本地已有的条目块：服务端权威集合里“已墓碑、无活跃条目”的那些，
+            # 正文并入本地垃圾桶后再重建（收到别端删除不丢正文）。
+            previous_blocks = []
+            if path.exists():
+                try:
+                    previous_blocks = _split_day_blocks(
+                        path.read_text(encoding="utf-8"), date
+                    )[1]
+                except (OSError, UnicodeError):
+                    previous_blocks = []
+            server_entry_ids = {e["entry_id"] for e in by_date.get(date, [])}
+            tombstone_ids = {t["entry_id"] for t in tombs_by_date.get(date, [])}
+            removed_trash = [
+                block_text
+                for _ts, block_id, block_text in previous_blocks
+                if block_id in tombstone_ids
+                and block_id not in server_entry_ids
+                and block_text.lstrip().startswith(ENTRY_MARKER_PREFIX)
+            ]
             text = render.render_day_file(
                 date,
                 by_date.get(date, []),
@@ -269,6 +301,146 @@ def rebuild_records(entries: list[dict], tombstones: list[dict]) -> None:
                 summary=_existing_summary(path),
             )
             atomic_write(path, text)
+            _append_trash_blocks(removed_trash)
 
 
 
+
+
+# ---------- 本地解析 / 离线删除 / 单文件垃圾桶 ----------
+
+# 条目块：`<!-- myrecord-time:id -->` + 可选设备标记 + `**HH:MM [dev]:** 正文`。
+# 正文严格单行（render.entry_block 已保证），故用 MULTILINE + `$` 即可定位到行尾。
+_ENTRY_BLOCK_RE = re.compile(
+    r"^<!-- myrecord-time:(?P<id>[^>]+) -->\n"
+    r"(?:<!-- myrecord-device:(?P<devmark>[^>]+) -->\n)?"
+    r"\*\*(?P<hhmm>\d{2}:\d{2})(?: (?P<label>[^\n]*?))?:\*\* ?(?P<text>.*)$",
+    re.MULTILINE,
+)
+
+
+def _parse_entry_block(block: str, date: str) -> dict | None:
+    """把一条条目块解析回 entry dict；非条目块（墓碑/畸形）返回 None。
+
+    id 即毫秒时间戳（数字）时 ts = int(id)；导入的裸记录 id 非数字，则从块内
+    ``**HH:MM...:**`` 按 UTC+8 还原 ts（复用 _block_sort_ts 的还原逻辑）。
+    """
+    match = _ENTRY_BLOCK_RE.match(block.lstrip("\n"))
+    if not match:
+        return None
+    entry_id = match.group("id")
+    label = (match.group("label") or "").strip()
+    device_id = match.group("devmark") or ""
+    tag = ""
+    if label.startswith("[") and label.endswith("]"):
+        device_id = device_id or label[1:-1]
+    elif label:
+        tag = label
+    ts = int(entry_id) if entry_id.isdigit() else _block_sort_ts(entry_id, date, block)
+    return {
+        "entry_id": entry_id,
+        "device_id": device_id,
+        "date": date,
+        "ts": ts,
+        "tag": tag,
+        "text": match.group("text").strip(),
+    }
+
+
+def day_entries(date: str) -> list[dict]:
+    """解析某天文件里当前有效的条目（不含墓碑），按文件出现顺序返回。"""
+    path = day_path(date)
+    if not path.exists():
+        return []
+    try:
+        content = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return []
+    _, blocks = _split_day_blocks(content, date)
+    result = []
+    for _ts, _entry_id, block_text in blocks:
+        parsed = _parse_entry_block(block_text, date)
+        if parsed is not None:
+            result.append(parsed)
+    return result
+
+
+def latest_local_entry(date: str) -> dict | None:
+    """返回本地某天 ``(ts, entry_id)`` 最大的一条有效条目（供离线删除本地最新一条）。"""
+    entries = day_entries(date)
+    if not entries:
+        return None
+    return max(entries, key=lambda e: (e["ts"], e["entry_id"]))
+
+
+def _trash_sort_key(entry_id: str):
+    # 垃圾桶块按原条目时间排序；正常 id 即毫秒时间戳，裸记录 id 退化为按 id 排。
+    return (int(entry_id) if entry_id.isdigit() else 0, entry_id)
+
+
+def _append_trash_blocks(blocks: list[str]) -> None:
+    """把若干条目块并入单文件垃圾桶 ``Records/trash.md``（按时间戳排序、按 id 去重）。"""
+    cleaned = []
+    for block in blocks:
+        match = re.match(r"\s*<!-- myrecord-time:([^>]+) -->", block)
+        if not match:
+            continue
+        cleaned.append((_trash_sort_key(match.group(1)), block.strip("\n")))
+    if not cleaned:
+        return
+    path = trash_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existing = []
+    if path.exists():
+        try:
+            content = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            content = ""
+        matches = list(_BLOCK_START_RE.finditer(content))
+        for i, match in enumerate(matches):
+            start = match.start()
+            end = matches[i + 1].start() if i + 1 < len(matches) else len(content)
+            block_text = content[start:end].strip("\n")
+            if not block_text.startswith(ENTRY_MARKER_PREFIX):
+                continue  # 垃圾桶里不应有墓碑，防御性跳过
+            existing.append((_trash_sort_key(match.group(2)), block_text))
+    ids = {key[1] for key, _ in existing}
+    for key, block_text in cleaned:
+        if key[1] in ids:
+            continue
+        existing.append((key, block_text))
+        ids.add(key[1])
+    existing.sort(key=lambda item: item[0])
+    atomic_write(path, "".join(block + "\n" for _, block in existing))
+
+
+def delete_record(entry: dict) -> bool:
+    """离线删除本地某条：移除条目块、原位写墓碑、正文并入本地垃圾桶；返回是否真删除。
+
+    仅允许删“今天”。删除后墓碑/正文由上层入 outbox 并异步推送，服务端与其它端按
+    entry_id 幂等合并——因此离线删除完全可行，不再依赖“服务端认定的最新一条”。
+    """
+    date = entry.get("date", "")
+    if date != today_utc8():
+        return False
+    entry_id = entry["entry_id"]
+    with file_lock(records_dir() / ".journal.lock"):
+        path = day_path(date)
+        if not path.exists():
+            return False
+        content = path.read_text(encoding="utf-8")
+        if entry_id not in day_entry_ids(content):
+            return False
+        header, blocks = _split_day_blocks(content, date)
+        removed = [
+            block_text
+            for _ts, block_id, block_text in blocks
+            if block_id == entry_id and block_text.lstrip().startswith(ENTRY_MARKER_PREFIX)
+        ]
+        blocks = [item for item in blocks if item[1] != entry_id]
+        if entry_id not in day_tombstone_ids(content):
+            blocks.append((int(entry.get("ts", 0)), entry_id, tombstone_block(entry_id) + "\n"))
+        blocks.sort(key=lambda item: (item[0], item[1]))
+        atomic_write(path, header + "".join(item[2] for item in blocks))
+        _append_trash_blocks(removed)
+    return True

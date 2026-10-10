@@ -1,11 +1,12 @@
 """交互入口（统一单模式，共 /v /c /h /d /status /retry /model 七个命令）。
 
-同步规范：客户端不密集轮询云端，**同步是全自动、无感知的**。运行期间后台线程
-保持一条长连接（长轮询挂起，扇出即拉取）+ 断线自动重连完整对账；每条记录写入即
-触发 push，无需手动同步。
+同步规范：客户端不密集轮询云端，**同步是全自动、无感知的**。运行期间后台两个线程：
+接收线程保持长连接（长轮询挂起，扇出即拉取）+ 断线自动重连完整对账；推送线程把本地
+入队的记录入队即推、失败定期重试。输入线程只写本地 + 入队，不需要手动同步。
 """
 
 import datetime
+import logging
 import re
 import subprocess
 import sys
@@ -38,7 +39,7 @@ def _help_text() -> str:
         "              日期：今天/昨天/-N/MM-DD/YYYY-MM-DD\n"
         "/c            清屏\n"
         "/h            帮助\n"
-        "/d            在线删除当天最新一条（需联网，服务端确认，入垃圾桶）\n"
+        "/d            删除本地当天最新一条（离线可用，正文入垃圾桶，联网后自动同步）\n"
         "/status       查看服务端 AI 自动任务状态\n"
         "/retry        直接重试全部失败的服务端自动任务（顺序无关）\n"
         "/model        永久切换服务端 AI 模型\n"
@@ -227,17 +228,25 @@ def _handle_status(client: SyncClient) -> None:
 
 
 def _handle_delete(client: SyncClient) -> None:
+    """离线删除本地最新一条：移除本地条目 + 写墓碑 + 正文入本地垃圾桶，并异步同步。
+
+    删除对象是**本地** ``(ts, entry_id)`` 最大的一条（不再是“服务端认定的最新”），
+    因此离线也能删；删除操作入 outbox，联网后自动推送、跨端扇出。
+    """
     console = Console()
     today = today_utc8()
-    try:
-        deleted = client.delete_latest(today)
-    except SyncError as error:
-        console.print(f"[red][!][/red] 删除失败（需在线）：{error}")
-        return
-    if deleted:
-        console.print(f"[cyan][*][/cyan] 已删除当天最新一条（{deleted}），正文移入垃圾桶。")
-    else:
+    entry = journal.latest_local_entry(today)
+    if entry is None:
         console.print("[yellow][!][/yellow] 当天暂无记录可删除。")
+        return
+    if not journal.delete_record(entry):
+        console.print("[yellow][!][/yellow] 删除失败（本地未找到该条）。")
+        return
+    client.enqueue_delete(entry)
+    console.print(
+        f"[cyan][*][/cyan] 已删除本地最新一条（{entry['entry_id']}），"
+        "正文移入垃圾桶，联网后自动同步。"
+    )
 
 
 def _handle_retry(client: SyncClient) -> None:
@@ -307,33 +316,37 @@ def _write_record(client: SyncClient, text: str) -> None:
         return
     # 本地写入永不回滚，与同步成败无关
     journal.append_record(entry)
-    # 尽力即时同步：无凭据或离线时 push_new 会静默失败并留在离线队列
-    client.push_new(entry)
+    # 入队即返回：不在输入线程做网络 I/O。后台推送线程连上后自动冲刷；
+    # 启动时连不上也不影响之后每条记录的录入速度。
+    client.enqueue(entry)
 
 
 def _sync_loop(client: SyncClient, synced: bool = False) -> None:
-    """持续同步（无感知）：连接成功即完整对账一次，之后保持长连接接收扇出。
+    """接收循环（长连接）：连接成功即完整对账一次，之后长轮询接收扇出。
 
-    服务端离线再上线后，本循环会自动重新完整对账（推送离线队列、重建本地镜像、
-    同步报告），无需手动同步。断线时静默等待并保留离线队列。
+    只负责“收”：启动/重连时完整对账（拉取镜像、历史文件、报告），之后长轮询；
+    有变化时把新报告同步到本地。“发”由独立的 flush_pending_loop 负责，两者互不
+    阻塞——长轮询挂起 25 秒期间，新记录仍能被推送线程立即发出。
 
     ``synced`` 为 True 时表示启动时已完成过一次完整对账（避免重复），否则先做一次。
     """
+    logger = logging.getLogger(__name__)
     while True:
         try:
             if not synced:
-                client.full_sync()
+                client.run_full_sync()
                 synced = True
             changed = client.longpoll()
             if changed:
                 # 扇出增量已应用；顺带把新报告同步到本地
                 client.sync_reports()
-            # 冲刷离线队列（空队列时 send_pending 直接返回，不产生请求）
-            client.send_pending()
-        except SyncError:
-            # 离线/服务端不可达：静默等待，保留离线队列；重连成功后重新完整对账
+        except Exception as error:  # noqa: BLE001 - 后台线程必须自愈，绝不退出
+            # 用 debug 而非 warning：客户端未配置 logging，warning 会经 lastResort
+            # 每 5 秒往 stderr 刷屏，干扰交互输入。
+            logger.debug("sync_loop_reconnect error=%s", error)
             synced = False
             time.sleep(5)
+            continue
         time.sleep(0.5)
 
 
@@ -386,11 +399,12 @@ def run_interactive() -> int:
     _banner()
     _show_help()
 
-    # 持续同步（无感知）：连接成功即完整对账，之后长连接接收扇出；断线自动重连补齐。
+    # 持续同步（无感知）：接收线程保持长连接 + 断线重连完整对账；发送线程专责 push。
     thread = threading.Thread(
         target=_sync_loop, args=(client, synced), daemon=True
     )
     thread.start()
+    threading.Thread(target=client.flush_pending_loop, daemon=True).start()
 
     while True:
         try:

@@ -126,23 +126,35 @@ class HandleDeleteTests(unittest.TestCase):
     def tearDown(self):
         self._patch.stop()
 
-    def test_handle_delete_success(self):
+    def test_handle_delete_success_offline(self):
+        """离线删除本地最新一条：正文入本地垃圾桶，删除入队待同步（不联网）。"""
         client = Mock()
-        client.delete_latest.return_value = "e-1"
-        cli_app._handle_delete(client)
-        client.delete_latest.assert_called_once_with(_TODAY)
-        self.assertIn("已删除当天最新一条", "\n".join(FakeConsole.printed))
+        entry = {"entry_id": "e-1", "date": _TODAY, "ts": 123, "text": "x"}
+        with patch.object(cli_app, "journal") as journal:
+            journal.latest_local_entry.return_value = entry
+            journal.delete_record.return_value = True
+            cli_app._handle_delete(client)
+        journal.latest_local_entry.assert_called_once_with(_TODAY)
+        journal.delete_record.assert_called_once_with(entry)
+        client.enqueue_delete.assert_called_once_with(entry)
+        self.assertIn("已删除本地最新一条", "\n".join(FakeConsole.printed))
 
     def test_handle_delete_no_record(self):
         client = Mock()
-        client.delete_latest.return_value = None
-        cli_app._handle_delete(client)
+        with patch.object(cli_app, "journal") as journal:
+            journal.latest_local_entry.return_value = None
+            cli_app._handle_delete(client)
+        client.enqueue_delete.assert_not_called()
         self.assertIn("当天暂无记录", "\n".join(FakeConsole.printed))
 
-    def test_handle_delete_sync_error(self):
+    def test_handle_delete_local_missing(self):
         client = Mock()
-        client.delete_latest.side_effect = SyncError("服务端返回 500")
-        cli_app._handle_delete(client)
+        entry = {"entry_id": "e-1", "date": _TODAY, "ts": 123, "text": "x"}
+        with patch.object(cli_app, "journal") as journal:
+            journal.latest_local_entry.return_value = entry
+            journal.delete_record.return_value = False
+            cli_app._handle_delete(client)
+        client.enqueue_delete.assert_not_called()
         self.assertIn("删除失败", "\n".join(FakeConsole.printed))
 
 
@@ -239,8 +251,9 @@ class WriteRecordExpiredTests(unittest.TestCase):
             # 用固定 ts=0 → date 由 UTC+8 推导为 1970-01-01（远早于今天）
             client = Mock()
             cli_app._write_record(client, "过期记录")
-            # 过期：不 append 本地、不 push
+            # 过期：不 append 本地、不入队、不 push
             journal.append_record.assert_not_called()
+            client.enqueue.assert_not_called()
             client.push_new.assert_not_called()
 
 
