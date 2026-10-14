@@ -162,10 +162,8 @@ class ClientCLICommandRoutingTests(unittest.TestCase):
             client.base_url = "http://127.0.0.1:1"
             client.probe.return_value = {"connected": True, "has_credentials": True, "error": ""}
             client.status.return_value = {
-                "version": 3,
                 "entry_count": 2,
                 "tombstone_count": 1,
-                "devices": {"e2e-a": {"active": True}},
                 "ai": {
                     "current_model": "deepseek-v4-pro",
                     "models": ["deepseek-v4-pro", "deepseek-v4-flash"],

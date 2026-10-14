@@ -26,6 +26,13 @@ from server.main import _generate_cert
 
 class TlsStalledHandshakeTest(unittest.TestCase):
     def setUp(self):
+        # TLS/证书生成是服务端职责，依赖 cryptography（server/requirements.txt）；
+        # 客户端构建 CI 只装 client/requirements.txt，缺该依赖时按仓库既有惯例
+        # 优雅跳过，而不是让整组用例硬出错。
+        try:
+            from cryptography import x509  # noqa: F401
+        except ImportError:
+            raise unittest.SkipTest("缺少 cryptography：`pip install cryptography`")
         self._dir = Path(tempfile.mkdtemp(prefix="myrecord-tls-"))
         certfile, keyfile = _generate_cert(self._dir)
         self.certfile = certfile

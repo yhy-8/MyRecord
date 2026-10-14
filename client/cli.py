@@ -219,7 +219,7 @@ def _handle_status(client: SyncClient) -> None:
     except SyncError as error:
         console.print(f"[red][!][/red] {error}")
         return
-    # 条目/已删数是服务端“今天”（UTC+8）的权威计数：历史日以 Records 整文件为准，不再计数（见设计基线 §4/§9）。
+    # 条目/已删数是服务端“今天”（UTC+8）的权威计数：历史日以 Records 整文件为准，不计入（见设计基线 §4/§9）。
     console.print(f"今日条目: {status.get('entry_count')}   今日已删: {status.get('tombstone_count')}")
     ai = status.get("ai") or {}
     if ai.get("current_model"):
@@ -230,7 +230,7 @@ def _handle_status(client: SyncClient) -> None:
 def _handle_delete(client: SyncClient) -> None:
     """离线删除本地最新一条：移除本地条目 + 写墓碑 + 正文入本地垃圾桶，并异步同步。
 
-    删除对象是**本地** ``(ts, entry_id)`` 最大的一条（不再是“服务端认定的最新”），
+    删除对象是**本地** ``(ts, entry_id)`` 最大的一条（不是“服务端认定的最新”），
     因此离线也能删；删除操作入 outbox，联网后自动推送、跨端扇出。
     """
     console = Console()

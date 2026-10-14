@@ -2,8 +2,8 @@
 
 路由：
 - POST /api/sync/push        推送新条目/删除 {entries, deletes}（**仅今天**；历史日被拒绝 422）
-- GET  /api/sync/pull?version=N  拉取今天全量（游标仅作变更令牌，不筛选数据）
-- GET  /api/sync/longpoll?version=N 长轮询扇出（令牌落后且有变化即返回全量）
+- GET  /api/sync/pull?token=<hex>  拉取今天全量（令牌不筛选数据）
+- GET  /api/sync/longpoll?token=<hex> 长轮询扇出（令牌与当前今天文件哈希不一致即返回全量）
 - GET  /api/status           中心状态（计数从今天的 Records 文件解析）
 - GET  /api/records          哈希清单（历史日 date+sha256 + 单文件垃圾桶 trash）
 - GET  /api/records/<name>   Records/<name>.md 整文件原文（日期或 trash）
@@ -82,12 +82,10 @@ def _auth_ok(handler) -> bool:
     return ok
 
 
-def _query_version(query) -> int | None:
-    """解析 longpoll/pull 的 version 参数；无法解析时返回 None。"""
-    try:
-        return int((query.get("version") or ["0"])[0])
-    except ValueError:
-        return None
+def _query_token(query) -> str:
+    """解析 longpoll/pull 的 token 参数（不透明的变更令牌 = 今天文件 sha256）；缺失回退空串。"""
+    values = query.get("token") or [""]
+    return values[0]
 
 
 def _authed(method):
@@ -229,14 +227,15 @@ class SyncHandler(BaseHTTPRequestHandler):
         delete_accepted, delete_rejected = store.apply_deletes(device, deletes)
         accepted = accepted + delete_accepted
         rejected = rejected + delete_rejected
+        state = store.today_state()
         logger.info(
-            "sync_push device=%s entries=%d deletes=%d accepted=%d rejected=%d version=%d",
+            "sync_push device=%s entries=%d deletes=%d accepted=%d rejected=%d token=%s",
             device,
             len(entries),
             len(deletes),
             len(accepted),
             len(rejected),
-            store.data["version"],
+            state["token"],
         )
         if rejected:
             # 批次内含历史日/异常条目或删除：服务器「已处理但未入库」，
@@ -245,8 +244,7 @@ class SyncHandler(BaseHTTPRequestHandler):
                 422,
                 {"ok": False, "error": "expired", "rejected": rejected, "accepted": accepted},
             )
-        # 游标已降级：写端点不再下发“增量”，直接返回今天全量（客户端按 entry_id 幂等合并）。
-        state = store.today_state()
+        # 写端点不下发“增量”，直接返回今天全量（客户端按 entry_id 幂等合并）。
         self._send_json(
             200,
             {
@@ -258,15 +256,12 @@ class SyncHandler(BaseHTTPRequestHandler):
 
     @_authed
     def _pull(self, query):
-        after_version = _query_version(query)
-        if after_version is None:
-            return self._send_json(400, {"error": "bad version"})
-        delta = self.server.store.pull(after_version)
+        after_token = _query_token(query)
+        delta = self.server.store.pull(after_token)
         logger.info(
-            "sync_pull device=%s after=%d version=%d entries=%d tombstones=%d",
+            "sync_pull device=%s token=%s entries=%d tombstones=%d",
             _device_id(self),
-            after_version,
-            delta["version"],
+            delta["token"],
             len(delta["entries"]),
             len(delta["tombstones"]),
         )
@@ -274,16 +269,13 @@ class SyncHandler(BaseHTTPRequestHandler):
 
     @_authed
     def _longpoll(self, query):
-        after_version = _query_version(query)
-        if after_version is None:
-            return self._send_json(400, {"error": "bad version"})
-        delta = self.server.store.wait_for_change(after_version, timeout=25.0)
+        after_token = _query_token(query)
+        delta = self.server.store.wait_for_change(after_token, timeout=25.0)
         changed = bool(delta["entries"] or delta["tombstones"])
         logger.info(
-            "sync_longpoll device=%s after=%d version=%d entries=%d tombstones=%d changed=%s",
+            "sync_longpoll device=%s token=%s entries=%d tombstones=%d changed=%s",
             _device_id(self),
-            after_version,
-            delta["version"],
+            delta["token"],
             len(delta["entries"]),
             len(delta["tombstones"]),
             changed,
@@ -308,9 +300,6 @@ class SyncHandler(BaseHTTPRequestHandler):
             {
                 "entry_count": entry_count,
                 "tombstone_count": tombstone_count,
-                "devices": {
-                    name: {} for name in self.server.store.device_names()
-                },
                 "automation": self.server.automation_status() or {},
                 "ai": self.server.status_ai() or {},
             },

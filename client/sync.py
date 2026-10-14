@@ -42,17 +42,20 @@ def _outbox_path():
 
 
 def _read_state():
+    """读取本地“已见到的变更令牌”（今天文件的 sha256）；缺失/损坏回退空串。"""
     path = _state_path()
     if not path.exists():
-        return 0
+        return ""
     try:
-        return int(json.loads(path.read_text(encoding="utf-8")).get("version", 0) or 0)
+        value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError, TypeError):
-        return 0
+        return ""
+    token = value.get("token", "") if isinstance(value, dict) else ""
+    return token if isinstance(token, str) else ""
 
 
-def _save_state(version: int) -> None:
-    atomic_write(_state_path(), json.dumps({"version": version}))
+def _save_state(token: str) -> None:
+    atomic_write(_state_path(), json.dumps({"token": token}))
 
 
 def _save_outbox(entries: list[dict], deletes: list[dict] | None = None) -> None:
@@ -214,17 +217,14 @@ class SyncClient:
 
     # ---------- 对账应用 ----------
 
-    def _apply_delta(self, delta: dict, full: bool = False) -> None:
+    def _apply_delta(self, delta: dict) -> None:
         entries = delta.get("entries", []) or []
         tombstones = delta.get("tombstones", []) or []
         with file_lock(_state_path()):
-            if full:
-                # 全量对账：用权威全量数据重建本地镜像（按时间排序、墓碑插回原位），
-                # 使多端离线写入后本地也保持时间有序，而非按推送顺序入库。
-                journal.rebuild_records(entries, tombstones)
-            else:
-                journal.apply_delta(entries, tombstones)
-            _save_state(int(delta.get("version", _read_state())))
+            # 本地“今天”文件也是权威：只补齐缺失条目、按墓碑移除，绝不整文件重写
+            # （与服务端“文件是权威”一致；手工编辑不会被远端覆盖）。
+            journal.apply_delta(entries, tombstones)
+            _save_state(str(delta.get("token", _read_state())))
 
     # ---------- push / 离线队列 ----------
 
@@ -324,14 +324,14 @@ class SyncClient:
             if len(pending) != len(outbox) or len(pending_deletes) != len(deletes):
                 _save_outbox(pending, pending_deletes)
             if not pending and not pending_deletes:
-                return {"accepted": [], "version": _read_state(), "entries": [], "tombstones": []}
+                return {"accepted": [], "token": _read_state(), "entries": [], "tombstones": []}
         status, delta = self._request_payload(
             "POST",
             "/api/sync/push",
             json_body={
                 "entries": pending,
                 "deletes": pending_deletes,
-                "version": _read_state(),
+                "token": _read_state(),
             },
         )
         if status >= 400 and status != 422:
@@ -353,7 +353,7 @@ class SyncClient:
         if status == 422:
             return {
                 "accepted": sorted(accepted),
-                "version": _read_state(),
+                "token": _read_state(),
                 "entries": [],
                 "tombstones": [],
                 "rejected": sorted(rejected),
@@ -364,13 +364,12 @@ class SyncClient:
     # ---------- 完整同步（启动 / 重连自动对账） ----------
 
     def full_sync(self) -> None:
-        """完整同步一次：先冲刷离线队列（只今天、丢弃过期），再完整对账（重建今天镜像），
+        """完整同步一次：先冲刷离线队列（只今天、丢弃过期），再拉取今天全量合并进本地，
         再按哈希清单对历史日做整文件校验（云端权威覆盖本地），最后同步报告。
 
-        用于客户端启动链接云端、以及后台重连自动对账。完整对账从 version=0
-        重新拉取今天的条目与墓碑并重建/补齐本地 Records，而非依赖增量游标——
-        避免「本地文件丢失但游标未回退」时增量 pull 拉不到内容，导致云端有
-        数据却同步不下来。
+        用于客户端启动链接云端、以及后台重连自动对账。拉取今天全量（不受令牌影响）
+        并只补齐本地缺失、按墓碑移除，而非依赖令牌/游标——避免「本地文件丢失」
+        时拉不到内容，也避免覆盖本地已有（可能手工编辑过的）内容。
         """
         self.send_pending()
         self.reconcile()
@@ -383,26 +382,25 @@ class SyncClient:
             self.full_sync()
 
     def reconcile(self) -> None:
-        """从服务端权威状态完整对账：拉取“今天”的条目与墓碑，重建/补齐本地今天镜像。
+        """从服务端权威状态完整对账：拉取“今天”的全部条目与墓碑，合并进本地“今天”文件。
 
-        用 version=0 全量拉取后当作权威全量重建本地“今天”文件（rebuild_records），而非只对
-        增量追加/原位替换——既保证本地文件按时间排序（多端离线写入后不乱序），又能覆盖
-        本地文件丢失、墓碑位置恢复等场景。历史日以云端整文件为准，不经由增量对账。
+        只补齐本地缺失的条目、按墓碑移除已删条目（`apply_delta`），**不整文件重建**——
+        本地“今天”文件同样是权威，对账不做覆盖，避免抹掉本地已有内容。
         """
-        delta = self._request("GET", "/api/sync/pull?version=0")
-        self._apply_delta(delta, full=True)
+        delta = self._request("GET", "/api/sync/pull")
+        self._apply_delta(delta)
 
     # ---------- 拉取 / 长轮询 ----------
 
     def pull(self) -> None:
-        delta = self._request("GET", f"/api/sync/pull?version={_read_state()}")
+        delta = self._request("GET", f"/api/sync/pull?token={_read_state()}")
         self._apply_delta(delta)
 
     def longpoll(self) -> bool:
         """阻塞长轮询；有新数据返回 True，超时返回 False。"""
         delta = self._request(
             "GET",
-            f"/api/sync/longpoll?version={_read_state()}",
+            f"/api/sync/longpoll?token={_read_state()}",
             timeout=_LONGPOLL_REQUEST_TIMEOUT,
         )
         changed = bool(delta.get("entries") or delta.get("tombstones"))
@@ -466,12 +464,12 @@ class SyncClient:
             content = self._fetch_record_file(date)
             if content is None:
                 continue
-            # 直接整文件覆盖（云端文件已含 <summary>，不再本地保留本地 summary）。
+            # 直接整文件覆盖（云端文件已含 <summary>，不保留本地 summary）。
             atomic_write(path, content)
             logger.info("history_file_overwrite date=%s", date)
         # 1b) 单文件垃圾桶 Records/trash.md：清单里的 `trash` 字段是与云端对账的哈希，整文件覆盖。
         #     离线删除的正文已由 send_pending 先推给服务端，云端为准不会丢；
-        #     服务端未提供 trash 哈希（旧版/未渲染）时保留本地，不删。
+        #     服务端未提供 trash 哈希（如未渲染）时保留本地，不删。
         trash_sha = data.get("trash")
         if trash_sha is not None:
             trash = records_dir / "trash.md"
@@ -528,7 +526,7 @@ class SyncClient:
         """按云端报告哈希清单把报告同步到本地 AnalysisReports（不做 /v 查看）。
 
         清单即权威全集（rel + sha256）：仅对本地副本缺失或哈希与云端不同的报告
-        拉取覆盖，未变即跳过。同一时间段只保留最新生成。云端已不再存在的本地
+        拉取覆盖，未变即跳过。同一时间段只保留最新生成。云端不存在的本地
         副本一并清理（与 records 哈希对账一致：云端为准），避免残留旧报告。
         """
         data = self._request("GET", "/api/reports") or {}

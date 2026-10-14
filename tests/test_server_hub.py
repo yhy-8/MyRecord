@@ -48,7 +48,7 @@ class AuthTest(unittest.TestCase):
 
 
 class StoreTest(unittest.TestCase):
-    def test_append_dedupe_and_version(self):
+    def test_append_dedupe(self):
         data = _tmp_data_dir() / "state.json"
         store = Store(data)
         entries = [
@@ -58,11 +58,11 @@ class StoreTest(unittest.TestCase):
         accepted, rejected = store.append_entries("a", entries)
         self.assertEqual(accepted, ["a-1", "b-1"])
         self.assertEqual(rejected, [])
-        self.assertEqual(store.data["version"], 2)
+        self.assertEqual(len(store.data["entries"]), 2)
         # 再次推送同一条不重复，但已被权威处理（已存在）→ 上报 accepted 供客户端清 outbox（不再无限重试）。
         accepted2, _ = store.append_entries("a", [entries[0]])
         self.assertEqual(accepted2, ["a-1"])
-        self.assertEqual(store.data["version"], 2)
+        self.assertEqual(len(store.data["entries"]), 2)
 
     def test_append_rejects_history_date(self):
         """date < 今天 的条目被拒绝（不入库、不渲染），返回 rejected。"""
@@ -74,7 +74,6 @@ class StoreTest(unittest.TestCase):
         )
         self.assertEqual(accepted, [])
         self.assertEqual(rejected, ["old-1"])
-        self.assertEqual(store.data["version"], 0)
         self.assertEqual(store.data["entries"], {})
 
     def test_append_rejects_whole_batch_when_any_expired(self):
@@ -116,13 +115,13 @@ class StoreTest(unittest.TestCase):
         store.append_entries(
             "a", [{"entry_id": "a-1", "date": _today(), "ts": _today_ts(8), "tag": "", "text": "x"}]
         )
-        version = store.data["version"]
+        token = store.today_state()["token"]
         # 令牌已是当前值：无变化，超时返回空
-        delta = store.wait_for_change(version, timeout=0.05)
+        delta = store.wait_for_change(token, timeout=0.05)
         self.assertEqual(delta["entries"], [])
         self.assertEqual(delta["tombstones"], [])
         # 令牌落后：立即返回今天全量
-        delta = store.wait_for_change(0, timeout=0.05)
+        delta = store.wait_for_change("", timeout=0.05)
         self.assertEqual([e["entry_id"] for e in delta["entries"]], ["a-1"])
 
     def test_tombstone_moves_to_trash(self):
@@ -161,13 +160,16 @@ class StoreTest(unittest.TestCase):
         self.assertNotIn("old-1", store.data["entries"])
 
     def test_tombstone_preserves_original_entry_ts(self):
-        """墓碑记录原条目时间，供渲染时按它把占位符插回记录流原位置。"""
+        """墓碑记录原条目时间，供渲染/排序时把占位符插回记录流原位置。
+
+        生产环境 entry_id 即毫秒时间戳，故占位符的时间可由 id 还原。
+        """
         data = _tmp_data_dir() / "state.json"
         store = Store(data)
         ts = _today_ts(9)
-        store.append_entries("a", [{"entry_id": "a-1", "date": _today(), "ts": ts, "tag": "", "text": "x"}])
-        store.tombstone("a-1", "a")
-        tomb = store.data["tombstones"]["a-1"]
+        store.append_entries("a", [{"entry_id": str(ts), "date": _today(), "ts": ts, "tag": "", "text": "x"}])
+        store.tombstone(str(ts), "a")
+        tomb = store.data["tombstones"][str(ts)]
         self.assertEqual(ts, tomb["entry_ts"])
 
     def test_append_entries_does_not_resurrect_tombstoned(self):
@@ -195,7 +197,7 @@ class StoreTest(unittest.TestCase):
         store = Store(data)
         store.append_entries("A", [{"entry_id": "x1", "date": _today(), "ts": _today_ts(8), "tag": "", "text": "hi"}])
         store.tombstone("x1", "A")
-        delta = store.wait_for_change(after_version=0, timeout=0.05)
+        delta = store.wait_for_change("", timeout=0.05)
         self.assertIn("x1", [t["entry_id"] for t in delta["tombstones"]])
         self.assertEqual([], delta["entries"])  # x1 已删，不在活跃条目中
 
@@ -314,13 +316,12 @@ class StoreDeviceTests(unittest.TestCase):
         state_file = data / "state.json"
         state_file.write_text("{not valid json", encoding="utf-8")
         store = Store(state_file)
-        self.assertEqual(0, store.data["version"])
         self.assertEqual({}, store.data["entries"])
         self.assertEqual({}, store.data["devices"])
 
 
-class StoreRenderTest(unittest.TestCase):
-    """store.render_records：只渲染“今天”，保留已有 summary，垃圾桶渲染。"""
+class StoreMergeTest(unittest.TestCase):
+    """写操作合并进今天文件（文件即权威）：保留 summary / 手工块 / 历史文件，删除入 trash。"""
 
     def _store_with_entries(self, state_file):
         store = Store(state_file)
@@ -335,12 +336,10 @@ class StoreRenderTest(unittest.TestCase):
         store.tombstone("b-1", "b")
         return store
 
-    def test_render_records_writes_entries_and_trash(self):
+    def test_append_and_delete_write_today_file_and_trash(self):
         data = _tmp_data_dir() / "state.json"
         store = self._store_with_entries(data)
-        records_dir = data.parent / "Records"
-
-        store.render_records(records_dir)
+        records_dir = store.records_dir
 
         records = (records_dir / f"{_today()}.md").read_text(encoding="utf-8")
         self.assertIn("保留正文", records)
@@ -352,47 +351,43 @@ class StoreRenderTest(unittest.TestCase):
         self.assertIn("待删除正文", trash)
         self.assertNotIn("保留正文", trash)
 
-    def test_render_records_empty_day_creates_no_placeholder_file(self):
-        """空日（无条目、无墓碑）不生成 Records/<date>.md 占位文件；trash.md 为空。"""
+    def test_empty_day_creates_no_placeholder_file(self):
+        """空日（无条目、无墓碑）不生成 Records/<date>.md 占位文件。"""
+        data = _tmp_data_dir() / "state.json"
+        Store(data)
+        self.assertFalse((data.parent / "Records" / f"{_today()}.md").exists())
+
+    def test_append_does_not_touch_history_files(self):
+        """写操作只改今天文件：历史/旧格式整文件不被重排/重写。"""
         data = _tmp_data_dir() / "state.json"
         store = Store(data)
-        records_dir = data.parent / "Records"
-
-        store.render_records(records_dir)
-
-        self.assertFalse((records_dir / f"{_today()}.md").exists())
-        self.assertEqual("", (records_dir / "trash.md").read_text(encoding="utf-8"))
-
-    def test_render_records_does_not_touch_history_files(self):
-        """render_records 只渲染今天：历史/旧格式整文件不被重排/重写。"""
-        data = _tmp_data_dir() / "state.json"
-        store = Store(data)
-        store.append_entries("a", [{"entry_id": "a-1", "date": _today(), "ts": _today_ts(8), "tag": "", "text": "今天"}])
-        records_dir = data.parent / "Records"
+        records_dir = store.records_dir
         records_dir.mkdir(parents=True, exist_ok=True)
         legacy = records_dir / "2000-01-01.md"
         legacy.write_text("# 2000-01-01\n\n旧格式 **08:00:** 内容\n", encoding="utf-8")
 
-        store.render_records(records_dir)
+        store.append_entries("a", [{"entry_id": "a-1", "date": _today(), "ts": _today_ts(8), "tag": "", "text": "今天"}])
 
         self.assertEqual(legacy.read_text(encoding="utf-8"), "# 2000-01-01\n\n旧格式 **08:00:** 内容\n")
 
-    def test_render_preserves_existing_summary(self):
+    def test_append_preserves_existing_summary_and_manual_block(self):
+        """今天文件为权威：写操作合并，不清除已有 <summary> 与手工新增的条目块。"""
         data = _tmp_data_dir() / "state.json"
         store = Store(data)
-        store.append_entries("a", [{"entry_id": "a-1", "date": _today(), "ts": _today_ts(8), "tag": "", "text": "新记录"}])
-        records_dir = data.parent / "Records"
+        records_dir = store.records_dir
         records_dir.mkdir(parents=True, exist_ok=True)
         (records_dir / f"{_today()}.md").write_text(
-            f"# {_today()}\n\n<summary>\n已有总结\n</summary>\n\n---\n## 原始记录流\n",
+            f"# {_today()}\n\n<summary>\n已有总结\n</summary>\n\n---\n## 原始记录流\n\n"
+            "<!-- myrecord-time:999 -->\n**07:00:** 手写\n\n",
             encoding="utf-8",
         )
 
-        store.render_records(records_dir)
+        store.append_entries("a", [{"entry_id": "a-1", "date": _today(), "ts": _today_ts(8), "tag": "", "text": "新记录"}])
 
         content = (records_dir / f"{_today()}.md").read_text(encoding="utf-8")
-        self.assertIn("已有总结", content)
-        self.assertIn("新记录", content)
+        self.assertIn("已有总结", content)   # summary 保留
+        self.assertIn("手写", content)       # 手工块不被覆盖
+        self.assertIn("新记录", content)     # 新条目录入
 
     def test_tombstone_is_idempotent_and_rejects_missing(self):
         data = _tmp_data_dir() / "state.json"
@@ -416,10 +411,10 @@ class StoreRenderTest(unittest.TestCase):
         accepted, rejected = store.append_entries("a", [{"text": "no-id"}])
         self.assertEqual(accepted, [])
         self.assertEqual(rejected, [])
-        self.assertEqual(0, store.data["version"])
+        self.assertEqual(store.data["entries"], {})
 
     def test_append_normalizes_path_traversal_date(self):
-        """date 含 `../` 会被规范为合法日期（由今天 ts 推导），避免渲染写出数据目录之外。"""
+        """date 含 `../` 会被规范为合法日期（由今天 ts 推导），避免写出数据目录之外。"""
         data = _tmp_data_dir() / "state.json"
         store = Store(data)
         accepted, _ = store.append_entries(
@@ -430,95 +425,96 @@ class StoreRenderTest(unittest.TestCase):
         stored_date = store.data["entries"]["x-1"]["date"]
         self.assertEqual(_today(), stored_date)  # 非法 date 回退到今天（由 ts 推导）
         datetime.date.fromisoformat(stored_date)  # 必须可解析为合法日期
-
-        records = _tmp_data_dir() / "Records"
-        store.render_records(records)
-        self.assertFalse((records.parent / "escape.md").exists())
+        self.assertTrue((store.records_dir / f"{_today()}.md").exists())
+        self.assertFalse((store.records_dir.parent / "escape.md").exists())
 
 
-class StoreSealPreviousDayTest(unittest.TestCase):
-    """日界封存：state.json 只常驻今天的数据，历史日以整文件为准。"""
+class StoreDayBoundaryTest(unittest.TestCase):
+    """今天文件即权威：跨日/历史文件不需要也不应该被 state 清理或重渲染。"""
 
-    def test_seal_purges_stale_dates_and_preserves_history_files(self):
+    def test_history_file_untouched_by_today_writes(self):
         data = _tmp_data_dir() / "state.json"
         records_dir = data.parent / "Records"
         store = Store(data, records_dir)
-        # 模拟“昨天”的条目已入库（进程运行到昨天），强制其 date=昨天
-        store._today = _today()  # 无日界
         yesterday = (
             datetime.date.fromisoformat(_today()) - datetime.timedelta(days=1)
         ).isoformat()
-        store.data["entries"]["y-1"] = {
-            "entry_id": "y-1", "device_id": "a", "date": yesterday,
-            "ts": _today_ts(8), "tag": "", "text": "昨日记录", "v": 1,
-        }
-        store.data["version"] = 1
-        # 模拟进程重启落在“今天”：self._today 为 None，首次访问触发封存
-        store._today = None
+        records_dir.mkdir(parents=True, exist_ok=True)
+        legacy = records_dir / f"{yesterday}.md"
+        legacy.write_text("# 昨日\n\n**08:00:** 昨日记录\n", encoding="utf-8")
 
-        # 触发封存：pull 会先 _maybe_seal_previous_day
-        store.pull(0)
+        store.append_entries("a", [{"entry_id": "a-1", "date": _today(), "ts": _today_ts(8), "tag": "", "text": "今天"}])
 
-        self.assertNotIn("y-1", store.data["entries"])  # 昨日条目态已清理
-        self.assertEqual(store.data["version"], 1)  # version 保持单调（不递增）
-        # 昨日文件已在封存前落盘（render 一次），整文件保留
-        self.assertTrue((records_dir / f"{yesterday}.md").exists())
+        self.assertEqual(legacy.read_text(encoding="utf-8"), "# 昨日\n\n**08:00:** 昨日记录\n")
+        self.assertNotIn("y-1", store.data["entries"])
 
-    def test_seal_without_records_dir_keeps_entries_never_purges(self):
-        """无 Records 落盘目录（配置错误兜底）：封存不清理历史条目态，避免数据丢失。
 
-        Store 以 records_dir=None 构造时，若 _maybe_seal_previous_day 照常清理，
-        会把 date < 今天 的条目清出 state.json，又因 _render_dates 无目录直接返回、
-        从不落盘 —— 数据无处承载。这里应跳过封存并保留数据。
-        """
+class StoreFileAuthorityTest(unittest.TestCase):
+    """今天文件即权威：重启 / state.json 删除 / 手工编辑都不丢内容。"""
+
+    def test_today_file_is_authority_across_restart_and_state_loss(self):
         data = _tmp_data_dir() / "state.json"
-        store = Store(data)  # records_dir 缺省 None
-        store._today = _today()  # 无日界，便于注入“昨天”条目
-        yesterday = (
-            datetime.date.fromisoformat(_today()) - datetime.timedelta(days=1)
-        ).isoformat()
-        store.data["entries"]["y-1"] = {
-            "entry_id": "y-1", "device_id": "a", "date": yesterday,
-            "ts": _today_ts(8), "tag": "", "text": "昨日记录", "v": 1,
-        }
-        store.data["version"] = 1
-        # 模拟进程重启落在“今天”：self._today 为 None，首次访问触发封存检查
-        store._today = None
+        records_dir = data.parent / "Records"
+        store = Store(data, records_dir)
+        store.append_entries(
+            "MK8", [{"entry_id": "a-1", "date": _today(), "ts": _today_ts(8), "tag": "", "text": "hello"}]
+        )
+        token = store.today_state()["token"]
 
-        store.pull(0)  # 内部会调用 _maybe_seal_previous_day
+        # 删除 state.json（模拟全新空运行状态）后重启：内容仍在，令牌不变。
+        data.unlink()
+        restarted = Store(data, records_dir)
+        self.assertEqual([e["text"] for e in restarted.today_state()["entries"]], ["hello"])
+        self.assertEqual(restarted.today_state()["token"], token)
 
-        # 无落盘目录 → 跳过封存：昨日条目仍在 state.json（不丢数据）
-        self.assertIn("y-1", store.data["entries"])
-        self.assertEqual(store.data["version"], 1)
+    def test_state_json_only_persists_devices(self):
+        import json
 
-    def test_device_names_derived_from_live_entries_only(self):
-        """方案 B：设备名只是写在条目上的标签，服务端不单独记录设备清单。
-
-        封存清理历史日条目态后，历史设备名随之消失（不再通过 seen_devices 额外缓存保留）。
-        """
         data = _tmp_data_dir() / "state.json"
-        # 传入 records_dir：封存先渲染历史日文件再清理条目态（真正验证“历史日
-        # 设备名随条目态清理而消失”的语义；无落盘目录时封存会跳过清理、不丢数据）。
         store = Store(data, data.parent / "Records")
-        store._today = _today()  # 无日界，便于注入“昨天”条目
-        yesterday = (
-            datetime.date.fromisoformat(_today()) - datetime.timedelta(days=1)
-        ).isoformat()
-        store.data["entries"]["y-1"] = {
-            "entry_id": "y-1", "device_id": "MK8", "date": yesterday,
-            "ts": _today_ts(8), "tag": "", "text": "昨日记录", "v": 1,
-        }
-        # 封存前：条目在态内，设备名可见
-        self.assertIn("MK8", store.device_names())
-        # 触发封存：清理 date < 今天 的条目态
-        store._today = None
-        store.pull(0)
-        # 封存后：条目态被清理，设备名也不再保留（仅作条目标签，不单列）
-        self.assertNotIn("MK8", store.device_names())
+        store.append_entries(
+            "MK8", [{"entry_id": "a-1", "date": _today(), "ts": _today_ts(8), "tag": "", "text": "x"}]
+        )
+        self.assertEqual(list(json.loads(data.read_text(encoding="utf-8"))), ["devices"])
+
+    def test_manual_edit_survives_later_appends(self):
+        """手工在今天的文件里加 <summary> 与条目块后，再 push 不会覆盖它们。"""
+        data = _tmp_data_dir() / "state.json"
+        store = Store(data, data.parent / "Records")
+        store.append_entries(
+            "MK8", [{"entry_id": "a-1", "date": _today(), "ts": _today_ts(8), "tag": "", "text": "原有"}]
+        )
+        path = store.records_dir / f"{_today()}.md"
+        content = path.read_text(encoding="utf-8").replace("<summary>", "<summary>\n手工总结", 1)
+        content += "<!-- myrecord-time:9999999999999 -->\n**23:59:** 手工条目\n\n"
+        path.write_text(content, encoding="utf-8")
+
+        store.append_entries(
+            "vivo", [{"entry_id": "b-1", "date": _today(), "ts": _today_ts(10), "tag": "", "text": "新增"}]
+        )
+        final = path.read_text(encoding="utf-8")
+        self.assertIn("手工总结", final)
+        self.assertIn("手工条目", final)
+        self.assertIn("新增", final)
+
+    def test_same_id_conflict_keeps_file_content(self):
+        """同一 entry_id 再次推送且正文不同：以文件现有内容为准（不替换、不复活、上报已处理）。"""
+        data = _tmp_data_dir() / "state.json"
+        store = Store(data, data.parent / "Records")
+        store.append_entries(
+            "MK8", [{"entry_id": "1000", "date": _today(), "ts": 1000, "tag": "", "text": "原始"}]
+        )
+        accepted, _ = store.append_entries(
+            "vivo", [{"entry_id": "1000", "date": _today(), "ts": 1000, "tag": "", "text": "被改"}]
+        )
+        self.assertIn("1000", accepted)  # 视为已处理，客户端可清 outbox
+        self.assertEqual(store.data["entries"]["1000"]["text"], "原始")
+        self.assertIn("原始", (store.records_dir / f"{_today()}.md").read_text(encoding="utf-8"))
+        self.assertNotIn("被改", (store.records_dir / f"{_today()}.md").read_text(encoding="utf-8"))
 
 
-class StoreImmediateRenderTest(unittest.TestCase):
-    """构造时传入 records_dir 后，写操作应立即渲染对应日期文件与 trash.md（即时落盘）。"""
+class StoreImmediateWriteTest(unittest.TestCase):
+    """写操作立即落盘到今天文件 + trash.md（文件即权威，不靠后台重渲染）。"""
 
     def test_append_entries_renders_date_immediately(self):
         data = _tmp_data_dir() / "state.json"
@@ -533,7 +529,6 @@ class StoreImmediateRenderTest(unittest.TestCase):
         target = records_dir / f"{_today()}.md"
         self.assertTrue(target.exists())
         self.assertIn("即时正文", target.read_text(encoding="utf-8"))
-        self.assertEqual(store.data["version"], store.rendered_version())
 
     def test_tombstone_overwrites_date_file_immediately(self):
         data = _tmp_data_dir() / "state.json"
@@ -565,11 +560,12 @@ class StoreImmediateRenderTest(unittest.TestCase):
         self.assertEqual(rejected, ["old-1"])
         self.assertFalse((records_dir / "2000-01-01.md").exists())
 
-    def test_no_render_when_records_dir_absent(self):
+    def test_default_records_dir_used_when_absent(self):
         data = _tmp_data_dir() / "state.json"
         store = Store(data)
         store.append_entries("a", [{"entry_id": "a-1", "date": _today(), "ts": _today_ts(8), "tag": "", "text": "x"}])
-        self.assertFalse((data.parent / "Records" / f"{_today()}.md").exists())
+        # 未显式传 records_dir：默认 state.json 同级 Records/，内容仍落盘（文件是权威）。
+        self.assertTrue((data.parent / "Records" / f"{_today()}.md").exists())
 
 
 class StoreDeleteTest(unittest.TestCase):
@@ -700,11 +696,11 @@ class ServerHttpTest(unittest.TestCase):
         self.httpd.shutdown()
         self.httpd.server_close()
 
-    def _push_one(self, entry, version=0):
+    def _push_one(self, entry, token=""):
         return requests.post(
             f"{self.base}/api/sync/push",
             headers=self.headers,
-            json={"entries": [entry], "version": version},
+            json={"entries": [entry], "token": token},
         )
 
     def test_push_and_pull(self):
@@ -712,8 +708,8 @@ class ServerHttpTest(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         body = resp.json()
         self.assertEqual(body["accepted"], ["a-1"])
-        self.assertEqual(body["version"], 1)
-        pull = requests.get(f"{self.base}/api/sync/pull?version=0", headers=self.headers)
+        self.assertEqual(len(body["token"]), 64)  # 令牌 = 今天文件 sha256
+        pull = requests.get(f"{self.base}/api/sync/pull?token=0", headers=self.headers)
         self.assertEqual(pull.status_code, 200)
         self.assertEqual(len(pull.json()["entries"]), 1)
 
@@ -771,10 +767,11 @@ class ServerHttpTest(unittest.TestCase):
 
     def test_longpoll_fanout(self):
         result = {}
+        token = self.store.today_state()["token"]
 
         def poll():
             result["resp"] = requests.get(
-                f"{self.base}/api/sync/longpoll?version=0",
+                f"{self.base}/api/sync/longpoll?token={token}",
                 headers=self.headers,
                 timeout=30,
             )
@@ -793,7 +790,6 @@ class ServerHttpTest(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         body = resp.json()
         self.assertEqual(body["entry_count"], 1)
-        self.assertIn(self.device_id, body["devices"])
 
     def test_failed_token_lockout(self):
         bad = {"Authorization": "Bearer nope", "X-Device-Id": self.device_id}

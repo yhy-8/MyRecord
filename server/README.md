@@ -35,7 +35,6 @@ python -m server.main run            启动同步+AI 服务
 python -m server.main token create                 签发/重签唯一链接凭证（覆盖旧 token，需二次确认）
 python -m server.main token list                   查看当前唯一凭证状态（含生成时间）
 python -m server.main import --records 路径    导入既有 Records
-python -m server.main render          重渲染全部 Records
 python -m server.main report --kind weekly|monthly --date YYYY-MM-DD   手动生成周/月报（同流程，直接覆盖）
 python -m server.main cert             生成自签证书（服务端直连 TLS，`--ip` 可指定 SAN）
 python -m server.main deploy            一键安装并启动 systemd 服务（需 root）
@@ -60,7 +59,7 @@ python -m server.main deploy            一键安装并启动 systemd 服务（�
 
 | 文件 | 职责 |
 |---|---|
-| `main.py` | 服务端 CLI：`run`（起 hub + AI 自动任务线程）、`token`（连接凭证管理）、`cert`（自签 TLS 证书）、`deploy`（一键 systemd）、`import`（导入既有 Records）、`render`（重渲染 Records） |
+| `main.py` | 服务端 CLI：`run`（起 hub + AI 自动任务线程）、`token`（连接凭证管理）、`cert`（自签 TLS 证书）、`deploy`（一键 systemd）、`import`（导入既有 Records）、`report`（手动生成周/月报） |
 | `config.py` / `config.yaml` | 读取服务端配置（监听、模型、重试、自动任务、数据目录） |
 
 ### 同步中枢（hub/）
@@ -68,10 +67,10 @@ python -m server.main deploy            一键安装并启动 systemd 服务（�
 | 文件 | 职责 |
 |---|---|
 | `hub/server.py` | HTTP 同步服务（stdlib ThreadingHTTPServer）：`/api/sync/push`（收条目与删除）、`/api/sync/pull`、`/api/sync/longpoll`、`/api/records`（历史日 + 单文件垃圾桶哈希清单）、`/api/records/<name>`（日期或 `trash` 整文件拉取）、`/api/status`、`/api/reports`、`/api/admin/*`、`/api/health`；Bearer + device_id 鉴权 |
-| `hub/store.py` | 权威存储：`state.json` **仅“今天”**的条目/tombstone/垃圾桶账本/设备令牌/变更令牌 `version`；`append_entries`（按 entry_id 去重）、`apply_deletes`（按 entry_id 写墓碑 + 正文入垃圾桶）、`wait_for_change`（长轮询）、`pull`（今天全量）、历史日整文件回传；单文件垃圾桶渲染成 `Records/trash.md` |
+| `hub/store.py` | 权威存储：**「今天」的 `Records/<今天>.md` 整文件即事实源**（写操作在文件锁下「读 → 合并 → 写回」；同 id 内容不同时以已存文件（云端）为准）；`Records/trash.md` 同为文件权威；`state.json` 只留设备令牌（可删/可重建）；令牌 = `sha256(今天文件)`；`append_entries`（仅今天）、`apply_deletes`（按 entry_id 写墓碑 + 正文入垃圾桶）、`wait_for_change`（长轮询）、`pull`（今天全量） |
 | `hub/auth.py` | 链接凭证令牌哈希（scrypt，加盐、常量时间），只存哈希，不落明文 |
 | `hub/atomic_write.py` | 原子文件写入（服务端自带小工具，与客户端各自独立） |
-| `hub/render.py` | 日记文件格式（新格式；客户端独立镜像同款格式，由测试锁齐）：渲染 entry 标记、tombstone 占位、`<summary>` 区域；**不再解析旧格式/裸记录**（历史日整文件为准） |
+| `hub/render.py` | 日记文件格式（客户端独立镜像同款格式，由测试锁齐）：渲染 entry 标记、tombstone 占位、`<summary>` 区域；**并解析今天文件回条目/墓碑**（文件权威读回）；不把旧格式/裸记录当条目解析（历史日整文件为准） |
 | `hub/backup.py` | 内置数据备份调度：服务运行期间距上次成功备份满 7 天（或从未备份）即作为**子进程**执行 `server/deploy/backup.sh`，把整个 `data/` 空间打成单个 gzip tar 快照；状态持久化在 `data/.backup-state.json`，停止期间错过的备份在下次启动后补跑 |
 
 ### 云端 AI（ai/）
@@ -122,8 +121,8 @@ sudo python -m server.main deploy
 > myrecord-server` 并重新分发 `server.crt` 到各客户端）。
 
 `deploy` 写入服务端单元（仅 `myrecord-server.service`），并立即 `systemctl start` 启动主服务
-（不 `enable` 开机自启，部署出错后重启不会自动拉起损坏服务，便于人工介入排查）。**每周自动备份已由服务端
-内置调度触发**，不再安装独立的备份单元/定时器（`backup.sh` 仍是独立脚本，可手动/cron 调用）。
+（不 `enable` 开机自启，部署出错后重启不会自动拉起损坏服务，便于人工介入排查）。每周自动备份由服务端
+内置调度触发（`backup.sh` 仍是独立脚本，可手动/cron 调用），不安装独立的备份单元/定时器。
 
 `deploy` 保证服务端**运行在 `server/.venv` 虚拟环境**（`ExecStart` 用 venv 的 python，依赖装进 venv），
 并在结束时打印「部署完成」摘要块，把 **虚拟环境 / 自签证书 / 链接凭证 / API 配置 / 服务部署 /
@@ -146,14 +145,14 @@ sudo python -m server.main deploy
 - `myrecord-server.service` — 服务端单元（`deploy` 自动生成/写入；此文件为等价参照）。
 - `backup.sh` — 备份 `data` 空间为 tar（保留最近 N 份；服务端内置调度与手动/cron 均调用它）。
 
-数据空间(运行时生成):`server/data/` - `state.json`（**仅“今天”**的条目/tombstone/垃圾桶账本/设备/变更令牌 version）、
-`Records/`（权威每日日记；历史日整文件为准，可承载旧格式；`trash.md` 为单文件垃圾桶，进 sha256 同步清单）、`AnalysisReports/`（报告与自动任务状态）、
+数据空间(运行时生成):`server/data/` - `state.json`（**仅鉴权设备令牌**，可删/由 Records 重建）、
+`Records/`（权威日记：今天整文件即事实源，历史日整文件为准，可承载旧格式；`trash.md` 为单文件垃圾桶，进 sha256 同步清单）、`AnalysisReports/`（报告与自动任务状态）、
 `Log/`（服务端日志）。
 
 ## 数据与安全
 
 - 原始日记是唯一事实源；报告、总结、自动任务状态都是可重建派生数据。
-- 删改为垃圾桶语义（tombstone），不做硬删除。
+- 删除即写墓碑占位（tombstone）、正文移入单文件垃圾桶 `Records/trash.md`，不做硬删除。
 - 链接凭证是**单一共享 token**（服务端只存 scrypt 哈希），凭证不绑定设备；设备由各端自报本机名区分。
   **连接与修改日志都必须携带该凭证**（无凭证客户端只能本地记录，无法同步/删除/查看云端数据）。
 - **加密传输是强制的**：`run` 未配置 TLS 会拒绝启动（禁止明文）。`python -m server.main cert` 用
@@ -166,6 +165,6 @@ sudo python -m server.main deploy
 - **服务端记录详细日志**到 `data/Log/MyRecord.log`：客户端连接/鉴权、推送与删除、AI 报告
   生成成败与每步 Agent 调用、自动任务重试；不记录日记正文、模型密钥、token 明文。
 - 模型密钥只在服务端；不入数据空间、不入日志。
-- 日记文件统一使用 `<!-- myrecord-* -->` 条目/删除标记（新格式）。仅“今天”条目按此解析/合并；
+- 日记文件统一使用 `<!-- myrecord-* -->` 条目/删除标记。仅“今天”条目按此解析/合并；
   历史日（含旧格式 `**HH:MM:**` 无标记行、`<!-- agentrecord-* -->` 等旧标记）**不解析、不回写、不重排**，
   以整文件为单位由云端权威保存并原样回传（客户端只做整文件覆盖）。AI 只读正文文本。

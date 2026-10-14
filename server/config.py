@@ -47,7 +47,7 @@ def load() -> dict:
         merged["data_dir"] = data_dir
     else:
         merged["data_dir"] = (config_path().parent / data_dir).resolve()
-    # TLS 证书路径不再由 config.yaml 配置：`python -m server.main cert` 统一生成到
+    # TLS 证书路径不由 config.yaml 配置：`python -m server.main cert` 统一生成到
     # <data_dir>/tls/server.crt/.key，这里固定指向该缺省位置，免除用户手动填写/分离保管。
     merged["tls"] = {
         "certfile": str(Path(merged["data_dir"]) / "tls" / "server.crt"),

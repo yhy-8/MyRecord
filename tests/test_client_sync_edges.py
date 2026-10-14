@@ -156,7 +156,7 @@ class SendPendingTests(SyncClientEdgeBase):
         remaining = sync._load_outbox()
         self.assertEqual(["b"], [e["entry_id"] for e in remaining])
         # 未调用 _apply_delta（422 不走正常对账）
-        self.assertEqual(0, sync._read_state())
+        self.assertEqual("", sync._read_state())
 
     @patch("client.sync.requests.Session.request")
     def test_send_pending_404_raises_server_error_and_keeps_outbox(self, req):
@@ -171,11 +171,11 @@ class SendPendingTests(SyncClientEdgeBase):
     def test_send_pending_200_removes_accepted(self, req):
         self._outbox([{"entry_id": "a", "date": _TODAY, "text": "x"}])
         req.return_value = _Resp(200, {
-            "accepted": ["a"], "version": 1, "entries": [], "tombstones": [],
+            "accepted": ["a"], "token": "hash1", "entries": [], "tombstones": [],
         })
         self.client.send_pending()
         self.assertEqual([], sync._load_outbox())
-        self.assertEqual(1, sync._read_state())
+        self.assertEqual("hash1", sync._read_state())
 
 
 class EnqueueNonBlockingTests(SyncClientEdgeBase):
@@ -199,7 +199,7 @@ class EnqueueNonBlockingTests(SyncClientEdgeBase):
     @patch("client.sync.requests.Session.request")
     def test_flush_pending_loop_sends_queued_entry(self, req):
         req.return_value = _Resp(
-            200, {"accepted": ["a"], "version": 1, "entries": [], "tombstones": []}
+            200, {"accepted": ["a"], "token": "hash1", "entries": [], "tombstones": []}
         )
         self.client.enqueue(
             {"entry_id": "a", "date": _TODAY, "ts": 1, "tag": "", "text": "x"}
@@ -223,7 +223,7 @@ class OutboxDeleteTests(SyncClientEdgeBase):
         entry = {"entry_id": "d1", "date": _TODAY, "ts": 5, "text": "x"}
         self.client.enqueue_delete(entry)
         req.return_value = _Resp(
-            200, {"accepted": ["d1"], "version": 1, "entries": [], "tombstones": []}
+            200, {"accepted": ["d1"], "token": "hash1", "entries": [], "tombstones": []}
         )
         self.client.send_pending()
         self.assertEqual([], sync._load_deletes())

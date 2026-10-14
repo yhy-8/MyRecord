@@ -1,4 +1,4 @@
-"""服务端 CLI：启动 hub、设备令牌管理、Records 导入、Records 渲染。"""
+"""服务端 CLI：启动 hub、设备令牌管理、Records 导入。"""
 
 import argparse
 import datetime
@@ -35,9 +35,6 @@ def _command_run(args: argparse.Namespace) -> int:
     # 使自动任务以「文件存在性」判定有无内容（§3.2 / §9.2）。
     ai_analysis._purge_empty_placeholder_days()
 
-    def render_records() -> None:
-        store.render_records(data_dir / "Records")
-
     def list_reports(kind: str) -> list[str]:
         base = data_dir / "AnalysisReports"
         if not base.exists():
@@ -73,19 +70,15 @@ def _command_run(args: argparse.Namespace) -> int:
             return {}
 
     def run_ai_cycle() -> None:
-        """一次自动任务循环：仅在权威数据版本变化时重渲染 Records。
+        """一次自动任务循环。
 
-        后台只是用它将 Records 与 state.json 保持同步；没有新条目/墓碑时跳过
-        全量重渲染，避免每分钟对全部日期做无谓的磁盘写。新条目/墓碑已被
-        Store 写后即时渲染（见 append_entries/tombstone），这里只作为兜底。
+        今天条目由 Store 写后即时落盘，Records/ 始终是权威且最新，无需按 state
+        重渲染；这里只负责执行到期的 AI 任务。
         """
         try:
             ai_analysis.run_due_automatic_tasks()
         except Exception:
             pass
-        current = store.data["version"]
-        if current != store.rendered_version():
-            store.render_records(data_dir / "Records")
 
     def admin_retry():
         return ai_analysis.retry_failed_automatic_tasks()
@@ -105,7 +98,6 @@ def _command_run(args: argparse.Namespace) -> int:
             "models": [m.get("name") for m in ai_settings.ModelConfig.models()],
         }
 
-    render_records()
     host = server_cfg["host"]
     port = int(server_cfg["port"])
     certfile = server_cfg["tls"]["certfile"]
@@ -211,8 +203,8 @@ def _command_import(args: argparse.Namespace) -> int:
     历史日以 `Records/*.md` 整文件为权威（可承载旧格式）。用户把旧日记
     放上云端 = 目录整体拷贝，旧格式原样保留，无需解析成条目。日期合法才拷贝到
     `data_dir/Records/<date>.md`（存在则覆盖——云端权威）。
-    只做整文件拷贝、不回调 `render_records`：导入不写入 state，尤其不能重渲染
-    “今天”（会用空 state 覆盖刚导入的今日文件）。
+    只做整文件拷贝、不解析也不重排：导入不写入 state，也不重写“今天”文件
+    （Records/ 里的 md 本就权威，导入的今天文件原样保留）。
     """
     source = Path(args.records).resolve()
     if not source.is_dir():
@@ -237,13 +229,6 @@ def _command_import(args: argparse.Namespace) -> int:
         f"导入完成：整文件拷贝 {total} 个 Records（来自 {source}）；"
         f"跳过 {skipped} 个非法日期文件。"
     )
-    return 0
-
-
-def _command_render(args: argparse.Namespace) -> int:
-    store, data_dir = _store(Path(config.load()["server"]["data_dir"]))
-    store.render_records(data_dir / "Records")
-    print("Records 渲染完成。")
     return 0
 
 
@@ -625,7 +610,6 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     token.add_argument("action", choices=["create", "list"])
     imp = sub.add_parser("import", help="导入 Records 目录")
     imp.add_argument("--records", required=True)
-    sub.add_parser("render", help="重新渲染全部 Records")
     rep = sub.add_parser("report", help="手动生成周报/月报（同一流程，直接覆盖）")
     rep.add_argument("--kind", required=True, choices=["weekly", "monthly"])
     rep.add_argument(
@@ -650,8 +634,6 @@ def main(argv: list[str] | None = None) -> int:
         return _command_token(args)
     if command == "import":
         return _command_import(args)
-    if command == "render":
-        return _command_render(args)
     if command == "report":
         return _command_report(args)
     if command == "deploy":

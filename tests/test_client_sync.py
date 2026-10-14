@@ -265,28 +265,26 @@ class MultiClientConsistencyTest(ClientSyncE2ETestBase):
         self.assertLess(ca_content.index("B-早"), ca_content.index("A-晚"))
         self.assertLess(cb_content.index("B-早"), cb_content.index("A-晚"))
 
-    def test_client_matches_server_render_after_reconcile(self):
-        """同一份权威数据：客户端重建后的每日文件与服务端渲染严格一致（含墓碑插回原位）。"""
+    def test_client_matches_server_file_after_reconcile(self):
+        """同一份权威数据：客户端对账后的今天文件与服务端权威文件逐字节一致（含墓碑插回原位）。"""
         root = _tmp_dir("mc-consist-")
         self.store.append_entries(self.device_a, [
-            {"entry_id": "x1", "date": _TODAY, "ts": 1717200000, "tag": "", "text": "早"},
-            {"entry_id": "x3", "date": _TODAY, "ts": 1717200120, "tag": "", "text": "晚"},
+            {"entry_id": "1717200000", "date": _TODAY, "ts": 1717200000, "tag": "", "text": "早"},
+            {"entry_id": "1717200120", "date": _TODAY, "ts": 1717200120, "tag": "", "text": "晚"},
         ])
         self.store.append_entries(self.device_b, [
-            {"entry_id": "x2", "date": _TODAY, "ts": 1717200060, "tag": "", "text": "中"},
+            {"entry_id": "1717200060", "date": _TODAY, "ts": 1717200060, "tag": "", "text": "中"},
         ])
-        self.store.tombstone("x2", self.device_b)  # 中间的 x2 被删 → 墓碑应插回其原位置
+        self.store.tombstone("1717200060", self.device_b)  # 中间的条目被删 → 墓碑应插回其原位置
         client, pat = self._new_client(self.device_a, self.token_a, root)
         try:
             client.full_sync()
             client_content = (root / "Records" / f"{_TODAY}.md").read_text(encoding="utf-8")
-            srv_records = _tmp_dir("mc-srv-") / "Records"
-            self.store.render_records(srv_records)
-            server_content = (srv_records / f"{_TODAY}.md").read_text(encoding="utf-8")
-            # 客户端镜像与服务端渲染逐字节一致：同格式、同时序、墓碑同位置
+            server_content = (self.store.records_dir / f"{_TODAY}.md").read_text(encoding="utf-8")
+            # 客户端镜像与服务端权威文件逐字节一致：同格式、同时序、墓碑同位置
             self.assertEqual(client_content, server_content)
-            self.assertLess(client_content.index("早"), client_content.index("myrecord-tombstone-time:x2"))
-            self.assertLess(client_content.index("myrecord-tombstone-time:x2"), client_content.index("晚"))
+            self.assertLess(client_content.index("早"), client_content.index("myrecord-tombstone-time:1717200060"))
+            self.assertLess(client_content.index("myrecord-tombstone-time:1717200060"), client_content.index("晚"))
         finally:
             self._stop(pat)
 
@@ -732,10 +730,9 @@ class SubSecondOrderingTest(unittest.TestCase):
 class IncrementalApplyDeltaOrderTest(unittest.TestCase):
     """增量对账（apply_delta）保持当天文件按 (ts, entry_id) 时间有序。
 
-    多端离线记录、服务端按推送顺序（v）入库时，条目/墓碑到达顺序与时间序可能不一致；
+    多端离线记录、服务端按推送顺序入库时，条目/墓碑到达顺序与时间序可能不一致；
     若 apply_delta 只是把新块追加到文件末尾，本地镜像就会乱序（复现：真实设备 t2 的
-    2026-09-06 内容按推送序排列而非时间序）。必须以块为单位合并重排，与全量重建
-    （rebuild_records）得到一致的时间有序镜像。
+    2026-09-06 内容按推送序排列而非时间序）。必须以块为单位合并重排，得到时间有序镜像。
     """
 
     def _entry(self, entry_id, ts, text):
@@ -761,7 +758,7 @@ class IncrementalApplyDeltaOrderTest(unittest.TestCase):
             }
         }
         with patch.object(client_config, "load", return_value=cfg):
-            journal.rebuild_records(
+            journal.apply_delta(
                 [
                     self._entry("436841", 436841, "我的刀盾"),
                     self._entry("7507454", 7507454, "?"),
@@ -807,6 +804,26 @@ class IncrementalApplyDeltaOrderTest(unittest.TestCase):
         self.assertEqual(1, content.count("myrecord-time:426853 -->"))
         self.assertEqual(1, content.count("myrecord-time:436841 -->"))
 
+    def test_apply_delta_same_id_different_text_takes_remote(self):
+        """同 id 内容不同：以云端为准，用云端块替换本地块（避免两端长期不一致）。"""
+        root = _tmp_dir("cli-incr-conflict-")
+        records = root / "Records"
+        records.mkdir(parents=True, exist_ok=True)
+        cfg = {
+            "client": {
+                "records_dir": records,
+                "analysis_dir": root / "A",
+                "server_url": "http://x",
+            }
+        }
+        with patch.object(client_config, "load", return_value=cfg):
+            journal.apply_delta([self._entry("1000", 1000, "本地")], [])
+            journal.apply_delta([self._entry("1000", 1000, "云端")], [])
+        content = (records / f"{_TODAY}.md").read_text(encoding="utf-8")
+        self.assertEqual(1, content.count("myrecord-time:1000 -->"))
+        self.assertIn("云端", content)
+        self.assertNotIn("本地", content)
+
     def test_apply_delta_orders_bare_imported_entries_by_derived_time(self):
         """导入的裸记录（非时间戳 id，ts 由 HH:MM 推导、分钟对齐）也按时间次序排列。
 
@@ -833,7 +850,7 @@ class IncrementalApplyDeltaOrderTest(unittest.TestCase):
                 "tag": "",
                 "text": "裸记录",
             }
-            journal.rebuild_records([bare], [])
+            journal.apply_delta([bare], [])
             # 之后增量补入一条时间更早的普通时间戳记录 → 应插在裸记录之前
             journal.apply_delta([self._entry("1788677400000", 1788677400000, "早")], [])
         content = (records / f"{_TODAY}.md").read_text(encoding="utf-8")
@@ -855,7 +872,7 @@ class IncrementalApplyDeltaOrderTest(unittest.TestCase):
             }
         }
         with patch.object(client_config, "load", return_value=cfg):
-            journal.rebuild_records(
+            journal.apply_delta(
                 [
                     self._entry("426853", 426853, "2"),
                     self._entry("436841", 436841, "我的刀盾"),
@@ -997,7 +1014,7 @@ class LocalDeleteAndTrashTest(unittest.TestCase):
         }
 
     def test_latest_local_entry_and_delete_record_move_body_to_trash(self):
-        journal.rebuild_records(
+        journal.apply_delta(
             [self._entry("1000", 1000, "早"), self._entry("2000", 2000, "晚")], []
         )
         latest = journal.latest_local_entry(_TODAY)
@@ -1018,16 +1035,16 @@ class LocalDeleteAndTrashTest(unittest.TestCase):
         self.assertFalse(journal.delete_record(entry))
 
     def test_apply_delta_remote_tombstone_moves_local_body_to_trash(self):
-        journal.rebuild_records([self._entry("1000", 1000, "别端删我")], [])
+        journal.apply_delta([self._entry("1000", 1000, "别端删我")], [])
         journal.apply_delta([], [{"entry_id": "1000", "date": _TODAY, "entry_ts": 1000}])
         trash = (self.records / "trash.md").read_text(encoding="utf-8")
         self.assertIn("别端删我", trash)
         content = (self.records / f"{_TODAY}.md").read_text(encoding="utf-8")
         self.assertIn("myrecord-tombstone-time:1000", content)
 
-    def test_rebuild_records_moves_tombstoned_local_body_to_trash(self):
-        journal.rebuild_records([self._entry("1000", 1000, "全量删我")], [])
-        journal.rebuild_records([], [{"entry_id": "1000", "date": _TODAY, "entry_ts": 1000}])
+    def test_apply_delta_moves_tombstoned_local_body_to_trash(self):
+        journal.apply_delta([self._entry("1000", 1000, "全量删我")], [])
+        journal.apply_delta([], [{"entry_id": "1000", "date": _TODAY, "entry_ts": 1000}])
         trash = (self.records / "trash.md").read_text(encoding="utf-8")
         self.assertIn("全量删我", trash)
         self.assertIn(

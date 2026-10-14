@@ -6,7 +6,7 @@
 Markdown 渲染中不可见，仅用于对账与去重。`<summary>` 区域由服务端独占写。
 
 本模块负责把每日日记文件渲染成文件文本（render_*）。历史日以整文件为权威
-（可能含旧格式），**不再解析/回写/重排**；后端仅保留“记录头行”正则（RECORD_PATTERN）
+（可能含旧格式），**不解析/回写/重排**；后端仅保留“记录头行”正则（RECORD_PATTERN）
 供 AI 分析链路按天读取记录正文。
 """
 
@@ -105,6 +105,126 @@ def render_day_file(
     return day_header(date, summary) + body
 
 
+# ---------- 文件解析（“今天”文件为权威：读回条目/墓碑） ----------
+
+# 块起始：条目标记或墓碑标记行（id 紧跟其内；生产环境 id 即毫秒时间戳）。
+_BLOCK_START_RE = re.compile(
+    r"^(<!-- (?:myrecord-time:|myrecord-tombstone-time:)([^>]+) -->)",
+    re.MULTILINE,
+)
+
+# 条目块：`<!-- myrecord-time:id -->` + 可选设备标记 + `**HH:MM [dev|tag]:** 正文`。
+# 正文严格单行（entry_block 已保证），故用 MULTILINE + `$` 即可定位到行尾。
+_ENTRY_BLOCK_RE = re.compile(
+    r"^<!-- myrecord-time:(?P<id>[^>]+) -->\n"
+    r"(?:<!-- myrecord-device:(?P<devmark>[^>]+) -->\n)?"
+    r"\*\*(?P<hhmm>\d{2}:\d{2})(?: (?P<label>[^\n]*?))?:\*\* ?(?P<text>.*)$",
+    re.MULTILINE,
+)
+
+
+def _valid_iso_date(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        return datetime.date.fromisoformat(value).isoformat() == value
+    except ValueError:
+        return False
+
+
+def _block_sort_ts(entry_id: str, date: str, block_text: str) -> int:
+    """块的时间排序键：生产环境 id 即毫秒时间戳。
+
+    非数字 id（导入的裸记录 bare-...）则从块内 `**HH:MM:` 按 UTC+8 还原 ts，
+    无法还原时防御性取 0；与服务端渲染/客户端 apply_delta 的排序键保持一致。
+    """
+    if entry_id.isdigit():
+        return int(entry_id)
+    match = re.search(r"\*\*(\d{2}:\d{2})", block_text)
+    if match and _valid_iso_date(date):
+        hour, minute = (int(part) for part in match.group(1).split(":"))
+        year, month, day = (int(part) for part in date.split("-"))
+        dt = datetime.datetime(year, month, day, hour, minute, tzinfo=_UTC8)
+        return int(dt.timestamp() * 1000)
+    return 0
+
+
+def is_entry_block(block_text: str) -> bool:
+    """块是否为活跃条目（而非墓碑占位）。"""
+    return block_text.lstrip().startswith(ENTRY_MARKER_PREFIX)
+
+
+def split_day_blocks(content: str, date: str) -> tuple[str, list[tuple[int, str, str]]]:
+    """把日记文件拆成头部文本 + 有序块列表（原文保留）。
+
+    返回 (头部, [(sort_ts, entry_id, 块原文)])；头部（文件头、<summary>、分隔）
+    完整保留，块原文（含设备行）原样保留，便于合并后按 (ts, entry_id) 重排写回。
+    """
+    matches = list(_BLOCK_START_RE.finditer(content))
+    if not matches:
+        return content, []
+    header = content[: matches[0].start()]
+    blocks = []
+    for i, match in enumerate(matches):
+        start = match.start()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(content)
+        entry_id = match.group(2)
+        block_text = content[start:end]
+        blocks.append((_block_sort_ts(entry_id, date, block_text), entry_id, block_text))
+    return header, blocks
+
+
+def parse_entry_block(block: str, date: str) -> dict | None:
+    """把一条条目块解析回 entry dict；非条目块（墓碑/畸形）返回 None。"""
+    match = _ENTRY_BLOCK_RE.match(block.lstrip("\n"))
+    if not match:
+        return None
+    entry_id = match.group("id")
+    label = (match.group("label") or "").strip()
+    device_id = match.group("devmark") or ""
+    tag = ""
+    if label.startswith("[") and label.endswith("]"):
+        device_id = device_id or label[1:-1]
+    elif label:
+        tag = label
+    ts = int(entry_id) if entry_id.isdigit() else _block_sort_ts(entry_id, date, block)
+    return {
+        "entry_id": entry_id,
+        "device_id": device_id,
+        "date": date,
+        "ts": ts,
+        "tag": tag,
+        "text": match.group("text").strip(),
+    }
+
+
+def parse_day(content: str, date: str) -> tuple[str, list[dict], list[dict]]:
+    """解析某日文件为 (头部, 活跃条目, 墓碑)；以文件内容为准。"""
+    header, blocks = split_day_blocks(content, date)
+    entries: list[dict] = []
+    tombstones: list[dict] = []
+    for sort_ts, entry_id, block_text in blocks:
+        parsed = parse_entry_block(block_text, date)
+        if parsed is not None:
+            entries.append(parsed)
+        else:
+            tombstones.append(
+                {"entry_id": entry_id, "date": date, "entry_ts": sort_ts}
+            )
+    return header, entries, tombstones
+
+
+def parse_trash(content: str) -> list[dict]:
+    """解析单文件垃圾桶 ``trash.md``：返回条目块列表（非条目块跳过）。"""
+    _header, blocks = split_day_blocks(content, "")
+    result = []
+    for _sort_ts, _entry_id, block_text in blocks:
+        parsed = parse_entry_block(block_text, "")
+        if parsed is not None:
+            result.append(parsed)
+    return result
+
+
 # 记录头行正则：供 AI 分析链路按天读取记录正文（见 ai/analysis/context.py）。
 RECORD_PATTERN = re.compile(
     r"^\*\*(\d{2}:\d{2})(?: ([^\n]*?))?:\*\*\s?(.*?)"
@@ -113,4 +233,4 @@ RECORD_PATTERN = re.compile(
 )
 # 记录正文在遇到下一条的标记行（任何 `<!-- ... -->` 注释）或下一条时间行处截止，
 # 不会把标记注释吞进本条正文——AI 只应看到 `**HH:MM [设备名]:** 正文`。
-# 注意：历史日（含旧格式）以整文件为准，本正则不再用于条目级解析/回写/重排。
+# 注意：历史日（含旧格式）以整文件为准，本正则不用于条目级解析/回写/重排。

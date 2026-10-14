@@ -20,8 +20,8 @@ python -m client
 
 客户端**不密集轮询云端**，且**同步是全自动、无感知的**：
 
-1. **启动即自动完整同步**：连接云端完整对账（从 `version=0` 重建/补齐本地**“今天”**镜像，
-   覆盖本地文件丢失；按删除标记移除）、冲刷离线队列、同步报告；历史日记与报告改为**哈希清单比对**——
+1. **启动即自动完整同步**：连接云端完整对账（拉取今天全量，**只补齐本地缺失条目、按删除标记移除，不整文件重建**）、
+   冲刷离线队列、同步报告；历史日记与报告按**哈希清单比对**——
    先拉 `GET /api/records` / `GET /api/reports` 的 `sha256` 清单，只对**哈希不同**的条目整文件拉取覆盖，
    未变的跳过（历史日只读，避免每次启动对全部历史文件全量下载）。
 2. **运行期间持续同步**：后台共两个线程——**接收线程**保持一条长连接（长轮询）挂起，服务端有更新
@@ -85,8 +85,8 @@ cp client/config.example.yaml client/config.yaml
 
 `/status` 输出的含义（均为**今天** UTC+8 的视角，历史日以 `Records/*.md` 整文件为准）：
 
-- `今日条目` / `今日已删`：**仅当天**（UTC+8）有效条目数 / 已删除（tombstone）条数。历史日条目
-  **不计数**（封存进整文件后不再进入 `state.json`）。
+- `今日条目` / `今日已删`：**仅当天**（UTC+8）有效条目数 / 已删除（tombstone）条数。计数直接读今天的
+  `Records/<date>.md` 文件解析，历史日不计数。
 - 自动任务逐任务状态（服务端严格以文件为准判定）：
   - `已完成`：产物文件已生成（昨日总结 / 周月报）。
   - `无内容（该周期无记录）`：该周期没有日记，无事可做——注意：**不代表**生成了内容；即使服务端
@@ -109,7 +109,7 @@ cp client/config.example.yaml client/config.yaml
 | `identity.py` | 链接凭证与设备身份：读写 `credentials.json`（单一共享 token）；`device_name()` 直接用本机名（电脑名/手机名，不允许自定义）；`make_entry_id(ts)` 以毫秒时间戳为 id（时间戳即标识，不做内容哈希） |
 | `atomic_write.py` | 原子文件写入（客户端自带小工具，与服务端各自独立） |
 | `render.py` | 日记文件格式本地渲染（标记/entry/tombstone/day_header；客户端自带，与服务端 hub/render.py 同款互不引用） |
-| `journal.py` | 本地日记渲染与写入：**只写“今天”（UTC+8）** `Records/YYYY-MM-DD.md` 原子追加；对账**只对今天**做 `(ts, entry_id)` 时间有序合并；昨天及以前**整文件重放**（云端为准、覆盖本地）；过期未同步、`date < 今天` 的条目直接作废；tombstone 移除 |
+| `journal.py` | 本地日记渲染与写入：**只写“今天”（UTC+8）** `Records/YYYY-MM-DD.md` 原子追加；对账**只对今天**做 `(ts, entry_id)` 时间有序合并（**补齐缺失、按墓碑移除；同 id 内容不同以云端块替换本地块**）；昨天及以前整文件同步（云端为准、覆盖本地）；过期未同步、`date < 今天` 的条目直接作废；tombstone 移除 |
 | `file_lock.py` | 跨进程互斥（`.journal.lock` 等），保证原子写 |
 | `sync.py` | 与中枢的同步客户端：`enqueue` / `enqueue_delete`（本地入队、非阻塞）/ `flush_pending_loop`（后台推送线程，入队即推、失败重试）/ `push_new`（写后即 push，**仅今天**）、`send_pending`（冲刷离线队列的条目与删除，过期即丢弃）、`pull`（拉取今天全量）、`longpoll`（长连接扇出）、`full_sync`（启动/手动完整同步 + 历史日与 `trash.md` 哈希对账）、`sync_reports`（同步报告）、`status/admin_retry/admin_set_model` |
 | `trust.py` | 首次连接信任（TOFU）：抓取服务端证书并交互确认后固定到 `server.crt`、自动设 `verify`；证书变化时展示新旧供用户决定覆盖；`PinnedHTTPAdapter` 只认固定证书、不校验 IP/主机名 |
@@ -121,7 +121,7 @@ cp client/config.example.yaml client/config.yaml
 - `credentials.example.json` 凭据**样板**：复制为 `credentials.json` 并把 `token` 换成服务端签发的随机字符串（留空=仅本地记录、不同步；文件里的 `_说明` 是给人看的注释，程序忽略）
 - `credentials.json` 链接凭证（服务端签发的唯一共享 token）
 - `server.crt` TOFU 固定的服务端证书（首次确认后落盘，`verify` 指向它）
-- `state.json` 本地同步游标（单条：当前已同步到的云端版本号）
+- `state.json` 本地同步游标（单条：已见到的今天文件 sha256）
 - `outbox.json` 离线待推送队列
 - `../Records/` 本地日记、`../AnalysisReports/` 云端报告副本
   （默认在 `client/` 的同级目录即项目根，与代码包 `client/` 分开放置；打包版在 exe 同级目录）

@@ -414,28 +414,6 @@ class ServerMainRenderImportTests(unittest.TestCase):
         server_main.config.load = self._orig_load
         self.tmp.cleanup()
 
-    def test_render_writes_records_from_store(self):
-        today = today_utc8()
-        store = Store(self.data_dir / "state.json")
-        store.append_entries(
-            "import",
-            [{
-                "entry_id": "a-1",
-                "date": today,
-                "ts": 1788652800000,
-                "tag": "",
-                "text": "hello",
-            }],
-        )
-        with patch("sys.stdout", io.StringIO()):
-            rc = server_main.main(["render"])
-        self.assertEqual(0, rc)
-        rendered = (self.data_dir / "Records" / f"{today}.md").read_text(
-            encoding="utf-8"
-        )
-        self.assertIn("hello", rendered)
-        self.assertIn("a-1", rendered)
-
     def test_import_records_copies_files_whole(self):
         """方案 B：import 是**整文件拷贝**，不解析成条目、不重排（旧格式原样保留）。"""
         src = self.root / "records-import"
@@ -464,7 +442,7 @@ class ServerMainRenderImportTests(unittest.TestCase):
         self.assertFalse((self.data_dir / "Records" / "notes.md").exists())
 
     def test_import_preserves_today_file(self):
-        """import 是整文件拷贝；若含“今天”文件，不得被 render_records 用空 state 覆盖。"""
+        """import 是整文件拷贝；若含“今天”文件，不会被服务端写路径覆盖。"""
         src = self.root / "records-import-today"
         src.mkdir()
         today = today_utc8()

@@ -3,7 +3,7 @@
 每天一个 Records/YYYY-MM-DD.md 容器。每条记录前带一个隐藏的
 `<!-- myrecord-time:<毫秒时间戳> -->` 标记，删除位置写 tombstone 占位（不含正文）。
 `<summary>` 区域由服务端独占写。本地写入永不因同步失败回滚；对账（apply_delta）
-只做补齐与 tombstone 移除，不把已删条目推回。
+补齐缺失条目、按 tombstone 移除已删条目（同 id 内容不同以云端块替换本地块），不把已删条目推回。
 
 日记格式（标记常量、渲染函数、<summary> 区域）由客户端本地的 render 模块维护，
 与 server/hub/render.py 独立、互不引用（客户端与服务端严格分离、各自独立部署）。
@@ -12,7 +12,6 @@
 import datetime
 import logging
 import re
-from pathlib import Path
 
 from . import config, render
 from .atomic_write import atomic_write
@@ -176,9 +175,12 @@ def apply_delta(entries: list[dict], tombstones: list[dict]) -> None:
     整文件覆盖（云端权威），不在此增量合并/重排。
 
     增量对账把受影响日期**按 (ts, entry_id) 合并重排**，而不是简单追加到文件末尾：
-    多端离线记录、服务端按推送顺序（v）入库时，条目到达顺序可能与时间序不一致，
-    只追加会让本地镜像乱序（与全量重建不一致）。这里以块为单位合并重排，
-    既保留既有块原文与 `<summary>`，又始终得到时间有序的镜像。
+    多端离线记录、服务端按推送顺序入库时，条目到达顺序可能与时间序不一致，
+    只追加会让本地镜像乱序。这里以块为单位合并重排，既保留既有块原文与
+    `<summary>`，又始终得到时间有序的镜像。
+
+    **同 id 以云端为准**：同一 entry_id 云端返回的块与本地块内容不同时，用云端块替换
+    本地块（避免云端与本地长期不一致）；内容相同则保持不动。
     """
     entry_by_date: dict[str, list[dict]] = {}
     for entry in entries:
@@ -200,17 +202,24 @@ def apply_delta(entries: list[dict], tombstones: list[dict]) -> None:
             ensure_day_file(date)
             path = day_path(date)
             content = path.read_text(encoding="utf-8")
-            existing_entries = day_entry_ids(content)
             existing_tombs = day_tombstone_ids(content)
             header, blocks = _split_day_blocks(content, date)
 
-            # 补齐缺失条目（按时间排序并入，而非追加到末尾）
+            # 合并条目（云端为准）：缺失则补齐，同 id 内容不同则用云端块替换。
             for entry in entry_by_date.get(date, []):
-                if entry["entry_id"] in existing_entries:
+                entry_id = entry["entry_id"]
+                if entry_id in existing_tombs:
+                    continue  # 防御：同 id 已是本地墓碑时不被条目复活
+                server_block = entry_block(entry) + "\n"
+                local_blocks = [
+                    b
+                    for b in blocks
+                    if b[1] == entry_id and b[2].lstrip().startswith(ENTRY_MARKER_PREFIX)
+                ]
+                if local_blocks and all(b[2] == server_block for b in local_blocks):
                     continue
-                blocks.append(
-                    (int(entry.get("ts", 0)), entry["entry_id"], entry_block(entry) + "\n")
-                )
+                blocks = [b for b in blocks if b[1] != entry_id]
+                blocks.append((int(entry.get("ts", 0)), entry_id, server_block))
             # 墓碑：把对应条目块替换/补写为占位符，按原条目时间插回原位置；
             # 被移除的正文块同步并入本地垃圾桶（收到别端的删除也不丢正文）。
             removed_trash = []
@@ -232,79 +241,6 @@ def apply_delta(entries: list[dict], tombstones: list[dict]) -> None:
             if rebuilt != content:
                 atomic_write(path, rebuilt)
             _append_trash_blocks(removed_trash)
-
-
-_SUMMARY_RE = re.compile(r"<summary>(.*?)</summary>", re.DOTALL)
-
-
-def _existing_summary(path: Path) -> str:
-    """读取目标文件里已有的 `<summary>` 正文，供重建时保留（与服务端行为一致）。"""
-    if not path.exists():
-        return ""
-    try:
-        content = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeError):
-        return ""
-    match = _SUMMARY_RE.search(content)
-    return match.group(1).strip() if match else ""
-
-
-def rebuild_records(entries: list[dict], tombstones: list[dict]) -> None:
-    """从权威全量数据重建本地“今天”记录文件：按时间排序、墓碑插回原位置，并保留 summary。
-
-    用于完整对账（pull?version=0）：把本地**今天**镜像重建为与服务端渲染一致的时间有序结构，
-    使多端离线写入时也按时间而非推送顺序入库。历史日以云端整文件为准，**不经由本函数重建**。
-    局部增量（apply_delta）同样按受影响日期合并重排（见 apply_delta），保证扇出后
-    镜像仍时间有序；与全量重建共用同一套 (ts, entry_id) 排序约定。
-    """
-    by_date: dict[str, list[dict]] = {}
-    for entry in entries:
-        by_date.setdefault(entry["date"], []).append(entry)
-    tombs_by_date: dict[str, list[dict]] = {}
-    for tombstone in tombstones:
-        tombs_by_date.setdefault(tombstone.get("date", ""), []).append(tombstone)
-    today = today_utc8()
-    with file_lock(records_dir() / ".journal.lock"):
-        for date in sorted(set(by_date) | set(tombs_by_date)):
-            if date != today:
-                # 只重建“今天”（历史日以云端整文件为准，不经由全量重建）。
-                continue
-            if not _valid_iso_date(date):
-                # date 用于拼文件名；非法日期（如含 ../）会让写入逃逸出 Records，防御性跳过。
-                logger.warning("entry_date_invalid skips date=%r", date)
-                continue
-            ensure_day_file(date)
-            path = day_path(date)
-            # 重建前先记下本地已有的条目块：服务端权威集合里“已墓碑、无活跃条目”的那些，
-            # 正文并入本地垃圾桶后再重建（收到别端删除不丢正文）。
-            previous_blocks = []
-            if path.exists():
-                try:
-                    previous_blocks = _split_day_blocks(
-                        path.read_text(encoding="utf-8"), date
-                    )[1]
-                except (OSError, UnicodeError):
-                    previous_blocks = []
-            server_entry_ids = {e["entry_id"] for e in by_date.get(date, [])}
-            tombstone_ids = {t["entry_id"] for t in tombs_by_date.get(date, [])}
-            removed_trash = [
-                block_text
-                for _ts, block_id, block_text in previous_blocks
-                if block_id in tombstone_ids
-                and block_id not in server_entry_ids
-                and block_text.lstrip().startswith(ENTRY_MARKER_PREFIX)
-            ]
-            text = render.render_day_file(
-                date,
-                by_date.get(date, []),
-                tombs_by_date.get(date, []),
-                summary=_existing_summary(path),
-            )
-            atomic_write(path, text)
-            _append_trash_blocks(removed_trash)
-
-
-
 
 
 # ---------- 本地解析 / 离线删除 / 单文件垃圾桶 ----------
@@ -418,7 +354,7 @@ def delete_record(entry: dict) -> bool:
     """离线删除本地某条：移除条目块、原位写墓碑、正文并入本地垃圾桶；返回是否真删除。
 
     仅允许删“今天”。删除后墓碑/正文由上层入 outbox 并异步推送，服务端与其它端按
-    entry_id 幂等合并——因此离线删除完全可行，不再依赖“服务端认定的最新一条”。
+    entry_id 幂等合并——因此离线删除完全可行，不依赖“服务端认定的最新一条”。
     """
     date = entry.get("date", "")
     if date != today_utc8():
