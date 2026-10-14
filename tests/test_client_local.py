@@ -57,7 +57,7 @@ class ClientEntryIdTests(unittest.TestCase):
 
     def test_entry_id_is_the_ts_string(self):
         i1 = identity.make_entry_id(1717200000123)
-        # id 就是毫秒时间戳字符串，不再做内容哈希
+        # id 就是毫秒时间戳字符串，不做内容哈希
         self.assertEqual(i1, "1717200000123")
         # 同时间戳 → 同 id（同一写入即同一条，离线重推不会重复入库）
         self.assertEqual(i1, identity.make_entry_id(1717200000123))
@@ -66,15 +66,19 @@ class ClientEntryIdTests(unittest.TestCase):
         self.assertEqual(identity.make_entry_id(1717200000124), "1717200000124")
 
     def test_device_name_defaults_to_hostname(self):
-        with patch.object(identity, "load", return_value={}):
-            self.assertTrue(identity.device_name())
-
-    def test_device_name_ignores_override_and_uses_hostname(self):
-        # 配置里不再允许自定义设备名：即使 credentials 残留 device_id，也只用本机名
-        with patch.object(identity, "load", return_value={"token": "t", "device_id": "vivo y78"}), patch.object(
+        with patch.object(client_config, "load", return_value={"client": {"device_name": ""}}), patch.object(
             identity, "_hostname", return_value="myhost"
         ):
             self.assertEqual("myhost", identity.device_name())
+
+    def test_device_name_prefers_custom_config_name(self):
+        # /name 写入 config.yaml 的 client.device_name 优先于本机名（credentials 里的 device_id 不作为设备名）。
+        with patch.object(
+            client_config, "load", return_value={"client": {"device_name": "MyLaptop"}}
+        ), patch.object(identity, "load", return_value={"token": "t", "device_id": "vivo y78"}), patch.object(
+            identity, "_hostname", return_value="myhost"
+        ):
+            self.assertEqual("MyLaptop", identity.device_name())
 
 
 class ClientConfigTests(unittest.TestCase):

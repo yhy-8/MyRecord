@@ -34,7 +34,8 @@ python -m client
 
 > **只写“今天”（UTC+8，固定写死在代码中，非配置项）。** 客户端把当天记录写入本地并在当天推送；
 > 某条记录若未能在当天同步、拖到第二天，则**直接作废**（丢弃 `outbox.json` 中 `date < 今天` 的条目，
-> 不再推送）；服务端亦拒绝历史日的推送作双保险。历史日记从不被客户端改写。
+> 不推送）；服务端也拒绝历史日的推送作双保险。历史日记为只读，客户端从不改写。
+> 日记内容的新增与删除只通过客户端交互产生，直接编辑 `Records/*.md` 文件不属于受支持的使用方式。
 
 ## 配置
 
@@ -71,17 +72,21 @@ cp client/config.example.yaml client/config.yaml
 > exe 同级目录作为 `config.yaml`（包内只保留 `config.example.yaml` 模板）；凭据 credentials.json
 > 与本地数据目录同样以 **exe 同级目录** 为基准（用户直接在 exe 旁编辑 config.yaml）。
 
-## 命令（统一 7 个）
+## 命令（统一 8 个）
 
 ```text
 /v [日期]   查看某天本地日记（默认今天；日期：今天/昨天/-N/MM-DD/YYYY-MM-DD）
 /c          清屏
 /h          帮助
 /d          删除本地当天最新一条（离线可用，正文入垃圾桶，联网后自动同步）
+/name [名字] 查看/设置设备名（自定义并永久保存；不填则显示当前名字）
 /status     查看服务端 AI 自动任务状态
 /retry      直接重试全部失败的服务端自动任务（无顺序依赖）
 /model      永久切换服务端 AI 模型
 ```
+
+设备名默认取本机名；若本机名含中文等非 ASCII 字符（无法作为 `X-Device-Id` 头发送），用 `/name`
+设一个 1-64 位的半角名字（字母/数字/空格/`._-`），会写入 `config.yaml` 的 `client.device_name` 并长期生效。
 
 `/status` 输出的含义（均为**今天** UTC+8 的视角，历史日以 `Records/*.md` 整文件为准）：
 
@@ -113,7 +118,7 @@ cp client/config.example.yaml client/config.yaml
 | `file_lock.py` | 跨进程互斥（`.journal.lock` 等），保证原子写 |
 | `sync.py` | 与中枢的同步客户端：`enqueue` / `enqueue_delete`（本地入队、非阻塞）/ `flush_pending_loop`（后台推送线程，入队即推、失败重试）/ `push_new`（写后即 push，**仅今天**）、`send_pending`（冲刷离线队列的条目与删除，过期即丢弃）、`pull`（拉取今天全量）、`longpoll`（长连接扇出）、`full_sync`（启动/手动完整同步 + 历史日与 `trash.md` 哈希对账）、`sync_reports`（同步报告）、`status/admin_retry/admin_set_model` |
 | `trust.py` | 首次连接信任（TOFU）：抓取服务端证书并交互确认后固定到 `server.crt`、自动设 `verify`；证书变化时展示新旧供用户决定覆盖；`PinnedHTTPAdapter` 只认固定证书、不校验 IP/主机名 |
-| `cli.py` | 交互主循环：7 个命令路由、`/v` 查看本地日记、清屏与日期解析、启动时 TOFU 确认 + `full_sync` + 历史日整文件校验、维持长连接接收线程 + 后台推送线程 |
+| `cli.py` | 交互主循环：8 个命令路由、`/v` 查看本地日记、`/name` 自定义设备名、清屏与日期解析、启动时 TOFU 确认 + `full_sync` + 历史日整文件校验、维持长连接接收线程 + 后台推送线程 |
 | `terminal.py` | 跨平台终端输入：逐字符读取、Unicode 感知整字符退格（Windows 控制台事件 / POSIX raw），并处理后台线程通知展示 |
 
 ## 本地文件

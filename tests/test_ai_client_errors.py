@@ -12,7 +12,6 @@ from unittest.mock import patch
 
 from server.ai import ai_client
 from server.ai.ai_client import (
-    AIResponse,
     CONFIG_ERROR_MARKER,
     NETWORK_ERROR_MARKER,
     OUTPUT_FILTERED_MARKER,

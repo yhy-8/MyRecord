@@ -24,7 +24,7 @@ from client import sync
 from client.sync import SyncClient
 
 
-# 方案 B：唯一可写窗口 = “今天”（UTC+8）。测试统一用它替代硬编码日期。
+# 唯一可写窗口 = “今天”（UTC+8）。测试统一用它替代硬编码日期。
 _TODAY = journal.today_utc8()
 
 
@@ -45,6 +45,14 @@ def _client_settings(records_dir: Path, analysis_dir: Path) -> dict:
 
 class ClientSyncE2ETestBase(unittest.TestCase):
     def setUp(self):
+        # 同一个属性会被多个客户端重复 patch（pa/pb 嵌套）。patch.object 的恢复是
+        # “恢复启动时捕获的值”，若按 FIFO 停止会把上一个客户端的 mock 留在原地；
+        # 这里在 setUp 记下真实实现，tearDown 无条件恢复，避免跨用例污染。
+        self._real_state_path = sync._state_path
+        self._real_outbox_path = sync._outbox_path
+        self._real_config_load = client_config.load
+        self._real_identity_load = client_identity.load
+        self._real_device_name = client_identity.device_name
         self._data = _tmp_dir("myrecord-srv-")
         self.store = Store(self._data / "state.json")
 
@@ -65,6 +73,11 @@ class ClientSyncE2ETestBase(unittest.TestCase):
         self.base = f"http://127.0.0.1:{self.port}"
 
     def tearDown(self):
+        sync._state_path = self._real_state_path
+        sync._outbox_path = self._real_outbox_path
+        client_config.load = self._real_config_load
+        client_identity.load = self._real_identity_load
+        client_identity.device_name = self._real_device_name
         self.httpd.shutdown()
         self.httpd.server_close()
 
@@ -261,7 +274,7 @@ class MultiClientConsistencyTest(ClientSyncE2ETestBase):
             self._stop(pb)
         ca_content = (root_a / "Records" / f"{_TODAY}.md").read_text(encoding="utf-8")
         cb_content = (root_b / "Records" / f"{_TODAY}.md").read_text(encoding="utf-8")
-        # 时间较早的 B-早 应排在时间较晚的 A-晚 之前（即使服务端按 v 序 push、时序乱）
+        # 时间较早的 B-早 应排在时间较晚的 A-晚 之前（即使服务端按推送顺序入库、时序乱）
         self.assertLess(ca_content.index("B-早"), ca_content.index("A-晚"))
         self.assertLess(cb_content.index("B-早"), cb_content.index("A-晚"))
 
@@ -454,9 +467,9 @@ class FullSyncTest(ClientSyncE2ETestBase):
 
 
 class FullSyncRecoveryTest(ClientSyncE2ETestBase):
-    """本地文件丢失但 state 游标未回退时，/sync 从云端版本 0 重建镜像。
+    """本地文件丢失时，完整同步从云端拉取今天全量并重建镜像。
 
-    full_sync 走 reconcile（version=0）完整对账，即使游标已到当前值也能拉回内容。
+    full_sync 走 reconcile（拉取今天全量）完整对账，即使本地令牌已是当前值也能拉回内容。
     """
 
     def test_full_sync_recovers_missing_local_day_file(self):
@@ -473,7 +486,7 @@ class FullSyncRecoveryTest(ClientSyncE2ETestBase):
             self.assertTrue(day_file.exists())
             self.assertIn("云端内容", day_file.read_text(encoding="utf-8"))
 
-            # 本地缓存丢失：删掉 day 文件，但 state 游标仍停留在当前版本
+            # 本地缓存丢失：删掉 day 文件，state.json 仍保留已见令牌
             day_file.unlink()
             client.full_sync()
             self.assertTrue(day_file.exists())
@@ -562,26 +575,26 @@ class ReportSyncTest(ClientSyncE2ETestBase):
     def test_client_refreshes_regenerated_report_to_newest(self):
         """同一时间段报告只保留最新生成：服务端重新生成（同路径、新内容）后客户端要覆盖旧副本。"""
         rel = "Weekly/2024-05-27_to_2024-06-02_auto.md"
-        samples = {rel: "# 周报（v1 旧内容）\n"}
+        samples = {rel: "# 周报（第一次生成）\n"}
         self.httpd.list_reports = lambda kind: [rel]
         self.httpd.read_report = lambda r: samples.get(r)
 
         root = _tmp_dir("cli-refresh-")
         client_a, pat = self._new_client(self.device_a, self.token_a, root)
         try:
-            # 第一次同步：拉取旧版本
+            # 第一次同步：拉取旧内容
             client_a.sync_reports()
             target = root / "AnalysisReports" / rel
             self.assertTrue(target.exists())
-            self.assertIn("v1 旧内容", target.read_text(encoding="utf-8"))
+            self.assertIn("第一次生成", target.read_text(encoding="utf-8"))
 
             # 服务端重新生成了同一时段报告，内容更新
-            samples[rel] = "# 周报（v2 最新）\n"
+            samples[rel] = "# 周报（重新生成）\n"
 
-            # 第二次同步：应刷新为最新版本，而不是跳过旧副本
+            # 第二次同步：应刷新为新内容，而不是跳过旧副本
             client_a.sync_reports()
-            self.assertIn("v2 最新", target.read_text(encoding="utf-8"))
-            self.assertNotIn("v1 旧内容", target.read_text(encoding="utf-8"))
+            self.assertIn("重新生成", target.read_text(encoding="utf-8"))
+            self.assertNotIn("第一次生成", target.read_text(encoding="utf-8"))
         finally:
             self._stop(pat)
 
@@ -915,7 +928,7 @@ class ExpiredOutboxTest(ClientSyncE2ETestBase):
 
             client.send_pending()
 
-            # 过期条目被作废：outbox 清空（不再重试）
+            # 过期条目被作废：outbox 清空（不重试）
             self.assertEqual(json.loads(outbox_path.read_text(encoding="utf-8"))["entries"], [])
             # 服务端无该条（双保险）
             self.assertEqual(self.store.data["entries"], {})

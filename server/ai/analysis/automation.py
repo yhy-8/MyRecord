@@ -42,8 +42,8 @@ _RETRY_INTERVAL_MINUTES = 30
 _RUNNING_STALE_SECONDS = 600
 
 # 时间基准固定 UTC+8（非配置项），与 store.today_utc8() 同源：自动任务的目标周期
-# （昨/上周/上月）必须以 UTC+8 自然日为准，否则在非 UTC+8 时区的服务器上与日界
-# 封存所依据的“今天”错位，会对错误的日期范围生成总结/报告。
+# （昨/上周/上月）必须以 UTC+8 自然日为准，否则在非 UTC+8 时区的服务器上会与
+# 按 UTC+8 推导的“今天”错位，对错误的日期范围生成总结/报告。
 _UTC8 = datetime.timezone(datetime.timedelta(hours=8))
 
 
@@ -145,7 +145,7 @@ def _default_task_target(task: str, now: datetime.datetime) -> dict[str, str]:
 def _purge_empty_placeholder_days() -> None:
     """删除数据目录下所有「空占位」日记文件（正文无任何记录标记 / **HH:MM** 头行）。
 
-    无记录日不再生成文件（见 §3.2），但这会清除历史部署遗留的空占位文件，使
+    无记录日不生成文件（见 §3.2）；同时在启动时清除数据目录里无记录的空占位文件，使
     ``_task_state`` 以「文件存在性」即可判定有无内容。仅删除无任何记录的文件
     （不含用户数据）：某日曾有记录又被全部删除时，正文含 tombstone 标记，不会被删除。
     """

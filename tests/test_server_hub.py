@@ -1,6 +1,6 @@
 """P1 服务端 hub 测试：鉴权、存储合并、tombstone、渲染、HTTP 同步。
 
-方案 B 语义：**唯一可写窗口 = “今天”（UTC+8 自然日）**。历史日只读、以整文件为准；
+**唯一可写窗口 = “今天”（UTC+8 自然日）**。历史日只读、以整文件为准；
 客户端只能推送 date == 今天的条目，服务端拒绝历史日（422）。
 """
 
@@ -59,7 +59,7 @@ class StoreTest(unittest.TestCase):
         self.assertEqual(accepted, ["a-1", "b-1"])
         self.assertEqual(rejected, [])
         self.assertEqual(len(store.data["entries"]), 2)
-        # 再次推送同一条不重复，但已被权威处理（已存在）→ 上报 accepted 供客户端清 outbox（不再无限重试）。
+        # 再次推送同一条不重复，但已被权威处理（已存在）→ 上报 accepted 供客户端清 outbox（不会无限重试）。
         accepted2, _ = store.append_entries("a", [entries[0]])
         self.assertEqual(accepted2, ["a-1"])
         self.assertEqual(len(store.data["entries"]), 2)
@@ -92,7 +92,7 @@ class StoreTest(unittest.TestCase):
         self.assertEqual(store.data["entries"], {})
 
     def test_pull_returns_full_today_regardless_of_token(self):
-        """游标已降级：pull 始终返回今天全量，客户端按 entry_id 幂等合并。"""
+        """令牌不筛选数据：pull 始终返回今天全量，客户端按 entry_id 幂等合并。"""
         data = _tmp_data_dir() / "state.json"
         store = Store(data)
         store.append_entries(
@@ -131,32 +131,17 @@ class StoreTest(unittest.TestCase):
         ok = store.tombstone("a-1", "a")
         self.assertTrue(ok)
         self.assertNotIn("a-1", store.data["entries"])
-        self.assertIn("a-1", store.data["trash"])
-        self.assertEqual(store.data["trash"]["a-1"]["text"], "secret")
         self.assertIn("a-1", store.data["tombstones"])
+        trash = (data.parent / "Records" / "trash.md").read_text(encoding="utf-8")
+        self.assertIn("myrecord-time:a-1", trash)
+        self.assertIn("secret", trash)
 
     def test_tombstone_rejects_history_date(self):
-        """历史日条目不可删（今天之外只读）；历史日条目态会被封存清理。"""
-        import json
-
+        """历史日条目不可删：tombstone 仅接受“今天”。"""
         data = _tmp_data_dir() / "state.json"
-        # 直接写一个含“历史日条目态”的 state，模拟进程重启后今日窗口未定
-        data.write_text(
-            json.dumps({
-                "version": 1,
-                "entries": {"old-1": {"entry_id": "old-1", "device_id": "a", "date": "2000-01-01", "ts": 1, "tag": "", "text": "old", "v": 1}},
-                "tombstones": {},
-                "trash": {},
-                "devices": {},
-            }),
-            encoding="utf-8",
-        )
-        # 传入 records_dir，让封存先渲染历史日文件再清理（否则无落盘目录时
-        # 封存会跳过清理，以“仅今天常驻 state”语义不再把历史日条目态清掉——那是数据丢失）。
+        # state.json 只保留鉴权，不含日记内容；条目态由「今天」文件解析。
         store = Store(data, data.parent / "Records")
-        # 历史日条目不可删（返回 False）
         self.assertFalse(store.tombstone("old-1", "a"))
-        # 首次访问触发封存：历史日条目态被移除（不再常驻 state，以整文件为准）
         self.assertNotIn("old-1", store.data["entries"])
 
     def test_tombstone_preserves_original_entry_ts(self):
@@ -346,7 +331,7 @@ class StoreMergeTest(unittest.TestCase):
         self.assertNotIn("待删除正文", records)
         self.assertIn("myrecord-tombstone", records)
 
-        # 单文件垃圾桶 Records/trash.md（不再按天分文件）
+        # 单文件垃圾桶 Records/trash.md（全部已删正文集中在一个文件）
         trash = (records_dir / "trash.md").read_text(encoding="utf-8")
         self.assertIn("待删除正文", trash)
         self.assertNotIn("保留正文", trash)
@@ -587,7 +572,6 @@ class StoreDeleteTest(unittest.TestCase):
         self.assertEqual(rejected, [])
         self.assertNotIn("a-1", store.data["entries"])
         self.assertIn("a-1", store.data["tombstones"])
-        self.assertEqual(store.data["trash"]["a-1"]["text"], "将被删")
         trash = (data.parent / "Records" / "trash.md").read_text(encoding="utf-8")
         self.assertIn("将被删", trash)
 
@@ -601,7 +585,8 @@ class StoreDeleteTest(unittest.TestCase):
         )
         self.assertEqual(accepted, ["ghost-1"])
         self.assertIn("ghost-1", store.data["tombstones"])
-        self.assertEqual(store.data["trash"]["ghost-1"]["text"], "幽灵")
+        trash = (data.parent / "Records" / "trash.md").read_text(encoding="utf-8")
+        self.assertIn("幽灵", trash)
 
     def test_apply_deletes_rejects_history_date(self):
         data = _tmp_data_dir() / "state.json"
@@ -797,6 +782,14 @@ class ServerHttpTest(unittest.TestCase):
             requests.get(f"{self.base}/api/sync/pull?version=0", headers=bad)
         locked = requests.get(f"{self.base}/api/sync/pull?version=0", headers=self.headers)
         self.assertEqual(locked.status_code, 401)
+
+    def test_failed_token_lockout_is_keyed_by_ip(self):
+        # 失败计数按来源 IP，不按客户端可伪造的 device_id：换一个设备名也照样被锁。
+        bad = {"Authorization": "Bearer nope", "X-Device-Id": "attacker"}
+        for _ in range(5):
+            requests.get(f"{self.base}/api/sync/pull", headers=bad)
+        other = {"Authorization": f"Bearer {self.token}", "X-Device-Id": "another-device"}
+        self.assertEqual(requests.get(f"{self.base}/api/sync/pull", headers=other).status_code, 401)
 
 
 class RecordsEndpointTest(unittest.TestCase):

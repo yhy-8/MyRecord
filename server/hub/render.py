@@ -214,17 +214,6 @@ def parse_day(content: str, date: str) -> tuple[str, list[dict], list[dict]]:
     return header, entries, tombstones
 
 
-def parse_trash(content: str) -> list[dict]:
-    """解析单文件垃圾桶 ``trash.md``：返回条目块列表（非条目块跳过）。"""
-    _header, blocks = split_day_blocks(content, "")
-    result = []
-    for _sort_ts, _entry_id, block_text in blocks:
-        parsed = parse_entry_block(block_text, "")
-        if parsed is not None:
-            result.append(parsed)
-    return result
-
-
 # 记录头行正则：供 AI 分析链路按天读取记录正文（见 ai/analysis/context.py）。
 RECORD_PATTERN = re.compile(
     r"^\*\*(\d{2}:\d{2})(?: ([^\n]*?))?:\*\*\s?(.*?)"

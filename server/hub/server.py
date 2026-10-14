@@ -21,6 +21,7 @@ import logging
 import re
 import ssl
 import sys
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
@@ -67,18 +68,24 @@ def _auth_ok(handler) -> bool:
     if not device_id:
         logger.warning("auth_missing_device addr=%s", _client_addr(handler))
         return False
+    # 爆破防护按**来源 IP** 计数（不按客户端自报的 device_id，后者可任意伪造）。
+    addr = _client_addr(handler)
     failures = handler.server.failures
+    lock = handler.server.failures_lock
     now = time.time()
-    if device_id in failures and failures[device_id][1] > now:
-        logger.warning("auth_locked_out device=%s addr=%s", device_id, _client_addr(handler))
-        return False  # 失败锁定中
+    with lock:
+        if addr in failures and failures[addr][1] > now:
+            logger.warning("auth_locked_out addr=%s device=%s", addr, device_id)
+            return False  # 失败锁定中
     ok = store.verify_device(device_id, m.group(1))
-    if ok:
-        failures.pop(device_id, None)
-    else:
-        count, _ = failures.get(device_id, (0, 0))
-        failures[device_id] = (count + 1, now + 60 if count + 1 >= _LOCKOUT_THRESHOLD else 0)
-        logger.warning("auth_failed device=%s addr=%s", device_id, _client_addr(handler))
+    with lock:
+        if ok:
+            failures.pop(addr, None)
+        else:
+            count, _ = failures.get(addr, (0, 0))
+            failures[addr] = (count + 1, now + 60 if count + 1 >= _LOCKOUT_THRESHOLD else 0)
+    if not ok:
+        logger.warning("auth_failed addr=%s device=%s", addr, device_id)
     return ok
 
 
@@ -138,7 +145,7 @@ class SyncHandler(BaseHTTPRequestHandler):
 
     def setup(self):
         # 延迟 TLS 握手到工作线程执行：serve() 用 do_handshake_on_connect=False 包裹
-        # 监听 socket，accept 返回后不再做握手。否则任一客户端只建 TCP 不握手（睡眠、
+        # 监听 socket，accept 返回后由工作线程做握手。否则任一客户端只建 TCP 不握手（睡眠、
         # 掉线、NAT 超时、端口扫描）都会把 accept 主循环卡死，整个服务端假死到重启。
         if getattr(self.server, "tls_deferred", False):
             self.request.settimeout(_TLS_HANDSHAKE_TIMEOUT)
@@ -286,8 +293,8 @@ class SyncHandler(BaseHTTPRequestHandler):
 
     @_authed
     def _status(self):
-        # 计数以「今天」的 Records 文件为准（而非 state.json 内存副本）：用户直接编辑
-        # 日记文件后，/status 立即反映文件真实内容，不会因 state 与文件不一致而失真。
+        # 计数以「今天」的 Records 文件为准（而非 state.json 内存副本）：文件即权威，
+        # 计数直接反映今天文件的真实内容。
         entry_count, tombstone_count = self.server.store.today_file_counts()
         logger.info(
             "status_request device=%s entries=%d tombstones=%d",
@@ -474,4 +481,5 @@ def serve(
     server.admin_set_model = admin_set_model
     server.status_ai = status_ai or (lambda: {})
     server.failures = {}
+    server.failures_lock = threading.Lock()
     return server

@@ -2,8 +2,8 @@
 
 - 「今天」的条目/墓碑以 ``Records/<今天>.md`` 整文件为准。服务端不另存一份权威
   副本：所有写操作（新增 / 删除）都在跨进程 ``.journal.lock`` + 内存锁下
-  「读文件 → 按 entry_id 合并 → 原子写回」，因此手工编辑、进程重启、``state.json``
-  丢失都不会丢内容。
+  「读文件 → 按 entry_id 合并 → 原子写回」，因此进程重启、``state.json`` 丢失都
+  不会丢文件里的内容。
 - ``Records/trash.md``：单文件垃圾桶（全部已删正文），同样以文件为准。
 - ``state.json``：**只保留鉴权设备令牌**，可随时删除；日记内容全部可由 ``Records/``
   重建（鉴权除外）。
@@ -148,18 +148,12 @@ class Store:
         atomic_write(path, header + "".join(block[2] for block in ordered))
 
     def _refresh_cache(self) -> None:
-        """从今天文件 + trash.md 重建内存缓存（state.json 只存鉴权）。"""
+        """从今天文件重建内存缓存（state.json 只存鉴权）。"""
         today = today_utc8()
         _header, entries, tombstones = render.parse_day(self._read_today(), today)
-        try:
-            trash_content = (self.records_dir / "trash.md").read_text(encoding="utf-8")
-        except (OSError, UnicodeError):
-            trash_content = ""
-        trash = render.parse_trash(trash_content)
         with self._lock:
             self.data["entries"] = {e["entry_id"]: e for e in entries}
             self.data["tombstones"] = {t["entry_id"]: t for t in tombstones}
-            self.data["trash"] = {e["entry_id"]: e for e in trash}
 
     def _append_trash(self, bodies: list[dict]) -> None:
         """把若干被删正文并入单文件垃圾桶 ``Records/trash.md``（按时间戳排序、按 id 去重）。"""
@@ -446,7 +440,7 @@ class Store:
     def today_state(self) -> dict:
         """当前「今天」的权威全量：全部条目 + 全部墓碑（按时间有序）+ 变更令牌。
 
-        直接解析今天文件，因此手工编辑也会反映到状态与扇出里。
+        直接解析今天文件，状态与扇出均以文件内容为准。
         """
         today = today_utc8()
         with self._lock:

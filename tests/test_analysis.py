@@ -65,7 +65,7 @@ class AnalysisWorkflowTests(unittest.TestCase):
                 json.dumps(
                     {
                         "summary": (
-                            "## 本周回顾\n- 完成记录模块重构。[1]\n\n"
+                            "## 本周回顾\n- 完成记录模块开发。[1]\n\n"
                             "## 遇到的问题\n- 修复同步丢帧。[2]"
                         ),
                         "references": [
@@ -86,7 +86,7 @@ class AnalysisWorkflowTests(unittest.TestCase):
                     }
                 },
             )
-        raise AssertionError("不再存在其他 Agent：reviewer / retrospective 已取消")
+        raise AssertionError("本流程只调用 report Agent：reviewer / retrospective 等其它 Agent 均不参与")
 
     def write_diary(self, date: str):
         path = settings.DIARY_DIR / f"{date}.md"
@@ -261,9 +261,9 @@ class AnalysisWorkflowTests(unittest.TestCase):
         )
         self.assertIn("[20260714]", report_prompt)  # 按天分块，块首 [YYYYMMDD]
         self.assertIn("10:", report_prompt)         # 块内每行 行号: 内容
-        self.assertNotIn("\"n\": 1", report_prompt)  # 不再用 JSON 记录列表，改文本块
+        self.assertNotIn("\"n\": 1", report_prompt)  # 记录以文本块呈现，不用 JSON 记录列表
         content = path.read_text(encoding="utf-8")
-        self.assertNotIn("记录依据", content)        # 不再有旧页脚
+        self.assertNotIn("记录依据", content)        # 不含页脚
         self.assertIn("R-20260714", content)        # 报告含中控生成的来源表
 
     def test_weekly_report_without_records_fails_cleanly(self):
@@ -308,7 +308,7 @@ class AnalysisWorkflowTests(unittest.TestCase):
         report_prompt = next(
             p for p in self.ai_calls if "[程序 Agent 任务:report]" in p
         )
-        self.assertNotIn("周报", report_prompt)  # 月报不再复用旧周报板块
+        self.assertNotIn("周报", report_prompt)  # 月报不含周报板块
         self.assertIn("分析月报", path.read_text(encoding="utf-8"))
 
     def test_report_has_no_reviewer_or_revision_loop(self):

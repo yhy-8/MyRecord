@@ -192,7 +192,7 @@ class RealAIIntegrationTests(unittest.TestCase):
         for key in ("生成时间", "使用模型", "生成耗时", "Token 用量",
                     "原始日记范围", "分析运行"):
             self.assertIn(key, content)
-        # 报告不读取自己的旧版块（纯原始记录流）
+        # 报告不读取历史报告块（纯原始记录流）
         self.assertIn("分析月报", content)
 
 

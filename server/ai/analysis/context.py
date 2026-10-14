@@ -76,7 +76,7 @@ _RECORD_PATTERN = _format.RECORD_PATTERN  # 单一来源：见 server/hub/render
 def _period_records(logs: list[tuple[str, str]]) -> list[dict]:
     """解析时间范围内的完整原始记录流。
 
-    每条记录自带：date / time / tag / speaker / text，以及 **line**（该记录在所属日期文件中的
+    每条记录自带：date / time / tag / text，以及 **line**（该记录在所属日期文件中的
     1-based 行号，定位到其可视头部行 `**HH:MM:**`）和稳定 ID `source_id=R-YYYYMMDD-行号`。
     """
     records = []
@@ -92,7 +92,6 @@ def _period_records(logs: list[tuple[str, str]]) -> list[dict]:
             if any(s <= match.start() < e for (s, e) in summary_spans):
                 continue
             tag = (match.group(2) or "").strip()
-            speaker = "quoted_ai" if "[AI回复]" in tag else "user"
             text = match.group(3).strip()
             # 还原被转义的技术标记行为普通标记（仅当记录文本确以该标记占一行时）。
             text = re.sub(
@@ -109,7 +108,6 @@ def _period_records(logs: list[tuple[str, str]]) -> list[dict]:
                     "time": match.group(1),
                     "line": line,
                     "tag": tag,
-                    "speaker": speaker,
                     "text": text,
                 }
             )

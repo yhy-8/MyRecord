@@ -37,7 +37,6 @@ class TerminalSafeInputUnixTests(unittest.TestCase):
         if pid == 0:  # 子进程：在伪终端里调用真实 safe_input
             try:
                 # 先进入 raw，避免父进程在 canonical 期写入被行规程吞掉
-                import termios
                 import tty
 
                 tty.setraw(0)

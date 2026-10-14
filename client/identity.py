@@ -2,7 +2,8 @@
 
 credentials.json 保存服务端签发的**链接凭证 token**（不入中枢、不入数据空间）。
 凭证不绑定设备：只要持有有效 token，任何客户端都能链接服务端同步。设备身份由
-客户端自报本机名（device_name）区分，每条记录都会带上这个设备名。
+客户端自报（默认本机名，可用 ``/name`` 自定义并持久化到 config.yaml）区分，每条记录
+都会带上这个设备名。
 
 entry_id 就是**写入的毫秒级时间戳字符串**（epoch ms）：`entry_id == str(ts)`。
 去重、删除、排序都直接按时间戳比对：同一毫秒即同一条记录。时间戳本身不含时区
@@ -10,11 +11,18 @@ entry_id 就是**写入的毫秒级时间戳字符串**（epoch ms）：`entry_i
 """
 
 import json
+import re
 import socket
 import sys
 from pathlib import Path
 
+from . import config
 from .atomic_write import atomic_write
+
+
+# 设备名会作为 HTTP 头 X-Device-Id 发送，必须是可编码为 latin-1 的单行 ASCII；
+# 同时会渲染进日记的 `[设备名]` 标签，故只允许字母/数字/空格/._-。
+_DEVICE_NAME_RE = re.compile(r"^[0-9A-Za-z._ -]{1,64}$")
 
 
 def credentials_path() -> Path:
@@ -37,9 +45,17 @@ def _hostname() -> str:
     return (name or "").strip() or "device"
 
 
+def normalize_device_name(value: str) -> str | None:
+    """把用户输入规范成合法设备名；不合法（含非 ASCII / 控制字符 / 过长）返回 None。"""
+    name = (value or "").strip()
+    return name if _DEVICE_NAME_RE.fullmatch(name) else None
+
+
 def device_name() -> str:
-    """设备名：直接用本机名（不允许在配置里自定义，保持各端自报本机名）。"""
-    return _hostname()
+    """设备名：优先用 ``/name`` 自定义并持久化在 config.yaml 的名字，否则用本机名。"""
+    custom = config.load()["client"].get("device_name")
+    name = str(custom).strip() if custom else ""
+    return name or _hostname()
 
 
 def load() -> dict:

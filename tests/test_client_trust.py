@@ -139,7 +139,7 @@ class TrustFlowTests(unittest.TestCase):
         )
 
     def test_http_url_rejected_even_with_pinned_cert(self):
-        # 客户端强制加密：已有固定证书也不允许明文 http 降级。
+        # 客户端强制加密：已有固定证书也不允许明文 http 传输。
         self.cert.write_text(self.pem_a, encoding="utf-8")
         self._write_config('client:\n  verify: "./server.crt"\n')
         with patch.object(trust, "fetch_peer_pem") as fetch:
@@ -168,6 +168,16 @@ class TrustFlowTests(unittest.TestCase):
         self.assertIn('client:\n  verify: "./server.crt"\n', text)
         self.assertNotIn("foo: bar\n  verify:", text)
 
+    def test_set_device_name_persists_and_preserves_other_keys(self):
+        self._write_config('client:\n  server_url: "https://x"\n  verify: ""  # keep\n')
+        client_config.set_device_name("MyLaptop")
+        text = self.config_path.read_text(encoding="utf-8")
+        self.assertIn('device_name: "MyLaptop"', text)
+        self.assertIn('verify: ""  # keep', text)
+        self.assertEqual(
+            "MyLaptop", client_config.load()["client"]["device_name"]
+        )
+
     def test_sync_client_mounts_pinned_adapter_when_verify_set(self):
         self.cert.write_text(self.pem_a, encoding="utf-8")
         with patch.object(
@@ -187,7 +197,7 @@ class TrustFlowTests(unittest.TestCase):
         disable.assert_called_once()
 
     def test_sync_client_uses_pinned_cert_fallback_when_verify_empty(self):
-        """verify 被清空但 client/server.crt 仍在时，仍应固定校验而非静默降级。"""
+        """verify 被清空但 client/server.crt 仍在时，仍应固定校验，不会变成不校验。"""
         self.cert.write_text(self.pem_a, encoding="utf-8")
         with patch.object(
             client_config, "load", return_value={"client": {"verify": ""}}

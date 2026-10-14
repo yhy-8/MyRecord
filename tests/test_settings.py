@@ -118,7 +118,7 @@ class ModelSettingsTests(unittest.TestCase):
         self.assertEqual(5, policy["weekly_report_retry_limit"])
         self.assertEqual(2, policy["daily_summary_retry_limit"])
         self.assertEqual(2, policy["monthly_report_retry_limit"])
-        # 不再有请求层重试参数
+        # 没有请求层重试参数
         self.assertNotIn("empty_response_retry_limit", policy)
         self.assertNotIn("transient_http_retry_limit", policy)
         self.assertNotIn("transient_http_backoff_seconds", policy)

@@ -122,6 +122,14 @@ class HeadersValidationTests(SyncClientEdgeBase):
     def test_ascii_token_ok(self):
         self.assertEqual("Bearer tok", self.client._headers()["Authorization"])
 
+    def test_non_ascii_device_name_raises_sync_error_not_crash(self):
+        # 本机名可能是中文，此时 X-Device-Id 同样会让 requests 抛 UnicodeEncodeError；
+        # 应提前转成可读的 SyncError，提示用 /name 设置半角设备名。
+        with patch.object(client_identity, "device_name", return_value="我的电脑"):
+            with self.assertRaises(SyncError) as ctx:
+                self.client._headers()
+        self.assertIn("/name", str(ctx.exception))
+
 
 class ProbeTests(SyncClientEdgeBase):
     @patch("client.sync.requests.Session.get", return_value=_Resp(503))

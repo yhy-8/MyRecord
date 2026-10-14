@@ -13,6 +13,7 @@ _DEFAULTS = {
     "records_dir": "../Records",
     "analysis_dir": "../AnalysisReports",
     "verify": "",
+    "device_name": "",
 }
 
 
@@ -58,32 +59,44 @@ def load() -> dict:
     return {"client": merged}
 
 
-_VERIFY_LINE = re.compile(r"(?m)^(\s*verify:\s*)(.*?)(\s*#.*)?$")
 _CLIENT_SECTION = re.compile(r"(?m)^client:[ \t]*(?:#.*)?$")
 
 
-def set_verify(value: str) -> None:
-    """把 config.yaml 的 ``client.verify`` 设为 ``value``（尽量保留原有注释）。
+def _set_client_scalar(key: str, value: str) -> None:
+    """把 config.yaml 的 ``client.<key>`` 设为 ``value``（尽量保留原有注释）。
 
-    供客户端 TOFU 固定证书后自动指向 ``client/server.crt`` 使用。文件不存在时按当前
-    生效配置新建一个最小 config.yaml。
+    文件不存在时按当前生效配置新建一个最小 config.yaml。无该行时插到 ``client:``
+    段首，避免追加到文件末尾落到别的顶层段下。
     """
     path = config_path()
     quoted = f'"{value}"'
     if path.exists():
         text = path.read_text(encoding="utf-8")
-        new_text, count = _VERIFY_LINE.subn(
+        line = re.compile(rf"(?m)^(\s*{re.escape(key)}:\s*)(.*?)(\s*#.*)?$")
+        new_text, count = line.subn(
             lambda match: f"{match.group(1)}{quoted}{match.group(3) or ''}", text, count=1
         )
         if count == 0:
-            # 无 verify 行时插到 client: 段首，避免追加到文件末尾落到别的顶层段下。
             section = _CLIENT_SECTION.search(text)
             if section:
                 at = section.end()
-                new_text = text[:at] + f"\n  verify: {quoted}" + text[at:]
+                new_text = text[:at] + f"\n  {key}: {quoted}" + text[at:]
             else:
-                new_text = text.rstrip("\n") + f"\nclient:\n  verify: {quoted}\n"
+                new_text = text.rstrip("\n") + f"\nclient:\n  {key}: {quoted}\n"
         atomic_write(path, new_text)
         return
     server_url = load()["client"]["server_url"]
-    atomic_write(path, f'client:\n  server_url: "{server_url}"\n  verify: {quoted}\n')
+    atomic_write(path, f'client:\n  server_url: "{server_url}"\n  {key}: {quoted}\n')
+
+
+def set_verify(value: str) -> None:
+    """把 config.yaml 的 ``client.verify`` 设为 ``value``。
+
+    供客户端 TOFU 固定证书后自动指向 ``client/server.crt`` 使用。
+    """
+    _set_client_scalar("verify", value)
+
+
+def set_device_name(value: str) -> None:
+    """把 config.yaml 的 ``client.device_name`` 设为 ``value``（空串=回到本机名）。"""
+    _set_client_scalar("device_name", value)

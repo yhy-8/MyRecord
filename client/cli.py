@@ -1,4 +1,4 @@
-"""交互入口（统一单模式，共 /v /c /h /d /status /retry /model 七个命令）。
+"""交互入口（统一单模式，共 /v /c /h /d /name /status /retry /model 八个命令）。
 
 同步规范：客户端不密集轮询云端，**同步是全自动、无感知的**。运行期间后台两个线程：
 接收线程保持长连接（长轮询挂起，扇出即拉取）+ 断线自动重连完整对账；推送线程把本地
@@ -16,7 +16,7 @@ import time
 from rich.console import Console
 from rich.panel import Panel
 
-from . import identity, journal
+from . import config, identity, journal
 from .sync import SyncClient, SyncError
 from .terminal import safe_input
 
@@ -40,6 +40,7 @@ def _help_text() -> str:
         "/c            清屏\n"
         "/h            帮助\n"
         "/d            删除本地当天最新一条（离线可用，正文入垃圾桶，联网后自动同步）\n"
+        "/name [名字]  查看/设置设备名（自定义并永久保存；不填则显示当前名字）\n"
         "/status       查看服务端 AI 自动任务状态\n"
         "/retry        直接重试全部失败的服务端自动任务（顺序无关）\n"
         "/model        永久切换服务端 AI 模型\n"
@@ -152,6 +153,7 @@ def _handle_command(client: SyncClient, text: str) -> None:
         "/v": lambda: show_day(arg),
         "/d": lambda: _handle_delete(client),
         "/status": lambda: _handle_status(client),
+        "/name": lambda: _handle_name(arg),
         "/retry": lambda: _handle_retry(client),
         "/model": lambda: _handle_model(client),
     }
@@ -225,6 +227,24 @@ def _handle_status(client: SyncClient) -> None:
     if ai.get("current_model"):
         console.print(f"AI 模型: {ai['current_model']}")
     _print_automation_status(status.get("automation") or {})
+
+
+def _handle_name(arg: str) -> None:
+    """查看/设置设备名：写入 config.yaml 的 client.device_name（空=回到本机名）。"""
+    console = Console()
+    if not arg:
+        console.print(f"当前设备名：{identity.device_name()}")
+        console.print("用法：/name 新名字（1-64 个半角字符：字母/数字/空格/._-）")
+        return
+    name = identity.normalize_device_name(arg)
+    if name is None:
+        console.print(
+            "[yellow][!][/yellow] 名字不合法：仅限 1-64 个半角字符"
+            "（字母/数字/空格/._-），且不能为空。"
+        )
+        return
+    config.set_device_name(name)
+    console.print(f"[cyan][*][/cyan] 设备名已设为 {name}（已永久保存，重启后仍生效）。")
 
 
 def _handle_delete(client: SyncClient) -> None:

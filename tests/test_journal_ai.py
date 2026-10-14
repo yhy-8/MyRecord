@@ -178,7 +178,7 @@ class JournalAITests(unittest.TestCase):
 
     @patch("server.ai.ai_client.requests.post")
     def test_empty_stop_response_is_a_single_request_failure(self, post):
-        # 单次请求：模型只思考未给最终正文（空正文）直接判失败，不再引导重试。
+        # 单次请求：模型只思考未给最终正文（空正文）直接判失败，不引导重试。
         post.return_value = FakeResponse(
             {
                 "choices": [

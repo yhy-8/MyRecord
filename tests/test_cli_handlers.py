@@ -10,9 +10,7 @@
 """
 
 import datetime
-import tempfile
 import unittest
-from pathlib import Path
 from unittest.mock import Mock, patch
 
 from client import cli as cli_app
@@ -243,7 +241,6 @@ class WriteRecordExpiredTests(unittest.TestCase):
              patch.object(cli_app, "identity") as identity, \
              patch.object(cli_app, "datetime") as dt:
             # 构造一个锚定到今天，但 entry 日期算出来是“昨天”的情形
-            today = datetime.date.fromisoformat(_TODAY)
             dt.datetime.now.return_value.timestamp.return_value = 0
             dt.datetime.now.timestamp.return_value = 0
             identity.make_entry_id.return_value = "e-1"
@@ -287,6 +284,37 @@ class ReportStartupStatusTests(unittest.TestCase):
         self.assertIn("无法连接服务端", out)
         self.assertIn("连接被拒绝或网络不可达", out)
         self.assertIn("仅本地记录", out)
+
+
+class HandleNameTests(unittest.TestCase):
+    """`/name`：查看/设置设备名（自定义并持久化到 config.yaml）。"""
+
+    def setUp(self):
+        FakeConsole.printed = []
+        self._patch = patch.object(cli_app, "Console", FakeConsole)
+        self._patch.start()
+
+    def tearDown(self):
+        self._patch.stop()
+
+    def test_shows_current_name_without_arg(self):
+        with patch.object(cli_app.identity, "device_name", return_value="MK8"):
+            cli_app._handle_name("")
+        out = "\n".join(FakeConsole.printed)
+        self.assertIn("当前设备名：MK8", out)
+        self.assertIn("用法", out)
+
+    def test_sets_valid_name(self):
+        with patch.object(cli_app.config, "set_device_name") as setter:
+            cli_app._handle_name("MyLaptop")
+        setter.assert_called_once_with("MyLaptop")
+        self.assertIn("已永久保存", "\n".join(FakeConsole.printed))
+
+    def test_rejects_non_ascii_name(self):
+        with patch.object(cli_app.config, "set_device_name") as setter:
+            cli_app._handle_name("我的电脑")
+        setter.assert_not_called()
+        self.assertIn("名字不合法", "\n".join(FakeConsole.printed))
 
 
 class ResolveDateMMDDTests(unittest.TestCase):

@@ -161,7 +161,7 @@ class ServerMainDeployTests(unittest.TestCase):
 
     def test_deploy_installs_server_and_starts_it_without_enable(self):
         # 一键部署：自动建 venv + 装依赖，服务用 venv 的 python；只启动主服务、不 enable 开机自启。
-        # 备份由服务端内置调度触发，不再写入独立的备份单元/定时器。
+        # 备份由服务端内置调度触发，不安装独立的备份单元/定时器。
         server_unit = self.root / "systemd" / "myrecord-server.service"
         backup_unit = self.root / "systemd" / "myrecord-backup.service"
         timer_unit = self.root / "systemd" / "myrecord-backup.timer"
@@ -193,7 +193,7 @@ class ServerMainDeployTests(unittest.TestCase):
             "ExecStart=/srv/myrecord/server/.venv/bin/python -m server.main run",
             server_unit.read_text(encoding="utf-8"),
         )
-        # 不再生成独立的备份单元/定时器。
+        # 不生成独立的备份单元/定时器。
         self.assertFalse(backup_unit.exists())
         self.assertFalse(timer_unit.exists())
 
@@ -415,7 +415,7 @@ class ServerMainRenderImportTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_import_records_copies_files_whole(self):
-        """方案 B：import 是**整文件拷贝**，不解析成条目、不重排（旧格式原样保留）。"""
+        """import 是**整文件拷贝**，不解析成条目、不重排（旧格式原样保留）。"""
         src = self.root / "records-import"
         src.mkdir()
         legacy_content = (
@@ -468,7 +468,7 @@ class ServerMainRenderImportTests(unittest.TestCase):
 
 
 class ServerMainReportTests(unittest.TestCase):
-    """手动生成周报/月报：与自动任务同一流程、同一路径（补足原先缺手动入口）。"""
+    """手动生成周报/月报：与自动任务同一流程、同一路径。"""
 
     def test_report_rejects_invalid_date(self):
         with patch("sys.stderr", io.StringIO()):

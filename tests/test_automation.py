@@ -278,7 +278,7 @@ class RunAndRetryTests(AutomationBase):
         self.assertEqual(1, record["attempts"])
         retry_at = datetime.datetime.fromisoformat(record["next_retry_at"])
 
-        # 未到重试时间（30 分钟内）不再生成
+        # 未到重试时间（30 分钟内）不生成
         self._set_now(retry_at - datetime.timedelta(minutes=5))
         with patch.object(
             automation, "_run_generation", side_effect=AssertionError("不应生成")

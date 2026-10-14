@@ -137,7 +137,7 @@ def _format_date(text: str) -> str:
 
 
 def _decode(pem: str) -> dict:
-    """用标准库解析 PEM 证书字段；失败则降级为空字典（仅影响展示，不影响指纹）。"""
+    """用标准库解析 PEM 证书字段；失败则回退为空字典（仅影响展示，不影响指纹）。"""
     tmp = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -146,7 +146,7 @@ def _decode(pem: str) -> dict:
             handle.write(pem)
             tmp = handle.name
         # ssl 未提供公开的「解析 PEM 为字段」接口，_test_decode_cert 是 CPython 长期稳定
-        # 的私有实现；即便失效也只降级为不展示字段，指纹仍可用。
+        # 的私有实现；即便失效也只退化为不展示字段，指纹仍可用。
         return ssl._ssl._test_decode_cert(tmp)
     except Exception:
         return {}
@@ -193,7 +193,7 @@ def pinned_cert() -> Path | None:
 
     优先取 config.yaml 的 `verify`（指向的证书），其次回退到 `client/server.crt`；
     都没有则返回 None。回退保证即使 `verify` 被清空，只要已固定过证书仍会严格校验，
-    不会静默降级为不校验。
+    不会静默变成不校验。
     """
     verify = config.load()["client"].get("verify")
     if verify:
@@ -218,7 +218,7 @@ def ensure_trusted(server_url: str, *, input_func=input) -> bool:
     - 本地有固定证书但不一致：展示新旧两证书，用户确认后覆盖；拒绝则退出。
     网络不可达时：已有固定证书则沿用（后台自动重连）；没有则无法建立信任，返回 False。
 
-    地址非 https（或非法）一律返回 False：客户端强制加密，绝不因已有固定证书而降级明文。
+    地址非 https（或非法）一律返回 False：客户端强制加密，绝不因已有固定证书而允许明文传输。
     """
     try:
         _parse_server_url(server_url)

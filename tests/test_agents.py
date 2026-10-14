@@ -13,7 +13,7 @@ from server.ai.ai_client import AIResponse
 
 class AgentModuleTests(unittest.TestCase):
     def test_agents_have_only_the_single_report_agent(self):
-        # 已取消 retrospective / reviewer：现在只有单个 Report Agent。
+        # 本流程只有单个 Report Agent：retrospective / reviewer 不参与。
         self.assertEqual({"report"}, set(AGENTS))
         self.assertTrue(AGENTS["report"].can_read_raw)
 
@@ -33,7 +33,7 @@ class AgentModuleTests(unittest.TestCase):
         def fake_call(prompt, model, **kwargs):
             calls.append(kwargs)
             return AIResponse(
-                "## 本周回顾\n- 完成记录模块重构。[1]", True
+                "## 本周回顾\n- 完成记录模块开发。[1]", True
             )
 
         body, _ = invoke_agent(
@@ -44,7 +44,7 @@ class AgentModuleTests(unittest.TestCase):
             fake_call,
         )
 
-        self.assertEqual("## 本周回顾\n- 完成记录模块重构。[1]", body)
+        self.assertEqual("## 本周回顾\n- 完成记录模块开发。[1]", body)
         self.assertEqual(
             [{"structured_output": False, "thinking": True, "max_tokens": 65536}],
             calls,

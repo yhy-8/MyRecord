@@ -1,10 +1,8 @@
 """服务端 TLS 直连的健壮性：半开连接不得卡死 accept 主循环。
 
-回归背景：serve() 曾把监听 socket 用 SSLContext.wrap_socket 包裹且默认
-do_handshake_on_connect=True，SSLSocket.accept() 会在 **accept 主循环线程**里完成
-TLS 握手。任一客户端只建 TCP 不握手（睡眠/掉线/NAT 超时/端口扫描）就会把主循环
-卡死，服务端对新连接表现为“无法连接”，直到进程重启。修复后握手延迟到工作线程，
-并有超时兜底。
+serve() 用 SSLContext.wrap_socket 包裹监听 socket，并把握手（do_handshake_on_connect=False）
+延迟到工作线程完成。否则任一客户端只建 TCP 不握手（睡眠/掉线/NAT 超时/端口扫描）就会把
+accept 主循环卡死，服务端对新连接表现为“无法连接”。本模块验证工作线程限时握手不会阻塞主循环。
 """
 
 import socket

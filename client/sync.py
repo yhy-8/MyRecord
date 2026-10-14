@@ -139,9 +139,16 @@ class SyncClient:
                 "凭据 token 含非 ASCII 字符，请检查 credentials.json："
                 "token 应为服务端签发的随机字符串（见 credentials.example.json）。"
             )
+        device = identity.device_name()
+        # 同上：X-Device-Id 也必须是 latin-1 可编码的；本机名可能是中文，先用 /name 设一个半角设备名。
+        if not device.isascii():
+            raise SyncError(
+                f"设备名「{device}」含非 ASCII 字符，无法作为 HTTP 头发送；"
+                "请用 /name 设置一个半角设备名（字母/数字/空格/._-）。"
+            )
         return {
             "Authorization": f"Bearer {token}",
-            "X-Device-Id": identity.device_name(),
+            "X-Device-Id": device,
         }
 
     def _request(self, method: str, path: str, *, json_body=None, timeout: float = 30.0):
@@ -222,7 +229,7 @@ class SyncClient:
         tombstones = delta.get("tombstones", []) or []
         with file_lock(_state_path()):
             # 本地“今天”文件也是权威：只补齐缺失条目、按墓碑移除，绝不整文件重写
-            # （与服务端“文件是权威”一致；手工编辑不会被远端覆盖）。
+            # （与服务端“文件是权威”一致；对账不覆盖本地已有内容）。
             journal.apply_delta(entries, tombstones)
             _save_state(str(delta.get("token", _read_state())))
 
@@ -369,7 +376,7 @@ class SyncClient:
 
         用于客户端启动链接云端、以及后台重连自动对账。拉取今天全量（不受令牌影响）
         并只补齐本地缺失、按墓碑移除，而非依赖令牌/游标——避免「本地文件丢失」
-        时拉不到内容，也避免覆盖本地已有（可能手工编辑过的）内容。
+        时拉不到内容，也避免覆盖本地已有内容。
         """
         self.send_pending()
         self.reconcile()

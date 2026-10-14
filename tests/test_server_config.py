@@ -99,7 +99,7 @@ class ServerConfigTests(unittest.TestCase):
         )
 
     def test_load_ignores_tls_paths_in_config(self):
-        """config.yaml 不再配置证书路径：无论写什么，一律由 data_dir 推导缺省 TLS 位置。"""
+        """config.yaml 不配置证书路径：无论写什么，一律由 data_dir 推导缺省 TLS 位置。"""
         config_file = self.root / "config.yaml"
         config_file.write_text(
             "server:\n  data_dir: ./data\n  tls:\n    certfile: /custom/cert.crt\n    keyfile: /custom/key.key\n",

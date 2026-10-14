@@ -9,7 +9,6 @@ Agent 返回**纯 JSON 对象**：`summary`（含 `[n]` 引用编号的报告正
 """
 
 import json
-import re
 from dataclasses import dataclass
 from typing import Callable
 
